@@ -1,0 +1,33 @@
+name: Design proposal
+description: Propose a subsystem, compatibility rule, or architecture decision.
+title: "[Design]: "
+labels: ["design", "needs-adr"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the proposed design and alternatives.
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Tradeoffs
+      description: What gets simpler, harder, faster, slower, or less compatible?
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation impact
+      description: Which docs or ADRs should change?
+    validations:
+      required: false

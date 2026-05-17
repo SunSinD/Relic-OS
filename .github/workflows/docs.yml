@@ -1,0 +1,38 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+jobs:
+  structure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify documentation structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f README.md
+          test -f docs/README.md
+          test -f docs/00-project-charter.md
+          test -f docs/04-architecture-overview.md
+          test -f roadmap/README.md
+          test -d docs/adr
+          test -d specs
+          test -d src
+          test -d tests
+          test -d tools
+
+      - name: Check markdown filenames
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad_files="$(find . -name '* *.md' -print)"
+          if [ -n "$bad_files" ]; then
+            echo "$bad_files"
+            exit 1
+          fi

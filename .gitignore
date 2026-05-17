@@ -1,0 +1,44 @@
+# Build output
+build/
+dist/
+out/
+target/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.bin
+*.iso
+*.img
+*.map
+*.elf
+
+# Emulator state
+*.qcow2
+*.vdi
+*.vmdk
+*.vbox
+*.vbox-prev
+
+# Logs and traces
+*.log
+*.trace
+*.dump
+*.core
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.*
+!.env.example
