@@ -1,19 +1,12 @@
 # Research Notes
 
-Use this directory for study notes before they become stable documentation.
+Use this directory for rough notes while studying TempleOS and OS design.
 
-Good research notes include:
+Useful files to add later:
 
-- Source file paths.
-- Links to exact upstream references.
-- Quotes kept short and attributed.
-- Questions that still need answers.
-- Proposed follow-up docs or ADRs.
-
-Suggested files to add later:
-
-- `templeos-source-inventory.md`
-- `boot-path-notes.md`
-- `holyc-notes.md`
-- `filesystem-notes.md`
-- `graphics-notes.md`
+- `source-inventory.md`
+- `boot.md`
+- `kernel.md`
+- `holyc.md`
+- `filesystem.md`
+- `graphics.md`

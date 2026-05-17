@@ -2,15 +2,11 @@
 
 - 
 
-## Why
+## Checks
 
-- 
-
-## Verification
-
-- [ ] Documentation reviewed
-- [ ] Local build or check listed below
-- [ ] ADR added or updated if this changes architecture
+- [ ] I kept the change focused.
+- [ ] I updated docs if needed.
+- [ ] I listed how I checked it.
 
 ## Notes
 

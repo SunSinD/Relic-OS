@@ -1,7 +1,6 @@
 # Source
 
-Source code will live here after the project records upstream provenance and
-chooses the first build strategy.
+Operating system source code will live here.
 
 Proposed layout:
 
@@ -18,6 +17,3 @@ src/
 |-- shell/
 `-- apps/
 ```
-
-Do not import upstream source into this directory without updating
-`docs/legal-and-provenance.md` and the source inventory under `research/`.
