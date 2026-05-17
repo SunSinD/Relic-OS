@@ -19,4 +19,4 @@
 - [ ] Improve developer tooling.
 - [ ] Add compatibility tests.
 - [ ] Modernize one subsystem at a time.
-- [ ] Publish the first experimental image.
+- [ ] Publish the first usable image.

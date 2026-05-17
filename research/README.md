@@ -1,6 +1,7 @@
 # Research Notes
 
-Use this directory for rough notes while studying TempleOS and OS design.
+Use this directory for source notes, inventories, and technical references while
+building the fork.
 
 Useful files to add later:
 

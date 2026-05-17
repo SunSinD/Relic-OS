@@ -5,7 +5,7 @@ Keep contributions small, clear, and easy to review.
 ## Good First Work
 
 - Improve a short doc page.
-- Add TempleOS study notes under `research/`.
+- Add TempleOS source notes under `research/`.
 - Add or clean up a build/tooling script.
 - Add tests once there is code to test.
 - Document a known limitation.

@@ -1,8 +1,7 @@
 # Overview
 
-Relic OS is a TempleOS fork with a practical goal: understand the original
-system, keep its interesting ideas, and gradually turn it into a cleaner
-experimental OS.
+Relic OS is a TempleOS fork with a practical goal: turn the original system into
+a cleaner, usable operating system.
 
 ## What Matters
 

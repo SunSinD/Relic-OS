@@ -1,12 +1,21 @@
 <p align="center">
-  <img src="https://i.imgur.com/Pf7trgl.jpeg" width="520" alt="Relic OS cyan sword artwork">
+  <kbd>
+    <img src="https://i.imgur.com/Pf7trgl.jpeg" width="300" alt="Relic OS cyan sword artwork">
+  </kbd>
 </p>
 
 <h1 align="center">Relic OS</h1>
 
 <p align="center">
-  A TempleOS fork focused on learning from the original system and shaping it
-  into a cleaner, more usable experimental operating system.
+  A TempleOS fork focused on turning the original system into a cleaner,
+  usable operating system.
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2487d8?style=for-the-badge&labelColor=222222">
+  <img alt="Language: HolyC" src="https://img.shields.io/badge/language-HolyC-00d8d8?style=for-the-badge&labelColor=222222">
+  <img alt="Base: TempleOS" src="https://img.shields.io/badge/base-TempleOS-6f8fe8?style=for-the-badge&labelColor=222222">
+  <img alt="Goal: Usable OS" src="https://img.shields.io/badge/goal-usable_OS-20c997?style=for-the-badge&labelColor=222222">
 </p>
 
 <p align="center">
@@ -20,21 +29,20 @@
 
 ## What This Is
 
-Relic OS is a work-in-progress fork of TempleOS. The first step is to understand
-the original system clearly, then make careful changes that improve usability,
-portability, maintainability, and developer experience.
+Relic OS is a work-in-progress fork of TempleOS. Its goal is to become a usable
+operating system while keeping the identity and spirit of the original project.
 
 This repository currently holds the project structure, notes, and planning
-material. Source code will be added once the upstream baseline, build path, and
-first technical goals are clear.
+material needed to build that foundation. Source code will be added around a
+clear upstream baseline, build path, and first boot target.
 
 ## Goals
 
-- Make TempleOS easier to study, build, and modify.
-- Keep the parts that make the original system interesting.
-- Improve organization, tooling, and long-term maintainability.
-- Work toward a bootable, testable experimental OS.
-- Keep the repository simple enough to navigate without a map.
+- Build Relic OS into a usable TempleOS fork.
+- Preserve the parts that define TempleOS.
+- Improve organization, tooling, and maintainability.
+- Create a bootable and testable system.
+- Keep the repository simple to navigate.
 
 ## Repository Layout
 
@@ -43,7 +51,7 @@ The repo is intentionally small:
 ```text
 .
 |-- docs/       Project notes and explanations
-|-- research/   TempleOS study notes and source inventory
+|-- research/   TempleOS source notes and inventory
 |-- roadmap/    Short project plan
 |-- specs/      Technical specs when behavior needs to be precise
 |-- src/        OS source code
@@ -71,5 +79,5 @@ The repo is intentionally small:
 
 ## Contributing
 
-Contributions should keep the repo easier to understand than it was before.
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions should move Relic OS toward a cleaner, usable system. See
+[CONTRIBUTING.md](CONTRIBUTING.md).

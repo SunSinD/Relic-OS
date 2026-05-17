@@ -1,7 +1,7 @@
 # Architecture
 
 This is the intended high-level shape. It will become more specific as the
-project studies and imports the original system.
+fork is built out.
 
 ```text
 Applications

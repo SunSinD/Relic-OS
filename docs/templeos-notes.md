@@ -1,7 +1,6 @@
 # TempleOS Notes
 
-This page tracks what Relic OS needs to understand about TempleOS before making
-large changes.
+This page tracks TempleOS behavior that matters for the Relic OS fork.
 
 ## Notes To Collect
 
@@ -19,5 +18,5 @@ large changes.
 
 - `keep`: preserve this behavior.
 - `change`: modernize or replace this behavior.
-- `study`: not understood yet.
+- `review`: needs a decision.
 - `drop`: intentionally not supported.

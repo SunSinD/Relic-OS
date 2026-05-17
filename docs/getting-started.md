@@ -1,11 +1,11 @@
 # Getting Started
 
-Relic OS is early. The best first work is learning, organizing, and making the
-next technical step easier.
+Relic OS is early. The best first work is organizing the fork and making the
+next technical step clear.
 
 ## Good First Tasks
 
-- Add notes to `research/` while studying TempleOS.
+- Add source notes to `research/`.
 - Build a source inventory for the upstream code.
 - Document one subsystem in plain language.
 - Write down the emulator and build commands once they are known.
