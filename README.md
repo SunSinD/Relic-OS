@@ -45,8 +45,7 @@ clear upstream baseline, build path, and first boot target.
 
 ## Repository Layout
 
-```text
-.
+```
 |-- docs/       Project notes and explanations
 |-- research/   TempleOS source notes and inventory
 |-- roadmap/    Short project plan
