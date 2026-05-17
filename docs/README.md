@@ -7,6 +7,7 @@ This folder keeps the main project notes in one place.
 - [Architecture](architecture.md): the high-level OS shape.
 - [Subsystems](subsystems.md): boot, kernel, memory, drivers, UI, and tools.
 - [TempleOS Notes](templeos-notes.md): source notes for the fork.
+- [VMware Workflow](vmware-workflow.md): edit, build, and test loop.
 
 Keep docs short. If a page gets too large, split it only when that makes the
 repo easier to navigate.

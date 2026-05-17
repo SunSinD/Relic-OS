@@ -2,18 +2,13 @@
 
 Operating system source code will live here.
 
-Proposed layout:
+Current layout:
 
 ```text
 src/
-|-- boot/
-|-- kernel/
-|-- arch/
-|   `-- x86_64/
-|-- drivers/
-|-- fs/
-|-- graphics/
-|-- libc/
-|-- shell/
-`-- apps/
+|-- README.md
+`-- templeos/   Extracted TempleOS ISO filesystem
 ```
+
+`src/templeos/` is the current upstream baseline import. Many files are stored
+in TempleOS's original `.Z` compression format.
