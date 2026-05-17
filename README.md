@@ -39,14 +39,11 @@ clear upstream baseline, build path, and first boot target.
 ## Goals
 
 - Build Relic OS into a usable TempleOS fork.
-- Preserve the parts that define TempleOS.
+- Modify the parts that define TempleOS.
 - Improve organization, tooling, and maintainability.
 - Create a bootable and testable system.
-- Keep the repository simple to navigate.
 
 ## Repository Layout
-
-The repo is intentionally small:
 
 ```text
 .
@@ -59,14 +56,6 @@ The repo is intentionally small:
 |-- tools/      Build and developer scripts
 `-- README.md
 ```
-
-## Current Focus
-
-1. Pick the exact TempleOS version to use as the starting point.
-2. Write a source inventory so each major piece is easy to find.
-3. Document how the original boot, kernel, filesystem, UI, and language work.
-4. Decide the first build and emulator target.
-5. Add the smallest bootable baseline.
 
 ## Main Docs
 
