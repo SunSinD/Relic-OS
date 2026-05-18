@@ -1,4 +1,4 @@
-// RelicDesktop.HC — Relic OS Desktop Environment
+// RelicDesktop.HC - Relic OS Desktop Environment
 // Dark dock launcher with wallpaper, direct app execution
 
 // ---- Constants ----
@@ -6,7 +6,7 @@
 #define DOCK_BTN_W  52
 #define DOCK_BTN_H  24
 #define DOCK_GAP    4
-#define NUM_APPS    9
+#define NUM_APPS    8
 #define TOPBAR_H    14
 #define DOCK_MARGIN 28
 
@@ -17,19 +17,19 @@ I64 relic_w = 640, relic_h = 480;
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
   LTBLUE, LTBLUE, YELLOW,
-  LTGREEN, RED
+  LTGREEN
 };
 
 U8 app_icons[NUM_APPS][4] = {
   "Fi", "Ed", ">_", "Mt",
   "Tk", "Mm", "Si",
-  "?", "X"
+  "?"
 };
 
 U8 app_tips[NUM_APPS][16] = {
   "Files", "Editor", "Shell", "Mount",
   "Tasks", "Memory", "SysInfo",
-  "Help", "Exit"
+  "Help"
 };
 
 // ---- Drawing (defined first — HolyC requires it) ----
@@ -54,29 +54,15 @@ U0 DrawDesktop(CTask *task, CDC *dc)
     GrRect(dc, 0, 0, w, h);
   }
 
-  // Top bar - covers the kernel status line completely
+  // Top bar
   dc->color = BLACK;
   GrRect(dc, 0, 0, w, TOPBAR_H);
-
-  // Left: branding
   dc->color = CYAN;
   GrPrint(dc, 6, 3, "Relic OS");
   dc->color = DKGRAY;
   GrPrint(dc, 80, 3, "|");
   dc->color = LTGRAY;
   GrPrint(dc, 96, 3, "Desktop");
-
-  // Right: date and time
-  CDateStruct ds;
-  Date2Struct(&ds, Now);
-  U8 buf[64];
-  StrPrint(buf, "%02d/%02d/%04d  %02d:%02d",
-    ds.mon, ds.day_of_mon, ds.year,
-    ds.hour, ds.min);
-  dc->color = DKGRAY;
-  GrPrint(dc, w - StrLen(buf) * 8 - 8, 3, buf);
-
-  // Bottom border line
   dc->color = DKGRAY;
   GrLine(dc, 0, TOPBAR_H, w, TOPBAR_H);
 
@@ -144,22 +130,29 @@ U0 DrawDesktop(CTask *task, CDC *dc)
 U0 LaunchApp(I64 idx)
 {
   Fs->draw_it = NULL;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
   DocClear;
+  "$BG,BLACK$";
 
   switch (idx) {
     case 0:  // Files
-      "$FG,CYAN$=== Files ===$FG$\n\n";
+      "\n\n$FG,CYAN$=== Files ===$FG$\n\n";
       Dir;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
 
     case 1:  // Editor
+      U8 *doc = FileRead("::/Home/RelicNote.DD");
+      if (!doc || !StrMatch("$BG,BLACK$", doc)) {
+        FileWrite("::/Home/RelicNote.DD", "$BG,BLACK$$FG,LTGRAY$Relic OS Notes\n\n", 37);
+      }
+      if (doc) Free(doc);
       Ed("::/Home/RelicNote.DD");
       break;
 
     case 2:  // Shell (interactive mini-shell)
-      "$FG,CYAN$=== Relic Shell ===$FG$\n";
+      "\n\n$FG,CYAN$=== Relic Shell ===$FG$\n";
       "$FG,DKGRAY$Type HolyC commands. Type 'exit' to return to desktop.$FG$\n\n";
       U8 *cmd;
       while (TRUE) {
@@ -178,28 +171,28 @@ U0 LaunchApp(I64 idx)
       break;
 
     case 3:  // Mount
-      "$FG,CYAN$=== Mount ===$FG$\n\n";
+      "\n\n$FG,CYAN$=== Mount ===$FG$\n\n";
       Mount;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
 
     case 4:  // Tasks
-      "$FG,CYAN$=== Task Report ===$FG$\n\n";
+      "\n\n$FG,CYAN$=== Task Report ===$FG$\n\n";
       TaskRep;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
 
     case 5:  // Memory
-      "$FG,CYAN$=== Memory Report ===$FG$\n\n";
+      "\n\n$FG,CYAN$=== Memory Report ===$FG$\n\n";
       MemRep;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
 
     case 6:  // System Info
-      "$FG,CYAN$=== System Information ===$FG$\n\n";
+      "\n\n$FG,CYAN$=== System Information ===$FG$\n\n";
       "$FG,LTGRAY$OS:        $FG,CYAN$Relic OS v0.1$FG$\n";
       "$FG,LTGRAY$Kernel:    $FG,CYAN$TempleOS V5.03$FG$\n";
       "$FG,LTGRAY$Resolution:$FG,CYAN$ 640x480$FG$\n";
@@ -214,7 +207,7 @@ U0 LaunchApp(I64 idx)
 
     case 7:  // Help - Terry Davis Tribute
       DocClear;
-      "$FG,CYAN$\n";
+      "\n\n$FG,CYAN$\n";
       "  =========================================\n";
       "   IN MEMORY OF TERRY A. DAVIS\n";
       "   December 15, 1969 - August 11, 2018\n";
@@ -261,28 +254,29 @@ U0 LaunchApp(I64 idx)
       GetChar;
       break;
 
-    case 8: break;
   }
 
   DocClear;
   Fs->draw_it = &DrawDesktop;
 }
 
-// ---- Main loop ----
+// ---- Main loop (runs forever as default shell) ----
 U0 RelicDesktop()
 {
   I64 mx, my, i, bx, by;
   I64 dock_w, dock_x, dock_y;
-  Bool running = TRUE;
 
   SettingsPush;
   AutoComplete(OFF);
   WinBorder(OFF);
   WinMax;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
   DocClear;
   Fs->draw_it = &DrawDesktop;
 
-  while (running) {
+  while (TRUE) {
+    while (ScanKey) GetKey; // flush keyboard buffer so typing on desktop doesn't leak into apps
+    
     if (ms.lb) {
       mx = ms.pos.x - relic_ox;
       my = ms.pos.y - relic_oy;
@@ -297,11 +291,8 @@ U0 RelicDesktop()
 
         if (mx >= bx && mx <= bx + DOCK_BTN_W &&
             my >= by && my <= by + DOCK_BTN_H) {
-          if (i == 8) {
-            running = FALSE;
-          } else {
-            LaunchApp(i);
-          }
+          while (ms.lb) Sleep(10); // Wait for release to prevent document cursor jump / red link click flashes
+          LaunchApp(i);
           break;
         }
       }
@@ -310,9 +301,4 @@ U0 RelicDesktop()
     }
     Sleep(30);
   }
-
-  Fs->draw_it = NULL;
-  SettingsPop;
-  DocClear;
-  "$FG,CYAN$Desktop closed.$FG$ Type RelicDesktop; to restart.\n";
 }

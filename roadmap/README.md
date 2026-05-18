@@ -21,9 +21,10 @@
 
 ## Phase 3: Polish & Refinement (In Progress)
 
-- [x] Clean up kernel system line with custom top bar overlay
-- [x] Add live date/time display in top bar
-- [ ] Hide the kernel's top status bar via `win_inhibit` flags
+- [x] Style kernel system line via palette as a sleek light-mode menu bar
+- [x] Fix input buffer bleeding (mouse dragging / keyboard presses leaking into apps)
+- [x] Inject dynamic dark mode formatting into standard documents (e.g. Editor)
+- [x] Fix raw wallpaper inversion bug
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history
