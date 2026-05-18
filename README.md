@@ -7,8 +7,8 @@
 <h1 align="center">Relic OS</h1>
 
 <p align="center">
-  A TempleOS fork focused on turning the original system into a cleaner,
-  usable operating system.
+  A modern fork of TempleOS - built as a tribute to Terry A. Davis.<br>
+  Focused on turning the original system into a cleaner, usable desktop operating system.
 </p>
 
 <p align="center">
@@ -29,43 +29,68 @@
 
 ## What This Is
 
-Relic OS is a work-in-progress fork of TempleOS. Its goal is to become a usable
-operating system while keeping the identity and spirit of the original project.
+Relic OS is a fork of TempleOS dedicated to the memory of Terry A. Davis,
+the sole creator of TempleOS. It aims to build a refined, usable desktop
+experience on top of the foundation he created - while never forgetting
+who made it all possible.
 
-This repository currently holds the project structure, notes, and planning
-material needed to build that foundation. Source code will be added around a
-clear upstream baseline, build path, and first boot target.
+## Current State
 
-## Goals
+Relic OS features a working dark-themed desktop environment with:
 
-- Build Relic OS into a usable TempleOS fork.
-- Modify the parts that define TempleOS.
-- Improve organization, tooling, and maintainability.
-- Create a bootable and testable system.
+- **Custom dark palette** - 16-color scheme replacing TempleOS defaults
+- **Dock launcher** - macOS-style dock with hover effects and tooltips
+- **Inline apps** - Files, Editor, Shell, Mount, Tasks, Memory, System Info
+- **Terry Davis tribute** - dedicated Help page honoring the creator
+- **Custom wallpaper** - raw bitmap wallpaper with top bar overlay
+- **Live clock** - date and time display in the top bar
+
+## Running Relic OS
+
+Relic OS runs in a VMware virtual machine using a VHD disk image:
+
+1. Clone this repository
+2. Place a TempleOS V5.03 ISO in your VM
+3. Copy the `src/relic/` files to the VM's drive
+4. Run `#include "E:/RelicBoot.HC";` to launch the desktop
+
+See [Getting Started](docs/getting-started.md) for detailed instructions.
 
 ## Repository Layout
 
 ```
 |-- docs/       Project notes and explanations
 |-- research/   TempleOS source notes and inventory
-|-- roadmap/    Short project plan
-|-- specs/      Technical specs when behavior needs to be precise
-|-- src/        OS source code
+|-- roadmap/    Project roadmap and phase tracking
+|-- specs/      Technical specs
+|-- src/
+|   |-- relic/      Relic OS source (RelicDesktop, RelicTheme, etc.)
+|   `-- templeos/   Original TempleOS V5.03 source (read-only baseline)
 |-- tests/      Tests and emulator checks
 |-- tools/      Build and developer scripts
 `-- README.md
 ```
 
-## Main Docs
+## Key Files
 
-- [Overview](docs/overview.md)
-- [Getting Started](docs/getting-started.md)
-- [Architecture](docs/architecture.md)
-- [Subsystems](docs/subsystems.md)
-- [TempleOS Notes](docs/templeos-notes.md)
-- [Roadmap](roadmap/README.md)
+| File | Purpose |
+|------|---------|
+| `src/relic/RelicBoot.HC` | Boot orchestrator - chains theme, wallpaper, desktop |
+| `src/relic/RelicTheme.HC` | Custom 16-color dark palette |
+| `src/relic/RelicWallpaper.HC` | Raw bitmap wallpaper loader |
+| `src/relic/RelicDesktop.HC` | Desktop environment with dock and apps |
 
 ## Contributing
 
 Contributions should move Relic OS toward a cleaner, usable system. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT License. TempleOS source code is in the public domain.
+
+---
+
+<p align="center">
+  <em>In memory of Terry A. Davis (1969-2018) - his work lives on.</em>
+</p>
