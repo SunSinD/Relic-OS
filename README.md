@@ -45,41 +45,6 @@ Relic OS features a working dark-themed desktop environment with:
 - **Custom wallpaper** - raw bitmap wallpaper with top bar overlay
 - **Live clock** - date and time display in the top bar
 
-## Running Relic OS
-
-Relic OS runs in a VMware virtual machine using a VHD disk image:
-
-1. Clone this repository
-2. Place a TempleOS V5.03 ISO in your VM
-3. Copy the `src/relic/` files to the VM's drive
-4. Run `#include "E:/RelicBoot.HC";` to launch the desktop
-
-See [Getting Started](docs/getting-started.md) for detailed instructions.
-
-## Repository Layout
-
-```
-|-- docs/       Project notes and explanations
-|-- research/   TempleOS source notes and inventory
-|-- roadmap/    Project roadmap and phase tracking
-|-- specs/      Technical specs
-|-- src/
-|   |-- relic/      Relic OS source (RelicDesktop, RelicTheme, etc.)
-|   `-- templeos/   Original TempleOS V5.03 source (read-only baseline)
-|-- tests/      Tests and emulator checks
-|-- tools/      Build and developer scripts
-`-- README.md
-```
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `src/relic/RelicBoot.HC` | Boot orchestrator - chains theme, wallpaper, desktop |
-| `src/relic/RelicTheme.HC` | Custom 16-color dark palette |
-| `src/relic/RelicWallpaper.HC` | Raw bitmap wallpaper loader |
-| `src/relic/RelicDesktop.HC` | Desktop environment with dock and apps |
-
 ## Contributing
 
 Contributions should move Relic OS toward a cleaner, usable system. See
