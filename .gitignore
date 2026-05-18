@@ -1,44 +1,16 @@
-# Build output
-build/
-dist/
-out/
-target/
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.dll
-*.dylib
-*.exe
-*.bin
+# Relic OS - .gitignore
+
+# Binary assets (too large for git, included in releases)
+*.raw
+
+# Build artifacts
 *.iso
-*.img
-*.map
-*.elf
+*.vhd
 
-# Emulator state
-*.qcow2
-*.vdi
-*.vmdk
-*.vbox
-*.vbox-prev
+# Python cache
+__pycache__/
+*.pyc
 
-# Logs and traces
-*.log
-*.trace
-*.dump
-*.core
-
-# Editor and OS files
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
+# Editor
 *.swp
-*.swo
-
-# Local environment
-.env
-.env.*
-!.env.example
+*.bak
