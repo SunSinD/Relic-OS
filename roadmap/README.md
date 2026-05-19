@@ -25,6 +25,9 @@
 - [x] Fix input buffer bleeding (mouse dragging / keyboard presses leaking into apps)
 - [x] Inject dynamic dark mode formatting into standard documents (e.g. Editor)
 - [x] Fix raw wallpaper inversion bug
+- [x] Port TOOM to RelicOS and integrate custom Games Launcher
+- [x] Enforce system-wide black/grey terminal theme across all tasks
+- [x] Implement robust build auto-repair script for kernel files (`Build.HC`)
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history
@@ -41,7 +44,7 @@
 
 ## Phase 5: Distribution
 
-- [ ] Create automated ISO build pipeline
+- [x] Create automated ISO build pipeline (`Build.HC`)
 - [ ] Add basic smoke test scripts in `tests/`
 - [ ] Write user documentation
 - [ ] Publish the first downloadable Relic OS image

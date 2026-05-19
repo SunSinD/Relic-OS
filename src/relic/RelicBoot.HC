@@ -1,15 +1,15 @@
 // RelicBoot.HC
 // Relic OS Desktop Environment Startup
-// Usage: #include "E:/RelicBoot.HC";
+// Usage: #include "::/Home/RelicOS/RelicBoot.HC";
 
 // Step 1: Apply dark color palette
-#include "E:/RelicTheme.HC"
+#include "::/Home/RelicOS/RelicTheme.HC"
 RelicThemeApply;
 
 // Step 2: Load wallpaper bitmap
-#include "E:/RelicWallpaper.HC"
+#include "::/Home/RelicOS/RelicWallpaper.HC"
 RelicWallpaperLoad;
 
 // Step 3: Launch desktop
-#include "E:/RelicDesktop.HC"
+#include "::/Home/RelicOS/RelicDesktop.HC"
 RelicDesktop;

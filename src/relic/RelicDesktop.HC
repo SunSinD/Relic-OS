@@ -28,13 +28,13 @@ U8 relic_old_drv_text_attr[3];
 Bool relic_drive_colors_saved = FALSE;
 
 U8 app_icons[NUM_APPS][4] = {
-  "Fi", "Ed", ">_", "Mt",
+  "Fi", "Ed", ">_", "Gm",
   "Tk", "Mm", "Si",
   "?"
 };
 
 U8 app_tips[NUM_APPS][16] = {
-  "Files", "Editor", "Shell", "Mount",
+  "Files", "Editor", "Shell", "Games",
   "Tasks", "Memory", "SysInfo",
   "Help"
 };
@@ -187,12 +187,14 @@ U0 LaunchApp(I64 idx)
       break;
 
     case 1:  // Editor
-      U8 *doc = FileRead("::/Home/RelicNote.DD");
+      // Edit in RAM drive (B:) to prevent Read-Only crashes on LiveCD
+      U8 *doc = FileRead("B:/RelicNote.DD");
       if (!doc || !StrMatch("$BG,BLACK$", doc)) {
-        FileWrite("::/Home/RelicNote.DD", "$BG,BLACK$$FG,LTGRAY$Relic OS Notes\n\n", 37);
+        U8 *init_str = "$BG,BLACK$$FG,LTGRAY$";
+        FileWrite("B:/RelicNote.DD", init_str, StrLen(init_str));
       }
       if (doc) Free(doc);
-      Ed("::/Home/RelicNote.DD", DOF_DONT_TEXT_ATTR);
+      Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
       break;
 
     case 2:  // Shell (interactive mini-shell)
@@ -214,13 +216,8 @@ U0 LaunchApp(I64 idx)
       }
       break;
 
-    case 3:  // Mount
-      "\n\n$FG,CYAN$=== Mount ===$FG$\n\n";
-      RelicDriveColorsDark;
-      Mount;
-      RelicDriveColorsRestore;
-      "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-      GetChar;
+    case 3:  // Games
+      User("#include \"::/Home/RelicOS/GamesLauncher.HC\";\n");
       break;
 
     case 4:  // Tasks

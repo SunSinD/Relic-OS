@@ -1,5 +1,5 @@
 // RelicWallpaper.HC
-// Loads wallpaper.raw from E: drive and displays it via GrBlot
+// Loads wallpaper.raw from boot drive and displays it via GrBlot
 
 CDC *relic_wp_dc = NULL;
 
@@ -9,7 +9,7 @@ U0 RelicWallpaperLoad()
   U8 *data;
 
   // Load raw pixel data from file
-  data = FileRead("E:/wallpaper.raw", &size);
+  data = FileRead("::/Home/RelicOS/wallpaper.raw", &size);
   if (!data) {
     "Failed to load wallpaper.raw\n";
     return;
