@@ -20,6 +20,13 @@ I64 app_colors[NUM_APPS] = {
   LTGREEN
 };
 
+extern U8 blkdev_text_attr[BDT_TYPES_NUM];
+extern U8 drv_text_attr[3];
+
+U8 relic_old_blkdev_text_attr[BDT_TYPES_NUM];
+U8 relic_old_drv_text_attr[3];
+Bool relic_drive_colors_saved = FALSE;
+
 U8 app_icons[NUM_APPS][4] = {
   "Fi", "Ed", ">_", "Mt",
   "Tk", "Mm", "Si",
@@ -124,15 +131,52 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   GrPlot(dc, w / 2 + 1, dock_y + DOCK_H + 3);
 }
 
+U0 RelicDocDark()
+{
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | LTGRAY;
+  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
+U0 RelicDriveColorsDark()
+{
+  I64 i;
+
+  if (!relic_drive_colors_saved) {
+    for (i = 0; i < BDT_TYPES_NUM; i++)
+      relic_old_blkdev_text_attr[i] = blkdev_text_attr[i];
+    for (i = 0; i < 3; i++)
+      relic_old_drv_text_attr[i] = drv_text_attr[i];
+    relic_drive_colors_saved = TRUE;
+  }
+
+  blkdev_text_attr[BDT_ATA] = BLACK;
+  drv_text_attr[0] = CYAN;
+  drv_text_attr[1] = LTGRAY;
+  drv_text_attr[2] = LTRED;
+}
+
+U0 RelicDriveColorsRestore()
+{
+  I64 i;
+
+  if (relic_drive_colors_saved) {
+    for (i = 0; i < BDT_TYPES_NUM; i++)
+      blkdev_text_attr[i] = relic_old_blkdev_text_attr[i];
+    for (i = 0; i < 3; i++)
+      drv_text_attr[i] = relic_old_drv_text_attr[i];
+  }
+}
+
 // ---- Launch handler ----
 // Runs apps directly in the desktop task.
 // Pauses wallpaper, runs the app, then resumes.
 U0 LaunchApp(I64 idx)
 {
   Fs->draw_it = NULL;
-  Fs->text_attr = BLACK << 4 | LTGRAY;
+  RelicDocDark;
   DocClear;
-  "$BG,BLACK$";
+  RelicDocDark;
 
   switch (idx) {
     case 0:  // Files
@@ -148,7 +192,7 @@ U0 LaunchApp(I64 idx)
         FileWrite("::/Home/RelicNote.DD", "$BG,BLACK$$FG,LTGRAY$Relic OS Notes\n\n", 37);
       }
       if (doc) Free(doc);
-      Ed("::/Home/RelicNote.DD");
+      Ed("::/Home/RelicNote.DD", DOF_DONT_TEXT_ATTR);
       break;
 
     case 2:  // Shell (interactive mini-shell)
@@ -172,7 +216,9 @@ U0 LaunchApp(I64 idx)
 
     case 3:  // Mount
       "\n\n$FG,CYAN$=== Mount ===$FG$\n\n";
+      RelicDriveColorsDark;
       Mount;
+      RelicDriveColorsRestore;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
@@ -200,7 +246,9 @@ U0 LaunchApp(I64 idx)
       "$FG,LTGRAY$CPU Info:$FG$\n";
       CPURep;
       "\n$FG,LTGRAY$Disk Info:$FG$\n";
+      RelicDriveColorsDark;
       DrvRep;
+      RelicDriveColorsRestore;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
       break;
@@ -270,8 +318,10 @@ U0 RelicDesktop()
   AutoComplete(OFF);
   WinBorder(OFF);
   WinMax;
-  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->win_inhibit |= WIF_FOCUS_TASK_MENU;
+  RelicDocDark;
   DocClear;
+  RelicDocDark;
   Fs->draw_it = &DrawDesktop;
 
   while (TRUE) {
