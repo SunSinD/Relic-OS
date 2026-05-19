@@ -34,17 +34,6 @@ the sole creator of TempleOS. It aims to build a refined, usable desktop
 experience on top of the foundation he created - while never forgetting
 who made it all possible.
 
-## Current State
-
-Relic OS features a working dark-themed desktop environment with:
-
-- **Custom dark palette** - 16-color scheme replacing TempleOS defaults
-- **Dock launcher** - macOS-style dock with hover effects and tooltips
-- **Inline apps** - Files, Editor, Shell, Mount, Tasks, Memory, System Info
-- **Terry Davis tribute** - dedicated Help page honoring the creator
-- **Custom wallpaper** - raw bitmap wallpaper with top bar overlay
-- **Live clock** - date and time display in the top bar
-
 ## Contributing
 
 Contributions should move Relic OS toward a cleaner, usable system. See
