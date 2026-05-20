@@ -121,32 +121,26 @@ Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
   return changed;
 }
 
-U0 RelicPatchKernelBanner(U8 *filename)
+U0 RelicRepairKernelBanner(U8 *filename)
 {
   RelicFileReplaceOnce(filename,
-        "\"RelicOS  V%5.3f\\t%D %T\\n\\n\"",
-        "\"RelicOS V1.0.0\\t%D %T\\n\\n\"");
+        "\"RelicOS V1.0.0\\t%D %T\\n\\n\"",
+        "\"RelicOS  V%5.3f\\t%D %T\\n\\n\"");
   RelicFileReplaceOnce(filename,
-        "\"TempleOS V%5.3f\\t%D %T\\n\\n\"",
-        "\"RelicOS V1.0.0\\t%D %T\\n\\n\"");
-  RelicFileReplaceOnce(filename,
-        "\tsys_os_version,sys_compile_time,sys_compile_time;",
-        "\tsys_compile_time,sys_compile_time;");
+        "  \"RelicOS V1.0.0\\t%D %T\\n\\n\",\n"
+        "\tsys_compile_time,sys_compile_time;",
+        "  \"RelicOS  V%5.3f\\t%D %T\\n\\n\",\n"
+        "\tsys_os_version,sys_compile_time,sys_compile_time;");
   RelicFileReplaceOnce(filename,
         "  \"RelicOS  V%5.3f\\t%D %T\\n\\n\",\n"
-        "\tsys_os_version,sys_compile_time,sys_compile_time;",
-        "  \"RelicOS V1.0.0\\t%D %T\\n\\n\",\n"
-        "\tsys_compile_time,sys_compile_time;");
+        "\tsys_compile_time,sys_compile_time;",
+        "  \"RelicOS  V%5.3f\\t%D %T\\n\\n\",\n"
+        "\tsys_os_version,sys_compile_time,sys_compile_time;");
   RelicFileReplaceOnce(filename,
         "  \"TempleOS V%5.3f\\t%D %T\\n\\n\",\n"
         "\tsys_os_version,sys_compile_time,sys_compile_time;",
-        "  \"RelicOS V1.0.0\\t%D %T\\n\\n\",\n"
-        "\tsys_compile_time,sys_compile_time;");
-  RelicFileReplaceOnce(filename,
-        "  \"RelicOS V1.0.0\\t%D %T\\n\\n\",\n"
-        "\tsys_os_version,sys_compile_time,sys_compile_time;",
-        "  \"RelicOS V1.0.0\\t%D %T\\n\\n\",\n"
-        "\tsys_compile_time,sys_compile_time;");
+        "  \"RelicOS  V%5.3f\\t%D %T\\n\\n\",\n"
+        "\tsys_os_version,sys_compile_time,sys_compile_time;");
 }
 
 U0 RepairWallPaper()
@@ -235,8 +229,8 @@ U0 PatchVersion() {
   }
   RelicFileReplaceOnce("::/Kernel/KGlbls.HC.Z",
         "sys_os_version=5.030;", "sys_os_version=1.000;");
-  RelicPatchKernelBanner("::/Kernel/KMain.HC.Z");
-  RelicPatchKernelBanner("::/Kernel/KEnd.HC.Z");
+  RelicRepairKernelBanner("::/Kernel/KMain.HC.Z");
+  RelicRepairKernelBanner("::/Kernel/KEnd.HC.Z");
   RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
         "DefinePrint(\"DD_OS_NAME_VERSION\",\"TempleOS V%0.2f\",sys_os_version);",
         "DefinePrint(\"DD_OS_NAME_VERSION\",\"RelicOS V1.0.0\");");
