@@ -24,10 +24,10 @@ while(TRUE) {
   }
 }
 gameExit=TRUE;
-TOOMStopTasks;
 active_menu=NULL;
 paused=FALSE;
 in_level=FALSE;
+Snd;
 FlushMsgs;
 TOOMChromeOff;
 DocClear;

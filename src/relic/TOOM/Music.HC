@@ -1,5 +1,6 @@
 #ifndef MUS_H
 #define MUS_H "Tee Hee Oh Shamona"
+extern Bool gameExit;
 class CPCSpkSnd {
   I8 pad[2];
   I16 samples;
@@ -234,7 +235,9 @@ F64 Samp2Freq(I8 n) {
   return 0;
 }
 U0 PlaySoundTask(U8 *name) {
-  if(cur_snd_task) Kill(cur_snd_task,FALSE);
+  Bool muted=FALSE;
+  if(cur_snd_task&&cur_snd_task!=Fs&&TaskValidate(cur_snd_task))
+    Kill(cur_snd_task,FALSE);
   cur_snd_task=Fs;
   U8 buf[16];
   CWadDirectory *wad_dir;
@@ -249,19 +252,24 @@ U0 PlaySoundTask(U8 *name) {
 again:
   if(freqs) {
     music.mute++;
+    muted=TRUE;
     for(s=0;s!=freqs->samples;s++) {
+      if(gameExit)
+        goto done;
       if(!freqs->body[s])
         Snd;
       else
         Snd(22+Freq2Ona(freqs->body[s]));
       Sleep(1000./140.);
     }
-    Snd;
-    music.mute--;
   } else {    
     FramePtrAdd(buf,freqs=W_GetLumpPtrFromName(buf),doom_task);
     goto again;
   }
+done:
+  Snd;
+  if(muted&&music.mute)
+    music.mute--;
   cur_snd_task=NULL;
 }
 
@@ -269,6 +277,10 @@ U0 PlayMusicTask(CMusicUnit *head) {
 enter:
   CMusicUnit *cur=head;
   while(TRUE) {
+    if(gameExit) {
+      Snd;
+      return;
+    }
     if(cur->freq==-1) {
       Yield;
       goto enter;

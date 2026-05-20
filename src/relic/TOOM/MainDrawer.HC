@@ -3494,6 +3494,16 @@ U0 AnimateTask(I64)
 
 U0 TOOMStopTasks()
 {
+  if(gameExit) {
+    Snd;
+    cur_snd_task=NULL;
+    music_task=NULL;
+    toom_faces_task=NULL;
+    if(Fs->animate_task==toom_animate_task)
+      Fs->animate_task=NULL;
+    toom_animate_task=NULL;
+    return;
+  }
   if(cur_snd_task && cur_snd_task!=Fs && TaskValidate(cur_snd_task)) {
     Kill(cur_snd_task,FALSE);
   }
@@ -3967,7 +3977,7 @@ play_again:
       if(gameExit) {
         paused=FALSE;
         active_menu=NULL;
-        TOOMStopTasks;
+        Snd;
         FlushMsgs;
         return;
       }
@@ -3985,7 +3995,7 @@ end_control:;
     Refresh;
   }
   if(gameExit) {
-    TOOMStopTasks;
+    Snd;
     paused=FALSE;
     in_level=FALSE;
     active_menu=NULL;

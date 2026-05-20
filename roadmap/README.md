@@ -38,7 +38,7 @@
 - [x] Tune TOOM movement and palette setup for steadier VMware play
 - [x] Make ISO boot helper loading idempotent across repeated `Build.HC` runs
 - [x] Route TOOM Quit Game through wrapper-level cleanup and palette restore
-- [ ] Validate TOOM renderer and Quit Game behavior in the next VMware ISO smoke test
+- [ ] Validate TOOM quit cleanup, stable no-flash palette handoff, and warmer dithered rendering in the next VMware ISO smoke test
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history

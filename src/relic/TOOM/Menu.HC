@@ -213,9 +213,7 @@ againm:;
         active_menu_item=0;
         FlushMsgs;
         TOOMChromeOff;
-        FramePtrDel("RELIC_TOOM_QUIT");
-        FramePtrAdd("RELIC_TOOM_QUIT",1);
-        throw('Quit');
+        return 0;
       } else if(!r)
         return 0;
       break;
