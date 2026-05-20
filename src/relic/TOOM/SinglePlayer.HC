@@ -24,14 +24,7 @@ while(TRUE) {
   }
 }
 gameExit=TRUE;
-if(music_task) {
-  Kill(music_task,FALSE);
-  music_task=NULL;
-}
-if(Fs->animate_task) {
-  Kill(Fs->animate_task,FALSE);
-  Fs->animate_task=NULL;
-}
+TOOMStopTasks;
 active_menu=NULL;
 paused=FALSE;
 in_level=FALSE;

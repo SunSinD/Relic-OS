@@ -21,7 +21,7 @@ U0 TOOMChromeOff()
   winmgr.show_menu=FALSE;
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+        WIF_SELF_BORDER;
 }
 
 I64 FrameCnt(CDC **arr) {
@@ -1509,6 +1509,8 @@ U0 SongTaskDOOM(I64 LEVEL)
 }
 
 CTask *music_task=NULL;
+CTask *toom_animate_task=NULL;
+CTask *toom_faces_task=NULL;
 
 
 F64 GetTargetLiftHeight(CDoomSector *floor,I64 type,Bool going_up=TRUE) {
@@ -3478,16 +3480,37 @@ pass:
 
 U0 AnimateTask(I64)
 {
-//Nroots hack,kiling this task will kill the child task
-  Spawn(&ST_UpdateFacesTask,NULL,NULL,,Fs);
+  if(!toom_faces_task)
+    toom_faces_task=Spawn(&ST_UpdateFacesTask,NULL,NULL,,Fs);
   while(TRUE)
     {   
     if(gameExit)
       break;
     AnimateFire(p);
-    Refresh;
     Sleep(33);
   }
+}
+
+U0 TOOMStopTasks()
+{
+  if(cur_snd_task && TaskValidate(cur_snd_task)) {
+    Kill(cur_snd_task,FALSE);
+  }
+  cur_snd_task=NULL;
+  if(music_task && TaskValidate(music_task)) {
+    Kill(music_task,FALSE);
+  }
+  music_task=NULL;
+  if(toom_faces_task && TaskValidate(toom_faces_task)) {
+    Kill(toom_faces_task,FALSE);
+  }
+  toom_faces_task=NULL;
+  if(Fs->animate_task==toom_animate_task)
+    Fs->animate_task=NULL;
+  if(toom_animate_task && TaskValidate(toom_animate_task)) {
+    Kill(toom_animate_task,FALSE);
+  }
+  toom_animate_task=NULL;
 }
 
 
@@ -3728,9 +3751,11 @@ ent:;
     Unpause;
   }
 //Reset the animation task for newly loaded player
-  if(Fs->animate_task)
-    Kill(Fs->animate_task,FALSE);
-  Fs->animate_task=Spawn(&AnimateTask,NULL,"Animate",,Fs);
+  if(toom_animate_task)
+    TOOMStopTasks;
+  toom_faces_task=NULL;
+  toom_animate_task=Spawn(&AnimateTask,NULL,"Animate",,Fs);
+  Fs->animate_task=toom_animate_task;
 //Return to parent instance  of PlayLevel(if recursivly called)
   //But be sure to initailize the level and player
   if(in_level) return;
@@ -3955,14 +3980,7 @@ end_control:;
     Refresh;
   }
   if(gameExit) {
-    if(music_task) {
-      Kill(music_task,FALSE);
-      music_task=NULL;
-    }
-    if(Fs->animate_task) {
-      Kill(Fs->animate_task,FALSE);
-      Fs->animate_task=NULL;
-    }
+    TOOMStopTasks;
     paused=FALSE;
     in_level=FALSE;
     active_menu=NULL;

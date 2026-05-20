@@ -147,7 +147,7 @@ U0 RelicDesktopMode()
   WinMax;
   winmgr.show_menu = FALSE;
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+        WIF_SELF_BORDER;
   WinFocus;
   RelicDocDark;
 }

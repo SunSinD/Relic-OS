@@ -6,7 +6,7 @@ U0 RelicTOOMDarkWin()
   winmgr.show_menu = FALSE;
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+        WIF_SELF_BORDER;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->border_attr = BLACK << 4 | DKGRAY;

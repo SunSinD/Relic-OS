@@ -621,7 +621,7 @@ U0 AnimateFire(CDoomPlayer *p)
       while(next_frame>Server_tS) {
         if(ostate!=p->weapon_state)
 	  break;
-        Refresh;
+        Sleep(10);
       }
     }
   } else if(p->weapon_state==1||p->weapon_state==2) {
@@ -642,7 +642,7 @@ U0 AnimateFire(CDoomPlayer *p)
         while(next_frame>Server_tS) {
 	  if(ostate!=p->weapon_state)
 	    break;
-	  Refresh;
+	  Sleep(10);
         }
       }
     }
@@ -657,7 +657,7 @@ U0 AnimateFire(CDoomPlayer *p)
         while(next_frame>Server_tS) {
 	  if(ostate!=p->weapon_state)
 	    break;
-	  Refresh;
+	  Sleep(10);
         }
       }
     }
@@ -752,6 +752,8 @@ CDC *ST_UpdateFacesTask(I64) {
   U8 *base,buf[STR_LEN];
   if(p) old_health=p->health;
 again:;
+  if(gameExit)
+    return NULL;
   stared_at=FALSE;
   delay=0;
   if(p) {
@@ -769,7 +771,7 @@ again:;
       health_f='4';
     } else {
       toom_faces.icon_dc=GetGrLump("STFDEAD0");
-      Refresh;
+      Sleep(100);
       goto again;
     }
 
@@ -806,11 +808,12 @@ again:;
     else
       StrPrint(buf,"STF%s%c",base,health_f); 
     toom_faces.icon_dc=GetGrLump(buf);
-    Sleep(delay);
     if(stared_at)
       p->stare_at=NULL,stared_at=FALSE;
   }
-  Refresh;
+  if(delay<33)
+    delay=33;
+  Sleep(delay);
   goto again;
 }
 

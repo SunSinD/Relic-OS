@@ -112,7 +112,7 @@ U8 *clean_homesys =
   "{\n"
   "  Fs->text_attr = BLACK << 4 | LTGRAY;\n"
   "  Fs->border_attr = BLACK << 4 | DKGRAY;\n"
-  "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;\n"
+  "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
   "  WinBorder(OFF);\n"
