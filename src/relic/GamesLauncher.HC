@@ -1,24 +1,36 @@
+U0 RelicGamesChromeOff()
+{
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
+        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
 U0 RelicGameFile(U8 *filename)
 {
+  RelicGamesChromeOff;
   FlushMsgs;
   DocClear;
-  WinMax;
   ExePrint("#include \"%s\";", filename);
 }
 
 U0 RelicGamePopUp(U8 *cmd)
 {
+  RelicGamesChromeOff;
   FlushMsgs;
   DocClear;
-  WinMax;
   ExePrint("%s", cmd);
 }
 
 U0 RelicGameRun(I64 id)
 {
+  RelicGamesChromeOff;
   DocClear;
-  WinMax;
-  winmgr.show_menu = FALSE;
   FlushMsgs;
 
   switch (id) {
@@ -57,16 +69,13 @@ U0 RelicGamesLauncher()
   U8 buf[3];
   I64 id, ch, sc, len = 0;
 
-  Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
-  WinBorder(OFF);
-  WinMax;
-  winmgr.show_menu = FALSE;
+  RelicGamesChromeOff;
   buf[0] = 0;
 
   while (TRUE) {
-    winmgr.show_menu = FALSE;
+    RelicGamesChromeOff;
+    if (ms.pos.y < 20)
+      MsSet(ms.pos.x, GR_HEIGHT / 2);
     DocClear;
     "$FG,5$DOOM$FG$\n";
     "  1. DOOM\n\n";

@@ -30,8 +30,9 @@
 - [x] Implement robust build auto-repair script for kernel files (`Build.HC`)
 - [x] Replace unstable graphical Games launcher with numeric game selection menu
 - [x] Package TOOM source tree into `src/relic/TOOM/` for release builds
-- [ ] Stabilize TOOM runtime: clean launch, renderer artifacts, Quit Game return path
-- [ ] Fully suppress TempleOS menu chrome in every desktop/game context
+- [x] Stabilize TOOM wrapper/runtime path: clean launch palette, throttled renderer-adjacent task, Quit Game cleanup
+- [x] Suppress TempleOS menu chrome in Relic desktop, numeric Games launcher, and TOOM runtime contexts
+- [ ] Validate TOOM renderer and Quit Game behavior in the next VMware ISO smoke test
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history

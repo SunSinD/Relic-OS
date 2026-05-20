@@ -1,11 +1,6 @@
 #exe {Cd(__DIR__);};;
 #include "MainDrawer.HC";
-WinBorder(OFF);
-WinMax;
-winmgr.show_menu=FALSE;
-AutoComplete(OFF);
-Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-      WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+TOOMChromeOff;
 MsSet(GR_WIDTH/2,GR_HEIGHT/2);
 gameExit=FALSE;
 FlushMsgs;
@@ -13,7 +8,7 @@ U64 r;
 CDC *title=GetGrLump("TITLEPIC");
 DocClear;
 while(TRUE) {
-  winmgr.show_menu=FALSE;
+  TOOMChromeOff;
   if(gameExit)
     break;
   if(ms.pos.y<20)
@@ -28,3 +23,18 @@ while(TRUE) {
      break;
   }
 }
+gameExit=TRUE;
+if(music_task) {
+  Kill(music_task,FALSE);
+  music_task=NULL;
+}
+if(Fs->animate_task) {
+  Kill(Fs->animate_task,FALSE);
+  Fs->animate_task=NULL;
+}
+active_menu=NULL;
+paused=FALSE;
+in_level=FALSE;
+FlushMsgs;
+TOOMChromeOff;
+DocClear;

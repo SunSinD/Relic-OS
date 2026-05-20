@@ -62,7 +62,7 @@ U0 MenuDraw(CDC *dc,CMenuItem *items,I64 offx,I64 offy,I64 cur_active=0) {
 }
 U64 MenuInteract(CDC *dc,CMenuItem *items,I64 offx,I64 offy) {
   if(!items) return 0;
-  winmgr.show_menu=FALSE;
+  TOOMChromeOff;
   static U8 *old_items=NULL;
   if(old_items!=items) {
     old_items=items;
@@ -81,7 +81,9 @@ U64 MenuInteract(CDC *dc,CMenuItem *items,I64 offx,I64 offy) {
   for(idx=0;items[idx].state!=-1;idx++)
     cnt++;
 retry:
-    winmgr.show_menu=FALSE;
+    TOOMChromeOff;
+    if(ms.pos.y<20)
+      MsSet(ms.pos.x,GR_HEIGHT/2);
     switch(ScanMsg(&a,&b)) {
       case 0:
 	break;
@@ -175,7 +177,7 @@ loop:;
 }
 U64 MainMenu() {
 againm:;
-  winmgr.show_menu=FALSE;
+  TOOMChromeOff;
   static I64 state=0,ep,s;
   static CMenuItem *items=CreateMenu(
         "M_NGAME",'NGAME','n',
@@ -209,6 +211,7 @@ againm:;
         active_menu=NULL;
         active_menu_item=0;
         FlushMsgs;
+        TOOMChromeOff;
         return 0;
       } else if(!r)
         return 0;

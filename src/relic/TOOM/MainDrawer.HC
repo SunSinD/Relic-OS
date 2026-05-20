@@ -14,6 +14,16 @@ CDC *doom_scrn=DCNew(GR_WIDTH,GR_HEIGHT);
 doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
+U0 TOOMChromeOff()
+{
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu=FALSE;
+  AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
+        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+}
+
 I64 FrameCnt(CDC **arr) {
   I64 i=0;
   while(i<4&&arr[i])
@@ -3472,8 +3482,11 @@ U0 AnimateTask(I64)
   Spawn(&ST_UpdateFacesTask,NULL,NULL,,Fs);
   while(TRUE)
     {   
+    if(gameExit)
+      break;
     AnimateFire(p);
-    Refresh;  
+    Refresh;
+    Sleep(33);
   }
 }
 
@@ -3665,12 +3678,7 @@ U8 *NextLevel(U8 *nm,Bool special=FALSE) {
 extern Bool MPTalk(CDC *,U8 *connection);
 U0 PlayLevel(Bool init=TRUE) { 
   MsSet(GR_WIDTH/2,GR_HEIGHT/2);
-  WinBorder(OFF);
-  WinMax;
-  winmgr.show_menu=FALSE;
-  AutoComplete(OFF);
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+  TOOMChromeOff;
   DocClear;
   Bool transition=FALSE;
   Bool old_moving;
@@ -3731,7 +3739,7 @@ ent:;
   U64 mr;
   Unpause;
   while(!l->ended&&!gameExit) {
-    winmgr.show_menu=FALSE;
+    TOOMChromeOff;
     if(screen_melt) {
       screen_melt=FALSE;
       Server_tS; //Update server time
@@ -3746,7 +3754,7 @@ ent:;
     }
     UpdateCameraFromPlayer(&cam,p);
     DrawDoomWorld(&cam,l,doom_scrn);
-    winmgr.show_menu=FALSE;
+    TOOMChromeOff;
     if(ms.pos.y<20)
       MsSet(ms.pos.x,GR_HEIGHT/2);
 
@@ -3938,11 +3946,12 @@ play_again:
       }
     }
 end_control:;
+    TOOMChromeOff;
     if(!paused||IsNetworkGameClient) {
       UpdateLevel(l);
     }
     GrBlot(,0,0,doom_scrn);
-    winmgr.show_menu=FALSE;
+    TOOMChromeOff;
     Refresh;
   }
   if(gameExit) {
@@ -3950,9 +3959,14 @@ end_control:;
       Kill(music_task,FALSE);
       music_task=NULL;
     }
+    if(Fs->animate_task) {
+      Kill(Fs->animate_task,FALSE);
+      Fs->animate_task=NULL;
+    }
     paused=FALSE;
     in_level=FALSE;
     active_menu=NULL;
+    FlushMsgs;
     DocClear;
     Refresh;
     return;

@@ -282,6 +282,7 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
   F64 start_ts=tS;
   FlushMsgs;
   while(state<2) {
+    TOOMChromeOff;
 
     if(!FramePtr("DOOM2")) {
       GrBlot(doom_scrn,0,0,background);
@@ -348,6 +349,7 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
       state++;
     }
     GrBlot(,0,0,doom_scrn);
+    TOOMChromeOff;
     Refresh;
   }
   if(FramePtr("DOOM2"))

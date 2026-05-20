@@ -2,6 +2,10 @@
 // Relic OS Desktop Environment Startup
 // Usage: #include "::/Home/RelicOS/RelicBoot.HC";
 
+winmgr.show_menu = FALSE;
+AutoComplete(OFF);
+WinBorder(OFF);
+
 // Step 1: Apply dark color palette
 #include "::/Home/RelicOS/RelicTheme.HC"
 RelicThemeApply;
@@ -14,12 +18,15 @@ RelicWallpaperLoad;
 #include "::/Home/RelicOS/RelicDesktop.HC"
 while (TRUE) {
   try {
+    winmgr.show_menu = FALSE;
     RelicDesktop;
   } catch {
+    winmgr.show_menu = FALSE;
     RelicThemeApply;
     RelicDocDark;
     DocClear;
   }
+  winmgr.show_menu = FALSE;
   RelicThemeApply;
   RelicDocDark;
   DocClear;

@@ -112,6 +112,10 @@ U8 *clean_homesys =
   "{\n"
   "  Fs->text_attr = BLACK << 4 | LTGRAY;\n"
   "  Fs->border_attr = BLACK << 4 | DKGRAY;\n"
+  "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;\n"
+  "  winmgr.show_menu = FALSE;\n"
+  "  AutoComplete(OFF);\n"
+  "  WinBorder(OFF);\n"
   "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
   "  DocClear;\n"
@@ -124,6 +128,7 @@ U8 *clean_homesys =
   "  user1=User;\n"
   "  WinToTop(user1);\n"
   "  WinMax;\n"
+  "  winmgr.show_menu = FALSE;\n"
   "  XTalk(user1,\"Cd;\\n#include \\\"::/Home/RelicOS/RelicBoot.HC\\\";\\n\");\n"
   "}\n\n"
   "StartUpTasks;\n";
