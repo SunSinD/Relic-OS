@@ -116,6 +116,20 @@ Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
   return changed;
 }
 
+U0 RepairADefine()
+{
+  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"RelicOS V1.0.0\");",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
+  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"RelicOS  V%0.2f\",sys_os_version);",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
+  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"TempleOS V%0.2f\",sys_os_version);",
+        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
+}
+RepairADefine;
+
 U0 RepairWallPaper()
 {
   I64 size;
