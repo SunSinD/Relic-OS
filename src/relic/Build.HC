@@ -275,6 +275,11 @@ U0 PatchBootBinaries() {
   }
 }
 
+Cd("::/Adam/Opt/Boot");;
+#include "BootDVD";;
+#include "DskISORedSea";;
+Cd("::/");;
+
 U0 RelicMakeISO(U8 *_out_iso_filename)
 {
   U8 *out_iso_filename = FileNameAbs(_out_iso_filename);
