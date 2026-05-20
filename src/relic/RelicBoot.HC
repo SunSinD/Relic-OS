@@ -10,6 +10,10 @@ WinBorder(OFF);
 #include "::/Home/RelicOS/RelicTheme.HC"
 RelicThemeApply;
 
+// Step 2: Install Relic status strip
+#include "::/Home/RelicOS/RelicChrome.HC"
+RelicChromeInstall;
+
 // Step 2: Load wallpaper bitmap
 #include "::/Home/RelicOS/RelicWallpaper.HC"
 RelicWallpaperLoad;

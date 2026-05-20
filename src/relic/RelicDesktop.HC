@@ -305,8 +305,8 @@ U0 LaunchApp(I64 idx)
 
     case 6:  // System Info
       "\n\n$FG,CYAN$=== System Information ===$FG$\n\n";
-      "$FG,LTGRAY$OS:        $FG,CYAN$Relic OS v0.1$FG$\n";
-      "$FG,LTGRAY$Kernel:    $FG,CYAN$TempleOS V5.03$FG$\n";
+      "$FG,LTGRAY$OS:        $FG,CYAN$RelicOS V1.0.0$FG$\n";
+      "$FG,LTGRAY$Kernel:    $FG,CYAN$RelicOS V1.0.0$FG$\n";
       "$FG,LTGRAY$Resolution:$FG,CYAN$ 640x480$FG$\n";
       "$FG,LTGRAY$Colors:    $FG,CYAN$16-color (custom dark palette)$FG$\n\n";
       "$FG,LTGRAY$CPU Info:$FG$\n";
