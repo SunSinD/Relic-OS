@@ -5,7 +5,6 @@
 winmgr.show_menu = FALSE;
 AutoComplete(OFF);
 WinBorder(OFF);
-gr.fp_wall_paper = NULL;
 
 // Step 1: Apply dark color palette
 #include "::/Home/RelicOS/RelicTheme.HC"

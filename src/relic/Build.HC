@@ -106,6 +106,80 @@ U0 PatchVersion() {
 }
 PatchVersion;
 
+Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
+{
+  U8 *buf = *buf_ptr;
+  U8 *hit = StrFirstOcc(buf, old_text);
+  U8 *new_buf;
+  I64 old_len, new_len, prefix_len, suffix_len, new_size;
+
+  if (!hit)
+    return FALSE;
+
+  old_len = StrLen(old_text);
+  new_len = StrLen(new_text);
+  prefix_len = hit - buf;
+  suffix_len = *size_ptr - prefix_len - old_len;
+  new_size = *size_ptr - old_len + new_len;
+  new_buf = MAlloc(new_size + 1);
+
+  MemCpy(new_buf, buf, prefix_len);
+  MemCpy(new_buf + prefix_len, new_text, new_len);
+  MemCpy(new_buf + prefix_len + new_len, hit + old_len, suffix_len);
+  new_buf[new_size] = 0;
+
+  Free(buf);
+  *buf_ptr = new_buf;
+  *size_ptr = new_size;
+  return TRUE;
+}
+
+U0 PatchWallPaper()
+{
+  I64 size;
+  U8 *buf = FileRead("::/Adam/WallPaper.HC.Z", &size);
+  U8 *old_top =
+    "    Date2Struct(&ds,Now+local_time_offset);\n"
+    "    i=sys_code_bp->alloced_u8s-sys_code_bp->used_u8s;\n"
+    "    if (sys_data_bp)\n"
+    "      i+=sys_data_bp->alloced_u8s-sys_data_bp->used_u8s;\n"
+    "    StrPrint(wall->top_line,\n"
+    "\t  \"%3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf Mem:%010X CPU\",\n"
+    "\t  ds.day_of_week,\"ST_DAYS_OF_WEEK\",ds.mon,ds.day_of_mon,\n"
+    "\t  ds.hour,ds.min,ds.sec,winmgr.fps,i);\n";
+  U8 *new_top =
+    "    Date2Struct(&ds,Now+local_time_offset);\n"
+    "    StrPrint(wall->top_line,\n"
+    "\t  \"%3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf\",\n"
+    "\t  ds.day_of_week,\"ST_DAYS_OF_WEEK\",ds.mon,ds.day_of_mon,\n"
+    "\t  ds.hour,ds.min,ds.sec,winmgr.fps);\n";
+  U8 *old_cpu =
+    "  for (i=0;i<mp_cnt;i++) {\n"
+    "    c=&cpu_structs[i];\n"
+    "    if (i&1)\n"
+    "      TextPrint(Fs,44+i*2,0,BLUE<<4+WHITE,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
+    "    else\n"
+    "      TextPrint(Fs,44+i*2,0,BLUE<<4+YELLOW,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
+    "  }\n\n";
+
+  if (buf) {
+    RelicReplaceOnce(&buf, &size, old_top, new_top);
+    RelicReplaceOnce(&buf, &size,
+          "  TextPrint(Fs,0,0,BLUE<<4+WHITE,wall->top_line);",
+          "  TextPrint(Fs,0,0,BLACK<<4+LTGRAY,wall->top_line);");
+    RelicReplaceOnce(&buf, &size,
+          "    TextPrint(Fs,44-4,0,BLUE<<4+RED,\"*\");",
+          "    TextPrint(Fs,44-4,0,BLACK<<4+LTRED,\"*\");");
+    RelicReplaceOnce(&buf, &size, old_cpu, "");
+    RelicReplaceOnce(&buf, &size,
+          "  TextPrint(Fs,80-18,0,BLUE<<4+YELLOW,\"%18ts\",st);",
+          "  TextPrint(Fs,80-18,0,BLACK<<4+YELLOW,\"%18ts\",st);");
+    FileWrite("::/Adam/WallPaper.HC.Z", buf, size);
+    Free(buf);
+  }
+}
+PatchWallPaper;
+
 U8 *clean_homesys =
   "// RelicOS Minimal Boot Script\n\n"
   "U0 UserStartUp()\n"
@@ -114,7 +188,6 @@ U8 *clean_homesys =
   "  Fs->border_attr = BLACK << 4 | DKGRAY;\n"
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;\n"
   "  winmgr.show_menu = FALSE;\n"
-  "  gr.fp_wall_paper = NULL;\n"
   "  AutoComplete(OFF);\n"
   "  WinBorder(OFF);\n"
   "  WinFocus;\n"
