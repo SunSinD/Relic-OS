@@ -46,7 +46,10 @@ if (!toom_installed) {
 "2. Completely rebranding OS and fixing Boot Script...\n";
 U0 ReplaceBranding(U8 *filename) {
   I64 size;
-  U8 *buf = FileRead(filename, &size);
+  U8 *buf = NULL;
+  if (!FileFind(filename))
+    return;
+  buf = FileRead(filename, &size);
   if (buf) {
     I64 i;
     for (i = 0; i < size - 8; i++) {
@@ -56,30 +59,6 @@ U0 ReplaceBranding(U8 *filename) {
     Free(buf);
   }
 }
-
-U0 PatchDoDistro() {
-  I64 size;
-  U8 *buf = FileRead("::/Misc/DoDistro.HC.Z", &size);
-  if (buf) {
-    U8 *new_buf = MAlloc(size + 100);
-    I64 i;
-    I64 j = 0;
-    for (i = 0; i < size; i++) {
-      if (i < size - 6 && !MemCmp(buf + i, "b1\n\n\n\n", 6)) {
-        MemCpy(new_buf + j, "T\nt\np\n\n\n\n", 9);
-        j += 9;
-        i += 5;
-      } else {
-        new_buf[j++] = buf[i];
-      }
-    }
-    FileWrite("::/Misc/DoDistro.HC.Z", new_buf, j);
-    Free(buf);
-    Free(new_buf);
-  }
-}
-
-PatchDoDistro;
 
 CDirEntry *relic_boot_de = FilesFind("::/0000Boot/*");
 CDirEntry *tmp_de = relic_boot_de;
@@ -127,9 +106,12 @@ Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
 Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
 {
   I64 size;
-  U8 *buf = FileRead(filename, &size);
+  U8 *buf = NULL;
   Bool changed = FALSE;
 
+  if (!FileFind(filename))
+    return FALSE;
+  buf = FileRead(filename, &size);
   if (buf) {
     changed = RelicReplaceOnce(&buf, &size, old_text, new_text);
     if (changed)
@@ -142,7 +124,7 @@ Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
 U0 RepairWallPaper()
 {
   I64 size;
-  U8 *buf = FileRead("::/Adam/WallPaper.HC.Z", &size);
+  U8 *buf = NULL;
   Bool changed = FALSE;
   U8 *old_top =
     "    Date2Struct(&ds,Now+local_time_offset);\n"
@@ -183,6 +165,8 @@ U0 RepairWallPaper()
     "  }\n\n"
     "  st=ScanCode2KeyName(kbd.last_down_scan_code);\n";
 
+  if (FileFind("::/Adam/WallPaper.HC.Z"))
+    buf = FileRead("::/Adam/WallPaper.HC.Z", &size);
   if (buf) {
     if (RelicReplaceOnce(&buf, &size, bad_top, old_top))
       changed = TRUE;
@@ -210,7 +194,9 @@ RepairWallPaper;
 
 U0 PatchVersion() {
   I64 size;
-  U8 *buf = FileRead("::/Kernel/KernelA.HH.Z", &size);
+  U8 *buf = NULL;
+  if (FileFind("::/Kernel/KernelA.HH.Z"))
+    buf = FileRead("::/Kernel/KernelA.HH.Z", &size);
   if (buf) {
     I64 i;
     for (i = 0; i < size - 5; i++) {
@@ -274,7 +260,10 @@ FileWrite("::/Home/HomeSys.HC.Z", clean_homesys, StrLen(clean_homesys));
 "Stable games launcher copied.\n";
 
 U0 FixBootHDIns() {
-  CDoc *doc = DocRead("::/Adam/Opt/Boot/BootHDIns.HC");
+  CDoc *doc = NULL;
+  if (!FileFind("::/Adam/Opt/Boot/BootHDIns.HC"))
+    return;
+  doc = DocRead("::/Adam/Opt/Boot/BootHDIns.HC");
   if (doc) {
     CDocEntry *doc_e = doc->head.next;
     U8 *old_tag;
@@ -301,7 +290,9 @@ U0 PatchBootBinaries() {
   FixBootHDIns();
   I64 size;
   I64 i;
-  U8 *buf = FileRead("::/0000Boot/BootCD.BIN.C", &size);
+  U8 *buf = NULL;
+  if (FileFind("::/0000Boot/BootCD.BIN.C"))
+    buf = FileRead("::/0000Boot/BootCD.BIN.C", &size);
   if (buf) {
     for (i = 0; i < size - 8; i++) {
       if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
@@ -309,7 +300,9 @@ U0 PatchBootBinaries() {
     FileWrite("::/0000Boot/BootCD.BIN.C", buf, size);
     Free(buf);
   }
-  buf = FileRead("::/0000Boot/BootHD.BIN.C", &size);
+  buf = NULL;
+  if (FileFind("::/0000Boot/BootHD.BIN.C"))
+    buf = FileRead("::/0000Boot/BootHD.BIN.C", &size);
   if (buf) {
     for (i = 0; i < size - 8; i++) {
       if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
@@ -318,9 +311,55 @@ U0 PatchBootBinaries() {
     Free(buf);
   }
 }
-PatchBootBinaries;
 
-#include "::/Misc/DoDistro.HC";
+Cd("::/Adam/Opt/Boot");;
+#include "BootDVDIns";;
+Cd("::/");;
+
+#define RELIC_STD_DISTRO_DVD_CFG "TB\nScale2Mem(2048,0x40000)\nT \n\n\n\n"
+
+U0 RelicMakeISO(U8 *_out_iso_filename)
+{
+  U8 *out_iso_filename = FileNameAbs(_out_iso_filename);
+
+  Drv('C');
+  Cd("/");
+  if (!DrvIsWritable) {
+    "$FG,LTRED$Drive C must be writable before building the ISO.$FG$\n";
+    Free(out_iso_filename);
+    return;
+  }
+
+  DelTree("/Distro");
+  Del(out_iso_filename);
+
+  DirMk("/Distro");
+  In(RELIC_STD_DISTRO_DVD_CFG);
+  BootDVDIns;
+  PatchBootBinaries;
+
+  Copy("/*", "/Distro");
+  Del("/Distro/" KERNEL_BIN_C);
+
+  CopyTree(BOOT_DIR, "/Distro" BOOT_DIR);
+  CopyTree("/Home", "/Distro/Home");
+  CopyTree("/Adam", "/Distro/Adam");
+  CopyTree("/Apps", "/Distro/Apps");
+  CopyTree("/Compiler", "/Distro/Compiler");
+  CopyTree("/Demo", "/Distro/Demo");
+  CopyTree("/Doc", "/Distro/Doc");
+  CopyTree("/Kernel", "/Distro/Kernel");
+  CopyTree("/Misc", "/Distro/Misc");
+  if (FileFind("/Downloads"))
+    CopyTree("/Downloads", "/Distro/Downloads");
+  DirMk("/Distro/Tmp");
+  DirMk("/Distro/Tmp/ScrnShots");
+
+  RedSeaISO(out_iso_filename, "/Distro", "/Distro" BOOT_DIR_KERNEL_BIN_C);
+  Free(out_iso_filename);
+}
+
+RelicMakeISO("::/Tmp/MyDistro.ISO.C");
 
 "4. Freeing up space on transfer drive...\n";
 DelTree("E:/TOOM");
@@ -343,7 +382,9 @@ for (clean_i = 0; clean_i < 30; clean_i++) {
 
 "5. Splitting and copying ISO to transfer drive in 2MB chunks (Bypassing FAT32 bug)...\n";
 I64 relic_iso_size;
-U8 *relic_iso_buf = FileRead("::/Tmp/MyDistro.ISO.C", &relic_iso_size);
+U8 *relic_iso_buf = NULL;
+if (FileFind("::/Tmp/MyDistro.ISO.C"))
+  relic_iso_buf = FileRead("::/Tmp/MyDistro.ISO.C", &relic_iso_size);
 if (relic_iso_buf) {
   I64 relic_chunk_sz = 1024 * 1024 * 2;
   I64 relic_chunks = (relic_iso_size + relic_chunk_sz - 1) / relic_chunk_sz;
@@ -357,6 +398,8 @@ if (relic_iso_buf) {
     FileWrite(relic_chunk_name, relic_iso_buf + relic_i * relic_chunk_sz, relic_write_sz);
   }
   Free(relic_iso_buf);
+} else {
+  "$FG,LTRED$ISO build failed before ::/Tmp/MyDistro.ISO.C was created.$FG$\n";
 }
 
 "\n$FG,CYAN$============================================$FG$\n";
