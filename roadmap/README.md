@@ -33,6 +33,7 @@
 - [x] Stabilize TOOM wrapper/runtime path: clean launch palette, throttled renderer-adjacent task, Quit Game cleanup
 - [x] Suppress TempleOS menu chrome in Relic desktop, numeric Games launcher, and TOOM runtime contexts
 - [x] Avoid TempleOS FAT32 transfer-drive cleanup during ISO export
+- [x] Restore clean Adam wallpaper source during build instead of patching it in-place
 - [ ] Validate TOOM renderer and Quit Game behavior in the next VMware ISO smoke test
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path

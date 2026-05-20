@@ -132,76 +132,21 @@ U0 RestoreADefine()
 }
 RestoreADefine;
 
-U0 RepairWallPaper()
+U0 RestoreWallPaper()
 {
   I64 size;
   U8 *buf = NULL;
-  Bool changed = FALSE;
-  U8 *old_top =
-    "    Date2Struct(&ds,Now+local_time_offset);\n"
-    "    i=sys_code_bp->alloced_u8s-sys_code_bp->used_u8s;\n"
-    "    if (sys_data_bp)\n"
-    "      i+=sys_data_bp->alloced_u8s-sys_data_bp->used_u8s;\n"
-    "    StrPrint(wall->top_line,\n"
-    "\t  \"%3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf Mem:%010X CPU\",\n"
-    "\t  ds.day_of_week,\"ST_DAYS_OF_WEEK\",ds.mon,ds.day_of_mon,\n"
-    "\t  ds.hour,ds.min,ds.sec,winmgr.fps,i);\n";
-  U8 *bad_top =
-    "    Date2Struct(&ds,Now+local_time_offset);\n"
-    "    StrPrint(wall->top_line,\n"
-    "\t  \"%3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf\",\n"
-    "\t  ds.day_of_week,\"ST_DAYS_OF_WEEK\",ds.mon,ds.day_of_mon,\n"
-    "\t  ds.hour,ds.min,ds.sec,winmgr.fps);\n";
-  U8 *cpu_loop =
-    "  for (i=0;i<mp_cnt;i++) {\n"
-    "    c=&cpu_structs[i];\n"
-    "    if (i&1)\n"
-    "      TextPrint(Fs,44+i*2,0,BLUE<<4+WHITE,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
-    "    else\n"
-    "      TextPrint(Fs,44+i*2,0,BLUE<<4+YELLOW,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
-    "  }\n\n";
-  U8 *bad_cpu_gap =
-    "  if (scrncast.record)\n"
-    "    TextPrint(Fs,44-4,0,BLUE<<4+RED,\"*\");\n\n"
-    "  st=ScanCode2KeyName(kbd.last_down_scan_code);\n";
-  U8 *fixed_cpu_gap =
-    "  if (scrncast.record)\n"
-    "    TextPrint(Fs,44-4,0,BLUE<<4+RED,\"*\");\n"
-    "  for (i=0;i<mp_cnt;i++) {\n"
-    "    c=&cpu_structs[i];\n"
-    "    if (i&1)\n"
-    "      TextPrint(Fs,44+i*2,0,BLUE<<4+WHITE,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
-    "    else\n"
-    "      TextPrint(Fs,44+i*2,0,BLUE<<4+YELLOW,\"%2tf\",100.0*(1.0-c->idle_factor));\n"
-    "  }\n\n"
-    "  st=ScanCode2KeyName(kbd.last_down_scan_code);\n";
 
-  if (FileFind("::/Adam/WallPaper.HC.Z"))
-    buf = FileRead("::/Adam/WallPaper.HC.Z", &size);
+  if (!FileFind("E:/WallPaperClean.HC"))
+    return;
+
+  buf = FileRead("E:/WallPaperClean.HC", &size);
   if (buf) {
-    if (RelicReplaceOnce(&buf, &size, bad_top, old_top))
-      changed = TRUE;
-    if (RelicReplaceOnce(&buf, &size,
-          "  TextPrint(Fs,0,0,BLACK<<4+LTGRAY,wall->top_line);",
-          "  TextPrint(Fs,0,0,BLUE<<4+WHITE,wall->top_line);"))
-      changed = TRUE;
-    if (RelicReplaceOnce(&buf, &size,
-          "    TextPrint(Fs,44-4,0,BLACK<<4+LTRED,\"*\");",
-          "    TextPrint(Fs,44-4,0,BLUE<<4+RED,\"*\");"))
-      changed = TRUE;
-    if (!StrFirstOcc(buf, cpu_loop))
-      if (RelicReplaceOnce(&buf, &size, bad_cpu_gap, fixed_cpu_gap))
-        changed = TRUE;
-    if (RelicReplaceOnce(&buf, &size,
-          "  TextPrint(Fs,80-18,0,BLACK<<4+YELLOW,\"%18ts\",st);",
-          "  TextPrint(Fs,80-18,0,BLUE<<4+YELLOW,\"%18ts\",st);"))
-      changed = TRUE;
-    if (changed)
-      FileWrite("::/Adam/WallPaper.HC.Z", buf, size);
+    FileWrite("::/Adam/WallPaper.HC.Z", buf, size);
     Free(buf);
   }
 }
-RepairWallPaper;
+RestoreWallPaper;
 
 U8 *clean_homesys =
   "// RelicOS Minimal Boot Script\n\n"
