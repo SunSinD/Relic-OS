@@ -231,7 +231,7 @@ againm:;
 	if(FramePtr("DOOM2")) {
         if(l) {FreeLevel(l);l=NULL;}
         l=LoadWadLevel("MAP01",s-'1'+1);
-        screen_melt=TRUE;
+        screen_melt=FALSE;
 //This will check if we are in a level,otherwise the world is just swapped with l
         PlayLevel;
         return 0;
@@ -248,7 +248,7 @@ againm:;
         }
         if(oldl)
 	  FreeLevel(oldl);
-        screen_melt=TRUE;
+        screen_melt=FALSE;
 //This will check if we are in a level,otherwise the world is just swapped with l
         PlayLevel;
         return 0;

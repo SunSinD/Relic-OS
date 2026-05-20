@@ -1,6 +1,6 @@
 #ifndef PHYSICS
 #define PHYSICS "P Pushin" 
-#define FRICTION .8
+#define FRICTION .45
 Bool IsCrushed(CDoomSector *s,CDoomThing *t) {
   F64 gap=s->ceil_height-s->floor_height;
   if(gap<=t->template->height)

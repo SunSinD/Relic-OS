@@ -16,6 +16,11 @@ U0 RelicTOOMDarkWin()
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
+U0 RelicTOOMGamePalette()
+{
+  GrPaletteSet(gr_palette_std);
+}
+
 U0 RelicTOOMUseIWAD()
 {
   FramePtrDel("USE_IWAD");
@@ -48,6 +53,7 @@ U0 RunTOOM()
     RelicTOOMUseIWAD;
     try {
       FlushMsgs;
+      RelicTOOMGamePalette;
       RelicTOOMDarkWin;
       Silent(TRUE);
       ExeFile("SinglePlayer.HC");
@@ -71,6 +77,7 @@ U0 RunTOOM()
     RelicTOOMUseIWAD;
     try {
       FlushMsgs;
+      RelicTOOMGamePalette;
       RelicTOOMDarkWin;
       Silent(TRUE);
       ExeFile("SinglePlayer.HC");
@@ -94,6 +101,7 @@ U0 RunTOOM()
     RelicTOOMDarkWin;
     try {
       FlushMsgs;
+      RelicTOOMGamePalette;
       Silent(TRUE);
       ExeFile("Load.HC");
       Silent(old_silent);
@@ -115,6 +123,7 @@ U0 RunTOOM()
     RelicTOOMDarkWin;
     try {
       FlushMsgs;
+      RelicTOOMGamePalette;
       Silent(TRUE);
       ExeFile("Load.HC");
       Silent(old_silent);

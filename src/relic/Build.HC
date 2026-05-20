@@ -150,6 +150,7 @@ RestoreWallPaper;
 
 U8 *clean_homesys =
   "// RelicOS Minimal Boot Script\n\n"
+  "Bool relic_first_user_start = TRUE;\n\n"
   "U0 UserStartUp()\n"
   "{\n"
   "  Fs->text_attr = BLACK << 4 | LTGRAY;\n"
@@ -157,7 +158,11 @@ U8 *clean_homesys =
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
-  "  WinBorder(ON);\n"
+  "  if (relic_first_user_start) {\n"
+  "    relic_first_user_start = FALSE;\n"
+  "    WinBorder(OFF);\n"
+  "  } else\n"
+  "    WinBorder(ON);\n"
   "  WinFocus;\n"
   "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"

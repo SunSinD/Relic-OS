@@ -3494,21 +3494,21 @@ U0 AnimateTask(I64)
 
 U0 TOOMStopTasks()
 {
-  if(cur_snd_task && TaskValidate(cur_snd_task)) {
+  if(cur_snd_task && cur_snd_task!=Fs && TaskValidate(cur_snd_task)) {
     Kill(cur_snd_task,FALSE);
   }
   cur_snd_task=NULL;
-  if(music_task && TaskValidate(music_task)) {
+  if(music_task && music_task!=Fs && TaskValidate(music_task)) {
     Kill(music_task,FALSE);
   }
   music_task=NULL;
-  if(toom_faces_task && TaskValidate(toom_faces_task)) {
+  if(toom_faces_task && toom_faces_task!=Fs && TaskValidate(toom_faces_task)) {
     Kill(toom_faces_task,FALSE);
   }
   toom_faces_task=NULL;
   if(Fs->animate_task==toom_animate_task)
     Fs->animate_task=NULL;
-  if(toom_animate_task && TaskValidate(toom_animate_task)) {
+  if(toom_animate_task && toom_animate_task!=Fs && TaskValidate(toom_animate_task)) {
     Kill(toom_animate_task,FALSE);
   }
   toom_animate_task=NULL;
@@ -3525,15 +3525,9 @@ U0 UpdateCameraFromPlayer(CDoomCamera *cam,CDoomPlayer *p) {
     cam->h=Clamp(cam->h-12*1/30.,p->height+8,p->height+32);
   } else 
     cam->h=p->height+41;
-  if(momentum>.1) {
-    t-=p->movement_start_tS;
-    p->camera_bob=Sin(t*2*pi)*Min(8,momentum/48.*16);
-    p->weapon_bob_y=Min(1,momentum/48.)*16*Sin(t*2*pi)*Cos(angle-p->angle);
-    p->weapon_bob_x=Min(1,momentum/48.)*16*Sin(t*2*pi)*Sin(angle-p->angle);
-  } else {
-    p->weapon_bob_x=0;
-    p->weapon_bob_y=0;
-  }
+  p->camera_bob=0;
+  p->weapon_bob_x=0;
+  p->weapon_bob_y=0;
   if(s) cam->h=Clamp(cam->h+p->camera_bob,s->floor_height+1.,s->ceil_height-4.);
   cam->x=p->x;
   cam->y=p->y;
@@ -3874,6 +3868,10 @@ ent:;
         }
         if(move_mag||move_mag_side)
 	  PlayerMove(l,p,Sqrt(move_mag*move_mag+move_mag_side*move_mag_side),Arg(move_mag*Cos(move_angle),move_mag_side*Sin(move_angle_side)));
+        else {
+          p->momx=0;
+          p->momy=0;
+        }
 
 	UpdateCameraFromPlayer(&cam,p);
 
