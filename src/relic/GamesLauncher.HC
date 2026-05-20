@@ -6,6 +6,7 @@ U0 RelicGamesChromeOff()
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
+  WinFocus;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->border_attr = BLACK << 4 | DKGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";

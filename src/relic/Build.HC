@@ -116,6 +116,7 @@ U8 *clean_homesys =
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
   "  WinBorder(OFF);\n"
+  "  WinFocus;\n"
   "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
   "  DocClear;\n"
