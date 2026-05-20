@@ -3525,9 +3525,15 @@ U0 UpdateCameraFromPlayer(CDoomCamera *cam,CDoomPlayer *p) {
     cam->h=Clamp(cam->h-12*1/30.,p->height+8,p->height+32);
   } else 
     cam->h=p->height+41;
-  p->camera_bob=0;
-  p->weapon_bob_x=0;
-  p->weapon_bob_y=0;
+  if(momentum>.1) {
+    t-=p->movement_start_tS;
+    p->camera_bob=Sin(t*2*pi)*Min(8,momentum/48.*16);
+    p->weapon_bob_y=Min(1,momentum/48.)*16*Sin(t*2*pi)*Cos(angle-p->angle);
+    p->weapon_bob_x=Min(1,momentum/48.)*16*Sin(t*2*pi)*Sin(angle-p->angle);
+  } else {
+    p->weapon_bob_x=0;
+    p->weapon_bob_y=0;
+  }
   if(s) cam->h=Clamp(cam->h+p->camera_bob,s->floor_height+1.,s->ceil_height-4.);
   cam->x=p->x;
   cam->y=p->y;

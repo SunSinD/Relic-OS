@@ -241,10 +241,16 @@ U0 PatchBootBinaries() {
   }
 }
 
-Cd("::/Adam/Opt/Boot");;
-#include "BootDVD";;
-#include "DskISORedSea";;
-Cd("::/");;
+U0 RelicLoadISOHelpers()
+{
+  Cd("::/Adam/Opt/Boot");
+  if (!HashFind("BDVD_START", Fs->hash_table, HTG_SRC_SYM))
+    ExeFile("BootDVD.HC.Z", CCF_JUST_LOAD);
+  if (!HashFind("RedSeaISO", Fs->hash_table, HTG_SRC_SYM))
+    ExeFile("DskISORedSea.HC.Z", CCF_JUST_LOAD);
+  Cd("::/");
+}
+RelicLoadISOHelpers;
 
 U0 RelicMakeISO(U8 *_out_iso_filename)
 {
