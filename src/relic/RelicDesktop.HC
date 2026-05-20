@@ -68,11 +68,11 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   dc->color = BLACK;
   GrRect(dc, 0, 0, w, TOPBAR_H);
   dc->color = CYAN;
-  GrPrint(dc, 6, 3, "Relic OS");
+  GrPrint(dc, 6, 3, "RelicOS V1.0.0");
   dc->color = DKGRAY;
-  GrPrint(dc, 80, 3, "|");
+  GrPrint(dc, 132, 3, "|");
   dc->color = LTGRAY;
-  GrPrint(dc, 96, 3, "Desktop");
+  GrPrint(dc, 148, 3, "Desktop");
   dc->color = DKGRAY;
   GrLine(dc, 0, TOPBAR_H, w, TOPBAR_H);
 

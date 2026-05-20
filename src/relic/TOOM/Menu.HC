@@ -211,7 +211,6 @@ againm:;
         paused=FALSE;
         active_menu=NULL;
         active_menu_item=0;
-        TOOMStopTasks;
         FlushMsgs;
         TOOMChromeOff;
         return 0;

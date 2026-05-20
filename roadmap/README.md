@@ -16,7 +16,7 @@
 - [x] Build dock-based desktop launcher (`RelicDesktop.HC`)
 - [x] Implement inline app execution (Files, Editor, Shell, Mount, Tasks, Memory, SysInfo)
 - [x] Add Terry Davis tribute page in Help
-- [x] Remove TempleOS chrome: `WinBorder(OFF)`, `AutoComplete(OFF)`
+- [x] Suppress TempleOS menu chrome while preserving terminal borders
 - [x] Create boot orchestrator (`RelicBoot.HC`)
 
 ## Phase 3: Polish & Refinement (In Progress)
@@ -32,6 +32,7 @@
 - [x] Package TOOM source tree into `src/relic/TOOM/` for release builds
 - [x] Stabilize TOOM wrapper/runtime path: clean launch palette, throttled renderer-adjacent task, Quit Game cleanup
 - [x] Suppress TempleOS menu chrome in Relic desktop, numeric Games launcher, and TOOM runtime contexts
+- [x] Avoid TempleOS FAT32 transfer-drive cleanup during ISO export
 - [ ] Validate TOOM renderer and Quit Game behavior in the next VMware ISO smoke test
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path

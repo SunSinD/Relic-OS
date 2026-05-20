@@ -212,7 +212,7 @@ U8 *clean_homesys =
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
-  "  WinBorder(OFF);\n"
+  "  WinBorder(ON);\n"
   "  WinFocus;\n"
   "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
@@ -343,25 +343,7 @@ U0 RelicMakeISO(U8 *_out_iso_filename)
 
 RelicMakeISO("::/Tmp/MyDistro.ISO.C");
 
-"4. Freeing up space on transfer drive...\n";
-DelTree("E:/TOOM");
-Del("E:/TOOM.ISO.C");
-Del("E:/wallpaper.raw");
-Del("E:/RelicBoot.HC");
-Del("E:/RelicDesktop.HC");
-Del("E:/RelicChrome.HC");
-Del("E:/RelicTheme.HC");
-Del("E:/RelicWallpaper.HC");
-Del("E:/RunTOOM.HC");
-Del("E:/GamesLauncher.HC");
-Del("E:/ADefineClean.HC");
-
-I64 clean_i;
-for (clean_i = 0; clean_i < 30; clean_i++) {
-  U8 clean_chunk_name[256];
-  StrPrint(clean_chunk_name, "E:/ISO.P%02d", clean_i);
-  Del(clean_chunk_name);
-}
+"4. Leaving transfer drive sources intact; Windows recreates the VHD each run.\n";
 
 "5. Splitting and copying ISO to transfer drive in 2MB chunks (Bypassing FAT32 bug)...\n";
 I64 relic_iso_size;

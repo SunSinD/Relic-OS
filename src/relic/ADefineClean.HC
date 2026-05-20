@@ -4,7 +4,7 @@ U0 LoadDocDefines()
 {
   CBinFile *bfh=mem_boot_base-sizeof(CBinFile);
 
-  DefinePrint("DD_OS_NAME_VERSION","RelicOS V1.0.0");
+  DefinePrint("DD_OS_NAME_VERSION","%s","RelicOS V1.0.0");
   DefinePrint("DD_TEMPLEOS_AGE","%0.1f",
         (Now-Str2Date("8/1/2003"))/ToF64(1<<32)/CDATE_YEAR_DAYS);
 
