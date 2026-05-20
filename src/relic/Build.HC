@@ -116,19 +116,21 @@ Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
   return changed;
 }
 
-U0 RepairADefine()
+U0 RestoreADefine()
 {
-  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"RelicOS V1.0.0\");",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
-  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"RelicOS  V%0.2f\",sys_os_version);",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
-  RelicFileReplaceOnce("::/Adam/ADefine.HC.Z",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"TempleOS V%0.2f\",sys_os_version);",
-        "DefinePrint(\"DD_OS_NAME_VERSION\",\"%s\",\"RelicOS V1.0.0\");");
+  I64 size;
+  U8 *buf = NULL;
+
+  if (!FileFind("E:/ADefineClean.HC"))
+    return;
+
+  buf = FileRead("E:/ADefineClean.HC", &size);
+  if (buf) {
+    FileWrite("::/Adam/ADefine.HC.Z", buf, size);
+    Free(buf);
+  }
 }
-RepairADefine;
+RestoreADefine;
 
 U0 RepairWallPaper()
 {
@@ -352,6 +354,7 @@ Del("E:/RelicTheme.HC");
 Del("E:/RelicWallpaper.HC");
 Del("E:/RunTOOM.HC");
 Del("E:/GamesLauncher.HC");
+Del("E:/ADefineClean.HC");
 
 I64 clean_i;
 for (clean_i = 0; clean_i < 30; clean_i++) {
