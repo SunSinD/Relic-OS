@@ -12,4 +12,15 @@ RelicWallpaperLoad;
 
 // Step 3: Launch desktop
 #include "::/Home/RelicOS/RelicDesktop.HC"
-RelicDesktop;
+while (TRUE) {
+  try {
+    RelicDesktop;
+  } catch {
+    RelicThemeApply;
+    RelicDocDark;
+    DocClear;
+  }
+  RelicThemeApply;
+  RelicDocDark;
+  DocClear;
+}

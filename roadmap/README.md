@@ -28,6 +28,10 @@
 - [x] Port TOOM to RelicOS and integrate custom Games Launcher
 - [x] Enforce system-wide black/grey terminal theme across all tasks
 - [x] Implement robust build auto-repair script for kernel files (`Build.HC`)
+- [x] Replace unstable graphical Games launcher with numeric game selection menu
+- [x] Package TOOM source tree into `src/relic/TOOM/` for release builds
+- [ ] Stabilize TOOM runtime: clean launch, renderer artifacts, Quit Game return path
+- [ ] Fully suppress TempleOS menu chrome in every desktop/game context
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history

@@ -13,6 +13,7 @@
 // ---- Globals ----
 I64 relic_ox = 0, relic_oy = 0;
 I64 relic_w = 640, relic_h = 480;
+I64 relic_pending_app = -1;
 
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
@@ -47,6 +48,8 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   I64 i, bx, by;
   I64 dock_w, dock_x, dock_y;
   I64 mx, my, hover;
+
+  winmgr.show_menu = FALSE;
 
   relic_w = w;
   relic_h = h;
@@ -134,8 +137,60 @@ U0 DrawDesktop(CTask *task, CDC *dc)
 U0 RelicDocDark()
 {
   Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
+U0 RelicDesktopMode()
+{
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
+        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+  WinFocus;
+  RelicDocDark;
+}
+
+I64 RelicDockHit(I64 x, I64 y)
+{
+  I64 dock_w, dock_x, dock_y;
+  I64 i, bx, by;
+
+  dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
+  dock_x = (relic_w - dock_w) / 2;
+  dock_y = relic_h - DOCK_H - DOCK_MARGIN;
+
+  for (i = 0; i < NUM_APPS; i++) {
+    bx = dock_x + 8 + i * (DOCK_BTN_W + DOCK_GAP);
+    by = dock_y + 5;
+    if (x >= bx && x <= bx + DOCK_BTN_W &&
+        y >= by && y <= by + DOCK_BTN_H)
+      return i;
+  }
+
+  return -1;
+}
+
+I64 RelicKeyApp(I64 ch)
+{
+  if (ch == 'f' || ch == 'F')
+    return 0;
+  if (ch == 'e' || ch == 'E')
+    return 1;
+  if (ch == 's' || ch == 'S')
+    return 2;
+  if (ch == 'g' || ch == 'G')
+    return 3;
+  if (ch == 't' || ch == 'T')
+    return 4;
+  if (ch == 'm' || ch == 'M')
+    return 5;
+  if (ch == 'i' || ch == 'I')
+    return 6;
+  if (ch == 'h' || ch == 'H' || ch == '?')
+    return 7;
+  return -1;
 }
 
 U0 RelicDriveColorsDark()
@@ -174,6 +229,7 @@ U0 RelicDriveColorsRestore()
 U0 LaunchApp(I64 idx)
 {
   Fs->draw_it = NULL;
+  winmgr.show_menu = FALSE;
   RelicDocDark;
   DocClear;
   RelicDocDark;
@@ -217,7 +273,20 @@ U0 LaunchApp(I64 idx)
       break;
 
     case 3:  // Games
-      User("#include \"::/Home/RelicOS/GamesLauncher.HC\";\n");
+      if (FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
+        try {
+          ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
+          ExePrint("RelicGamesLauncher;");
+        } catch {
+          "\n$FG,LTRED$Games launcher failed to compile/run.$FG$\n";
+          "$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+          GetChar;
+        }
+      } else {
+        "\n$FG,LTRED$GamesLauncher.HC not found in ::/Home/RelicOS.$FG$\n";
+        "$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+        GetChar;
+      }
       break;
 
     case 4:  // Tasks
@@ -302,50 +371,45 @@ U0 LaunchApp(I64 idx)
   }
 
   DocClear;
+  RelicDesktopMode;
   Fs->draw_it = &DrawDesktop;
+  winmgr.show_menu = FALSE;
 }
 
 // ---- Main loop (runs forever as default shell) ----
 U0 RelicDesktop()
 {
-  I64 mx, my, i, bx, by;
-  I64 dock_w, dock_x, dock_y;
+  I64 msg_code, arg1, arg2, i;
 
   SettingsPush;
   AutoComplete(OFF);
-  WinBorder(OFF);
-  WinMax;
-  Fs->win_inhibit |= WIF_FOCUS_TASK_MENU;
-  RelicDocDark;
+  RelicDesktopMode;
   DocClear;
-  RelicDocDark;
   Fs->draw_it = &DrawDesktop;
 
   while (TRUE) {
-    while (ScanKey) GetKey; // flush keyboard buffer so typing on desktop doesn't leak into apps
-    
-    if (ms.lb) {
-      mx = ms.pos.x - relic_ox;
-      my = ms.pos.y - relic_oy;
+    winmgr.show_menu = FALSE;
+    msg_code = GetMsg(&arg1, &arg2, 1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN);
+    switch (msg_code) {
+      case MSG_KEY_DOWN:
+        relic_pending_app = RelicKeyApp(arg1);
+        break;
 
-      dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
-      dock_x = (relic_w - dock_w) / 2;
-      dock_y = relic_h - DOCK_H - DOCK_MARGIN;
-
-      for (i = 0; i < NUM_APPS; i++) {
-        bx = dock_x + 8 + i * (DOCK_BTN_W + DOCK_GAP);
-        by = dock_y + 5;
-
-        if (mx >= bx && mx <= bx + DOCK_BTN_W &&
-            my >= by && my <= by + DOCK_BTN_H) {
-          while (ms.lb) Sleep(10); // Wait for release to prevent document cursor jump / red link click flashes
-          LaunchApp(i);
-          break;
-        }
-      }
-
-      while (ms.lb) Sleep(10);
+      case MSG_MS_L_DOWN:
+        relic_pending_app = RelicDockHit(arg1, arg2);
+        if (relic_pending_app < 0)
+          relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
+                ms.pos.y - relic_oy);
+        break;
     }
-    Sleep(30);
+
+    if (relic_pending_app >= 0) {
+      i = relic_pending_app;
+      relic_pending_app = -1;
+      while (ms.lb)
+        Sleep(10);
+      FlushMsgs;
+      LaunchApp(i);
+    }
   }
 }

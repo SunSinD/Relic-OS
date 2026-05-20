@@ -7,6 +7,10 @@
 *.iso
 *.vhd
 
+# Temporary imported source archives/extractions
+TOOM.zip
+TOOM_Extracted/
+
 # Python cache
 __pycache__/
 *.pyc

@@ -12,8 +12,35 @@ Copy("E:/RelicDesktop.HC", "::/Home/RelicOS");
 Copy("E:/RelicTheme.HC", "::/Home/RelicOS");
 Copy("E:/RelicWallpaper.HC", "::/Home/RelicOS");
 Copy("E:/wallpaper.raw", "::/Home/RelicOS");
-Copy("E:/TOOM.ISO.C", "::/Home/RelicOS");
 Copy("E:/RunTOOM.HC", "::/Home/RelicOS");
+Copy("E:/GamesLauncher.HC", "::/Home/RelicOS");
+
+"Installing TOOM into ::/Home/TOOM so DOOM is ready on first boot...\n";
+U8 toom_drv;
+Bool toom_installed = FALSE;
+if (FileFind("E:/TOOM/SinglePlayer.HC") ||
+    FileFind("E:/TOOM/SinglePlayer.HC.Z")) {
+  DelTree("::/Home/TOOM");
+  CopyTree("E:/TOOM/", "::/Home/TOOM");
+  Del("::/Home/TOOM/Install.HC");
+  toom_installed = TRUE;
+}
+if (!toom_installed && FileFind("E:/TOOM.ISO.C")) {
+  Copy("E:/TOOM.ISO.C", "::/Home/RelicOS");
+  toom_drv = MountFile("::/Home/RelicOS/TOOM.ISO.C");
+  Drv(toom_drv);
+  Cd("/");
+  ExeFile("Install.HC", CCF_CMD_LINE);
+  Drv('C');
+  Cd("::/Home");
+  if (FileFind("::/Home/TOOM/SinglePlayer.HC") ||
+      FileFind("::/Home/TOOM/SinglePlayer.HC.Z"))
+    toom_installed = TRUE;
+  Del("::/Home/RelicOS/TOOM.ISO.C");
+}
+if (!toom_installed) {
+  "$FG,LTRED$WARNING: TOOM source was not found on E:/TOOM.$FG$\n";
+}
 
 "2. Completely rebranding OS and fixing Boot Script...\n";
 U0 ReplaceBranding(U8 *filename) {
@@ -84,7 +111,7 @@ U8 *clean_homesys =
   "U0 UserStartUp()\n"
   "{\n"
   "  Fs->text_attr = BLACK << 4 | LTGRAY;\n"
-  "  Fs->border_attr = BLACK << 4 | LTGRAY;\n"
+  "  Fs->border_attr = BLACK << 4 | DKGRAY;\n"
   "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
   "  DocClear;\n"
@@ -102,63 +129,7 @@ U8 *clean_homesys =
   "StartUpTasks;\n";
 FileWrite("::/Home/HomeSys.HC.Z", clean_homesys, StrLen(clean_homesys));
 
-"Restoring pristine games menu and injecting DOOM...\n";
-Copy("::/Distro/PersonalMenu.DD.Z", "::/Home/PersonalMenu.DD");
-Copy("::/Home/PersonalMenu.DD", "::/Home/RelicOS/RelicGames.DD");
-CDoc *pm_doc = DocRead("::/Home/RelicOS/RelicGames.DD");
-if (pm_doc) {
-  CDocEntry *doc_e = pm_doc->head.next;
-  Bool found_fun_games = FALSE;
-  U8 *old_aux;
-  
-  while (doc_e != pm_doc) {
-    if (doc_e->type_u8 == DOCT_TEXT && StrMatch("Fun Games", doc_e->tag)) {
-      found_fun_games = TRUE;
-      pm_doc->cur_entry = doc_e;
-      DocPrint(pm_doc, "$BG,BLACK$$FG,LTGRAY$\n$FG,CYAN$=== RelicOS Games ===$FG$\n$FG,DKGRAY$Click a game to play. Press Esc to return to Desktop.$FG$\n\n");
-      DocPrint(pm_doc, "$BG,BLACK$$FG,LTRED$$TX,%c>>> PLAY DOOM <<<%c, D=%cDocClear; #include <::/Home/RelicOS/RunTOOM.HC>; Exit;%c$\n\n", 34, 34, 34, 34);
-    }
-    
-    // Safely blank out bloated links AND flatten newlines without causing memory panics
-    if (!found_fun_games && doc_e->type_u8 != DOCT_ERROR) {
-      if (doc_e->tag) Free(doc_e->tag);
-      doc_e->tag = StrNew("");
-      doc_e->type_u8 = DOCT_TEXT;
-    } else if (found_fun_games && doc_e->type_u8 == DOCT_MACRO) {
-      if (doc_e->aux_str && !StrMatch("DocClear", doc_e->aux_str)) {
-        old_aux = doc_e->aux_str;
-        doc_e->aux_str = MStrPrint("DocClear; %s", old_aux);
-        Free(old_aux);
-      }
-    }
-    
-    doc_e = doc_e->next;
-  }
-  
-  pm_doc->flags |= DOCF_FORM;
-  DocTop(pm_doc);
-  DocWrite(pm_doc);
-  DocDel(pm_doc);
-}
-
-U8 *games_launcher =
-  "U0 EscListener(CTask *parent) {\n"
-  "  while (TaskValidate(parent)) {\n"
-  "    if (Bt(kbd.down_bitmap, SC_ESC)) {\n"
-  "      Kill(parent);\n"
-  "      Exit;\n"
-  "    }\n"
-  "    Sleep(10);\n"
-  "  }\n"
-  "}\n"
-  "Spawn(&EscListener, Fs, \"Esc Listener\");\n"
-  "Fs->text_attr = BLACK << 4 | LTGRAY;\n"
-  "Fs->border_attr = BLACK << 4 | LTGRAY;\n"
-  "\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\";\n"
-  "WinMax;\n"
-  "Ed(\"::/Home/RelicOS/RelicGames.DD\");\n";
-
-FileWrite("::/Home/RelicOS/GamesLauncher.HC", games_launcher, StrLen(games_launcher));
+"Stable games launcher copied.\n";
 
 U0 FixBootHDIns() {
   CDoc *doc = DocRead("::/Adam/Opt/Boot/BootHDIns.HC");
@@ -210,6 +181,7 @@ PatchBootBinaries;
 #include "::/Misc/DoDistro.HC";
 
 "4. Freeing up space on transfer drive...\n";
+DelTree("E:/TOOM");
 Del("E:/TOOM.ISO.C");
 Del("E:/wallpaper.raw");
 Del("E:/RelicBoot.HC");
@@ -217,6 +189,7 @@ Del("E:/RelicDesktop.HC");
 Del("E:/RelicTheme.HC");
 Del("E:/RelicWallpaper.HC");
 Del("E:/RunTOOM.HC");
+Del("E:/GamesLauncher.HC");
 
 I64 clean_i;
 for (clean_i = 0; clean_i < 30; clean_i++) {

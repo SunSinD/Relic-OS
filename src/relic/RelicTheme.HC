@@ -38,8 +38,8 @@ U0 RelicThemeApply()
   pal[13].r=0xBBBB; pal[13].g=0x5000; pal[13].b=0xCCCC;
   // 14 YELLOW - warm amber
   pal[14].r=0xEEEE; pal[14].g=0xBBBB; pal[14].b=0x2000;
-  // 15 WHITE - keep full bright white for document backgrounds and kernel status text
-  pal[15].r=0xFFFF; pal[15].g=0xFFFF; pal[15].b=0xFFFF;
+  // 15 WHITE - dimmed so system borders never flash pure white
+  pal[15].r=0x7000; pal[15].g=0x7000; pal[15].b=0x7600;
 
   GrPaletteSet(pal);
 }
