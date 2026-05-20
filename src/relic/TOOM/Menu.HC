@@ -208,8 +208,10 @@ againm:;
         state=4;
       } else if(r=='QUITG') {
         gameExit=TRUE;
+        paused=FALSE;
         active_menu=NULL;
         active_menu_item=0;
+        TOOMStopTasks;
         FlushMsgs;
         TOOMChromeOff;
         return 0;

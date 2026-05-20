@@ -19,6 +19,7 @@ U0 TOOMChromeOff()
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu=FALSE;
+  gr.fp_wall_paper=NULL;
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
@@ -3963,9 +3964,9 @@ play_again:
       if(gameExit) {
         paused=FALSE;
         active_menu=NULL;
-        DocClear;
-        Refresh;
-        break;
+        TOOMStopTasks;
+        FlushMsgs;
+        return;
       }
       if(!mr) {
         Unpause;
@@ -3986,8 +3987,6 @@ end_control:;
     in_level=FALSE;
     active_menu=NULL;
     FlushMsgs;
-    DocClear;
-    Refresh;
     return;
   }
 ret:

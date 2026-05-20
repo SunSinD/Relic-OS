@@ -11,25 +11,15 @@ static U8 *doom_palette_dithered=NULL;
 
 U8 *DitherPalette(CRGB *data) {
   U8 *ret=MAlloc(16*16);
-  CBGR48 palette48[16*16];
+  CBGR48 palette48[16];
   I64 x,y,canidate,best_color;
   F64 best_dist,dist;
-  CRGB normal[16*16],cur_pixel;
+  CRGB normal[16],cur_pixel;
   GrPaletteGet(palette48);
   for(x=0;x!=16;x++) {
     normal[x].r=ToF64(palette48[x].r)/0xffff*0xff;
     normal[x].g=ToF64(palette48[x].g)/0xffff*0xff;
     normal[x].b=ToF64(palette48[x].b)/0xffff*0xff;
-    normal[x*16].r=normal[x].r;
-    normal[x*16].g=normal[x].g;
-    normal[x*16].b=normal[x].b;
-  }
-  for(y=1;y!=16;y++) {
-    for(x=1;x!=16;x++) {
-      normal[x+y*16].r=ToF64(normal[x].r+normal[y].r)/2;
-      normal[x+y*16].g=ToF64(normal[x].g+normal[y].g)/2;
-      normal[x+y*16].b=ToF64(normal[x].b+normal[y].b)/2;
-    }
   }
   for(x=0;x!=16;x++) {
     for(y=0;y!=16;y++) {
@@ -37,7 +27,7 @@ U8 *DitherPalette(CRGB *data) {
       best_color=0;
       best_dist=1e100;
       if(!cur_pixel.a)  {
-        for(canidate=0;canidate!=16*16;canidate++) {
+        for(canidate=0;canidate!=16;canidate++) {
 	  dist=Sqrt(Sqr(normal[canidate].r-cur_pixel.r)+
 	        Sqr(normal[canidate].g-cur_pixel.g)+
 	        Sqr(normal[canidate].b-cur_pixel.b));
@@ -46,7 +36,7 @@ U8 *DitherPalette(CRGB *data) {
 	    best_color=canidate;
 	  }
         }
-        ret[x+y*16]=best_color;
+        ret[x+y*16]=best_color|best_color<<4;
       } else
         ret[x+y*16]=TRANSPARENT;
     }
@@ -171,7 +161,7 @@ U0 InitGodmodeTable() {
   F64 best_dist,cur_dist;
   GrPaletteGet(pal);
   static I64 gray[4]={LTGRAY,DKGRAY,BLACK,WHITE};
-  I64 ix,ix2,best_color,c1,c2,iy;
+  I64 ix,best_color,c1,iy;
   for(iy=0;iy!=0x100;iy++) {
     raw_color.r=ToF64(pal[iy&0xf].r+pal[iy>>4].r)/2.;
     raw_color.g=ToF64(pal[iy&0xf].g+pal[iy>>4].g)/2.;
@@ -179,12 +169,10 @@ U0 InitGodmodeTable() {
         best_dist=I16_MAX;
         best_color=0;
     for(ix=0;ix!=4;ix++) {
-      for(ix2=0;ix2!=4;ix2++) {
         c1=gray[ix];
-        c2=gray[ix2];
-        dimmed.r=ToF64(pal[c1].r+pal[c2].r)/2.;
-        dimmed.g=ToF64(pal[c1].g+pal[c2].g)/2.;
-        dimmed.b=ToF64(pal[c1].b+pal[c2].b)/2.;
+        dimmed.r=pal[c1].r;
+        dimmed.g=pal[c1].g;
+        dimmed.b=pal[c1].b;
 //"Invert" the colros
 	dimmed.r=U16_MAX-dimmed.r;
 	dimmed.g=U16_MAX-dimmed.g;
@@ -195,24 +183,20 @@ U0 InitGodmodeTable() {
 //Pick the most opposite color as the palette is inverse
         if(cur_dist<best_dist) {
 	  best_dist=cur_dist;
-	  best_color=c1|c2<<4;
+	  best_color=c1|c1<<4;
         }
-      }
     }
-    ix=iy&0xf;
-    ix2=iy>>4;
-//Swap the pixels as .u16[1] is the 2nd "dither" pixel
-    godmode_mat[ix<<4|ix2].u8[0]=best_color&0xf;
-    godmode_mat[ix<<4|ix2].u8[1]=best_color>>4;
-    godmode_mat[ix<<4|ix2].u8[2]=best_color>>4;
-    godmode_mat[ix<<4|ix2].u8[3]=best_color&0xf;
+    godmode_mat[iy].u8[0]=best_color&0xf;
+    godmode_mat[iy].u8[1]=best_color&0xf;
+    godmode_mat[iy].u8[2]=best_color&0xf;
+    godmode_mat[iy].u8[3]=best_color&0xf;
   }
 }
 U0 InitLightTable() {
   CBGR48 pal[16],dimmed,raw_color;
   F64 best_dist,cur_dist;
   GrPaletteGet(pal);
-  I64 y,x,ix,iy,best_color;
+  I64 y,x,ix,iy,best_color,solid_color;
   for(y=0;y!=16;y++) {
     for(x=0;x!=16;x++) {
       for(ix=0;ix!=16;ix++) {
@@ -227,22 +211,22 @@ U0 InitLightTable() {
 	  dimmed.r=ToF64(pal[x].r+pal[ix].r)/2.*(20.-y)/20;
 	  dimmed.g=ToF64(pal[x].g+pal[ix].g)/2.*(20.-y)/20;
 	  dimmed.b=ToF64(pal[x].b+pal[ix].b)/2.*(20.-y)/20;
-	  for(iy=0;iy!=0x100;iy++) {
-	    raw_color.r=ToF64(pal[iy&0xf].r+pal[iy>>4].r)/2.;
-	    raw_color.g=ToF64(pal[iy&0xf].g+pal[iy>>4].g)/2.;
-	    raw_color.b=ToF64(pal[iy&0xf].b+pal[iy>>4].b)/2.;
+	  for(iy=0;iy!=16;iy++) {
+            solid_color=iy|iy<<4;
+	    raw_color.r=pal[iy].r;
+	    raw_color.g=pal[iy].g;
+	    raw_color.b=pal[iy].b;
 	    cur_dist=Sqrt(Sqr(dimmed.r-raw_color.r)+
 		  Sqr(dimmed.g-raw_color.g)+
 		  Sqr(dimmed.b-raw_color.b));
 	    if(cur_dist<best_dist) {
 	      best_dist=cur_dist;
-	      best_color=iy;
+	      best_color=solid_color;
 	    }
 	  }
-//Swap the pixels as .u16[1] is the 2nd "dither" pixel
 	  light_mat[ix<<4|x][15-y].u8[0]=best_color&0xf;
-	  light_mat[ix<<4|x][15-y].u8[1]=best_color>>4;
-	  light_mat[ix<<4|x][15-y].u8[2]=best_color>>4;
+	  light_mat[ix<<4|x][15-y].u8[1]=best_color&0xf;
+	  light_mat[ix<<4|x][15-y].u8[2]=best_color&0xf;
 	  light_mat[ix<<4|x][15-y].u8[3]=best_color&0xf;
         }
       }

@@ -3,6 +3,7 @@ U0 RelicGamesChromeOff()
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu = FALSE;
+  gr.fp_wall_paper = NULL;
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;

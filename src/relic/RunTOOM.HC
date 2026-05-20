@@ -4,6 +4,7 @@ U0 RelicTOOMDarkWin()
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu = FALSE;
+  gr.fp_wall_paper = NULL;
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
@@ -20,7 +21,7 @@ U0 RelicTOOMGamePalette()
 
   MemSet(pal, 0, sizeof(CBGR48) * COLORS_NUM);
   pal[0].b=0x0000; pal[0].g=0x0000; pal[0].r=0x0000;
-  pal[1].b=0xAAAA; pal[1].g=0x0000; pal[1].r=0x0000;
+  pal[1].b=0x0000; pal[1].g=0x0000; pal[1].r=0x0000;
   pal[2].b=0x0000; pal[2].g=0xAAAA; pal[2].r=0x0000;
   pal[3].b=0xAAAA; pal[3].g=0xAAAA; pal[3].r=0x0000;
   pal[4].b=0x0000; pal[4].g=0x0000; pal[4].r=0xAAAA;
