@@ -1457,40 +1457,12 @@ U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
   mpj.level=level;
   mpj.cam=cam;
   mp_done=0;
-
-
-  mpj.to_dc=to_dc;
-  mpj.level=level;
-  mpj.cam=cam;
-  mp_done=0;
-//This ques the Cast Jobs
-  for(idx=1;idx<mp_cnt;idx++)
-    JobQue(&MPDrawJob,&mpj,idx);
   DrawBSP(to_dc,cam,level);
-  for(idx=1;idx<mp_cnt;idx++) {
-    while(!Bt(&mp_done,idx))
-#ifdef __AIWNIOS__
-      __Sleep(3);
-#else
-     PAUSE;
-#endif
-  }
   cam->draw_walls->cnt=0;
 
   af=Server_tS*4;
   mp_done=0;
-  for(idx=mp_cnt-1;idx>=1;idx--) {
-    JobQue(&MPDrawFlatsJob,&mpj,idx);
-  }
   MPDrawFlatsJob(&mpj);
-  for(idx=1;idx<mp_cnt;idx++) {
-    while(!Bt(&mp_done,idx))
-#ifdef __AIWNIOS__
-      __Sleep(3);
-#else
-     PAUSE;
-#endif
-  }
 
   for(thing=level->things.next;thing!=&level->things;thing=thing->next) {
     sector=GetSectorForCoord(level,thing->x,thing->y);
@@ -3494,24 +3466,13 @@ U0 AnimateTask(I64)
 
 U0 TOOMStopTasks()
 {
+  gameExit=TRUE;
   Snd;
-  if(cur_snd_task && cur_snd_task!=Fs && TaskValidate(cur_snd_task)) {
-    Kill(cur_snd_task,FALSE);
-  }
   cur_snd_task=NULL;
-  if(music_task && music_task!=Fs && TaskValidate(music_task)) {
-    Kill(music_task,FALSE);
-  }
   music_task=NULL;
-  if(toom_faces_task && toom_faces_task!=Fs && TaskValidate(toom_faces_task)) {
-    Kill(toom_faces_task,FALSE);
-  }
   toom_faces_task=NULL;
   if(Fs->animate_task==toom_animate_task)
     Fs->animate_task=NULL;
-  if(toom_animate_task && toom_animate_task!=Fs && TaskValidate(toom_animate_task)) {
-    Kill(toom_animate_task,FALSE);
-  }
   toom_animate_task=NULL;
 }
 
@@ -3714,9 +3675,7 @@ U0 PlayLevel(Bool init=TRUE) {
   F64 move_angle,move_angle_side;
   F64 move_mag,move_mag_side;
   CDC *new,*old;
-  if(music_task)
-    Kill(music_task,FALSE);
-  music_task=Spawn(&SongTaskDOOM,l->map_name[3]-'1',"Song",0,Fs);
+  Snd;
 ent:;
   CDoomLevel *l2;
   if(init) {
@@ -3752,9 +3711,9 @@ ent:;
     DCDel(old),DCDel(new);
     Unpause;
   }
-//Reset the animation task for newly loaded player
-  if(toom_animate_task)
-    TOOMStopTasks;
+//Reset the animation task for newly loaded player without killing tasks.
+  TOOMStopTasks;
+  gameExit=FALSE;
   toom_faces_task=NULL;
   toom_animate_task=Spawn(&AnimateTask,NULL,"Animate",,Fs);
   Fs->animate_task=toom_animate_task;
@@ -3968,7 +3927,7 @@ play_again:
       if(gameExit) {
         paused=FALSE;
         active_menu=NULL;
-        TOOMStopTasks;
+        Snd;
         FlushMsgs;
         return;
       }
@@ -3986,7 +3945,7 @@ end_control:;
     Refresh;
   }
   if(gameExit) {
-    TOOMStopTasks;
+    Snd;
     paused=FALSE;
     in_level=FALSE;
     active_menu=NULL;
@@ -3994,9 +3953,7 @@ end_control:;
     return;
   }
 ret:
-  if(music_task)
-    Kill(music_task,FALSE);
-  music_task=Spawn(&SongTaskDOOM,l->map_name[3]-'1',"Song",0,Fs);
+  Snd;
   if(!IsNetworkGameClient) {
     p->weapon_state=0;
     if(l->ended) Intermission(l,l->map_name[1]-'1',l->map_name[3]-'1');

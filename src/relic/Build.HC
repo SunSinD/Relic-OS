@@ -52,6 +52,9 @@ U0 ReplaceBranding(U8 *filename) {
   buf = FileRead(filename, &size);
   if (buf) {
     I64 i;
+    for (i = 0; i < size - 14; i++) {
+      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V1.0.0", 14);
+    }
     for (i = 0; i < size - 8; i++) {
       if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
     }
@@ -69,6 +72,9 @@ while (tmp_de) {
 
 ReplaceBranding("::/Misc/DoDistro.HC.Z");
 ReplaceBranding("::/Misc/OSInstall.HC.Z");
+ReplaceBranding("::/Kernel.BIN.C");
+ReplaceBranding("::/0000Boot/0000Kernel.BIN.C");
+ReplaceBranding("::/StartOS.HC.Z");
 
 Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
 {
@@ -160,15 +166,14 @@ U8 *clean_homesys =
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
   "  RelicThemeApply;\n"
-  "  WinBorder(ON);\n"
   "  WinFocus;\n"
-  "  DocTermNew;\n"
-  "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
-  "  DocClear;\n"
-  "  LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
-  "  WinZBufUpdate;\n"
   "  if (!relic_desktop_started) {\n"
   "    relic_desktop_started = TRUE;\n"
+  "    WinBorder(OFF);\n"
+  "    Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
+  "    DocClear;\n"
+  "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
+  "    WinZBufUpdate;\n"
   "    try {\n"
   "      ExeFile(\"::/Home/RelicOS/RelicBoot.HC\");\n"
   "    } catch {\n"
@@ -178,6 +183,13 @@ U8 *clean_homesys =
   "      DocClear;\n"
   "      \"RelicOS desktop failed to start. Terminal fallback ready.\\n\";\n"
   "    }\n"
+  "  } else {\n"
+  "    WinBorder(ON);\n"
+  "    DocTermNew;\n"
+  "    Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
+  "    DocClear;\n"
+  "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
+  "    WinZBufUpdate;\n"
   "  }\n"
   "}\n\n"
   "U0 StartUpTasks()\n"
@@ -229,6 +241,9 @@ U0 PatchBootBinaries() {
   if (FileFind("::/0000Boot/BootCD.BIN.C"))
     buf = FileRead("::/0000Boot/BootCD.BIN.C", &size);
   if (buf) {
+    for (i = 0; i < size - 14; i++) {
+      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V1.0.0", 14);
+    }
     for (i = 0; i < size - 8; i++) {
       if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
     }
@@ -239,10 +254,26 @@ U0 PatchBootBinaries() {
   if (FileFind("::/0000Boot/BootHD.BIN.C"))
     buf = FileRead("::/0000Boot/BootHD.BIN.C", &size);
   if (buf) {
+    for (i = 0; i < size - 14; i++) {
+      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V1.0.0", 14);
+    }
     for (i = 0; i < size - 8; i++) {
       if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
     }
     FileWrite("::/0000Boot/BootHD.BIN.C", buf, size);
+    Free(buf);
+  }
+  buf = NULL;
+  if (FileFind("::/0000Boot/0000Kernel.BIN.C"))
+    buf = FileRead("::/0000Boot/0000Kernel.BIN.C", &size);
+  if (buf) {
+    for (i = 0; i < size - 14; i++) {
+      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V1.0.0", 14);
+    }
+    for (i = 0; i < size - 8; i++) {
+      if (!MemCmp(buf + i, "TempleOS", 8)) MemCpy(buf + i, "RelicOS ", 8);
+    }
+    FileWrite("::/0000Boot/0000Kernel.BIN.C", buf, size);
     Free(buf);
   }
 }

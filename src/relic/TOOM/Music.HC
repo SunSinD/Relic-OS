@@ -237,7 +237,7 @@ F64 Samp2Freq(I8 n) {
 U0 PlaySoundTask(U8 *name) {
   Bool muted=FALSE;
   if(cur_snd_task&&cur_snd_task!=Fs&&TaskValidate(cur_snd_task))
-    Kill(cur_snd_task,FALSE);
+    return;
   cur_snd_task=Fs;
   U8 buf[16];
   CWadDirectory *wad_dir;

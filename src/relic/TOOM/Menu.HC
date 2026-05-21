@@ -214,9 +214,7 @@ againm:;
         Snd;
         FlushMsgs;
         TOOMChromeOff;
-        FramePtrDel("RELIC_TOOM_QUIT");
-        FramePtrAdd("RELIC_TOOM_QUIT",StrNew("1"));
-        throw('Quit');
+        return 0;
       } else if(!r)
         return 0;
       break;
