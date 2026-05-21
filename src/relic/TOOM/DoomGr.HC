@@ -12,9 +12,9 @@ static U8 *doom_palette_dithered=NULL;
 U8 *DitherPalette(CRGB *data) {
   U8 *ret=MAlloc(16*16);
   CBGR48 palette48[16];
-  I64 x,y,c1,c2,best_color;
+  I64 x,y,canidate,best_color;
   F64 best_dist,dist;
-  CRGB normal[16],cur_pixel,mix;
+  CRGB normal[16],cur_pixel;
   GrPaletteGet(palette48);
   for(x=0;x!=16;x++) {
     normal[x].r=ToF64(palette48[x].r)/0xffff*0xff;
@@ -27,21 +27,16 @@ U8 *DitherPalette(CRGB *data) {
       best_color=0;
       best_dist=1e100;
       if(!cur_pixel.a)  {
-        for(c1=0;c1!=16;c1++) {
-	  for(c2=0;c2!=16;c2++) {
-	    mix.r=(normal[c1].r+normal[c2].r)/2;
-	    mix.g=(normal[c1].g+normal[c2].g)/2;
-	    mix.b=(normal[c1].b+normal[c2].b)/2;
-	    dist=Sqrt(Sqr(mix.r-cur_pixel.r)+
-		  Sqr(mix.g-cur_pixel.g)+
-		  Sqr(mix.b-cur_pixel.b));
-	    if(dist<best_dist) {
-	      best_dist=dist;
-	      best_color=c1|c2<<4;
-	    }
+        for(canidate=0;canidate!=16;canidate++) {
+	  dist=Sqrt(Sqr(normal[canidate].r-cur_pixel.r)+
+	        Sqr(normal[canidate].g-cur_pixel.g)+
+	        Sqr(normal[canidate].b-cur_pixel.b));
+	  if(dist<best_dist) {
+	    best_dist=dist;
+	    best_color=canidate;
 	  }
         }
-        ret[x+y*16]=best_color;
+        ret[x+y*16]=best_color|best_color<<4;
       } else
         ret[x+y*16]=TRANSPARENT;
     }
@@ -198,10 +193,10 @@ U0 InitGodmodeTable() {
   }
 }
 U0 InitLightTable() {
-  CBGR48 pal[16],dimmed,mix;
+  CBGR48 pal[16],dimmed,raw_color;
   F64 best_dist,cur_dist;
   GrPaletteGet(pal);
-  I64 y,x,ix,iy,iy2,best_color;
+  I64 y,x,ix,iy,best_color,solid_color;
   for(y=0;y!=16;y++) {
     for(x=0;x!=16;x++) {
       for(ix=0;ix!=16;ix++) {
@@ -217,22 +212,21 @@ U0 InitLightTable() {
 	  dimmed.g=ToF64(pal[x].g+pal[ix].g)/2.*(20.-y)/20;
 	  dimmed.b=ToF64(pal[x].b+pal[ix].b)/2.*(20.-y)/20;
 	  for(iy=0;iy!=16;iy++) {
-	    for(iy2=0;iy2!=16;iy2++) {
-	      mix.r=(pal[iy].r+pal[iy2].r)/2;
-	      mix.g=(pal[iy].g+pal[iy2].g)/2;
-	      mix.b=(pal[iy].b+pal[iy2].b)/2;
-	      cur_dist=Sqrt(Sqr(dimmed.r-mix.r)+
-		    Sqr(dimmed.g-mix.g)+
-		    Sqr(dimmed.b-mix.b));
-	      if(cur_dist<best_dist) {
-	        best_dist=cur_dist;
-	        best_color=iy|iy2<<4;
-	      }
+            solid_color=iy|iy<<4;
+	    raw_color.r=pal[iy].r;
+	    raw_color.g=pal[iy].g;
+	    raw_color.b=pal[iy].b;
+	    cur_dist=Sqrt(Sqr(dimmed.r-raw_color.r)+
+		  Sqr(dimmed.g-raw_color.g)+
+		  Sqr(dimmed.b-raw_color.b));
+	    if(cur_dist<best_dist) {
+	      best_dist=cur_dist;
+	      best_color=solid_color;
 	    }
 	  }
 	  light_mat[ix<<4|x][15-y].u8[0]=best_color&0xf;
-	  light_mat[ix<<4|x][15-y].u8[1]=best_color>>4;
-	  light_mat[ix<<4|x][15-y].u8[2]=best_color>>4;
+	  light_mat[ix<<4|x][15-y].u8[1]=best_color&0xf;
+	  light_mat[ix<<4|x][15-y].u8[2]=best_color&0xf;
 	  light_mat[ix<<4|x][15-y].u8[3]=best_color&0xf;
         }
       }

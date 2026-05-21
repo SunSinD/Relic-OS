@@ -27,7 +27,7 @@ gameExit=TRUE;
 active_menu=NULL;
 paused=FALSE;
 in_level=FALSE;
-Snd;
+TOOMStopTasks;
 FlushMsgs;
 TOOMChromeOff;
 DocClear;
