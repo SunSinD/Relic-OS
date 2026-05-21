@@ -119,8 +119,6 @@ U0 RelicGamesLauncher()
         RelicGameRun(id);
         if (id == 1) {
           RelicGamesChromeOff;
-          DocTermNew;
-          RelicGamesChromeOff;
           DocClear;
           len = 0;
           buf[0] = 0;
@@ -135,7 +133,7 @@ U0 RelicGamesLauncher()
         len--;
         buf[len] = 0;
       }
-    } else if ('0' <= ch <= '9' && len < 2) {
+    } else if ('0' <= ch && ch <= '9' && len < 2) {
       buf[len++] = ch;
       buf[len] = 0;
     }

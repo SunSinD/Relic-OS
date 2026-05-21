@@ -1,5 +1,5 @@
 // Run the TOOM copy installed into the release ISO by Build.HC.
-// No extern declarations — load theme/chrome dynamically to avoid
+// No extern declarations — load theme/chrome files dynamically to avoid
 // compile-time symbol resolution failures.
 
 U0 RelicTOOMDarkWin()
@@ -27,6 +27,14 @@ U0 RelicTOOMRestoreDark()
 Bool RelicTOOMHandleCatch(Bool old_silent)
 {
   Silent(old_silent);
+  
+  // Safely stop background tasks in case we exited via throw('Quit')
+  try {
+    ExePrint("TOOMStopTasks;");
+  } catch {
+    Fs->animate_task = NULL;
+  }
+
   if (FramePtr("RELIC_TOOM_QUIT")) {
     FramePtrDel("RELIC_TOOM_QUIT");
     Snd;
@@ -92,6 +100,7 @@ U0 RunTOOM()
       Silent(TRUE);
       ExeFile("SinglePlayer.HC");
       Silent(old_silent);
+      try { ExePrint("TOOMStopTasks;"); } catch {}
     } catch {
       RelicTOOMHandleCatch(old_silent);
     }
@@ -111,6 +120,7 @@ U0 RunTOOM()
       Silent(TRUE);
       ExeFile("SinglePlayer.HC");
       Silent(old_silent);
+      try { ExePrint("TOOMStopTasks;"); } catch {}
     } catch {
       RelicTOOMHandleCatch(old_silent);
     }
@@ -129,6 +139,7 @@ U0 RunTOOM()
       Silent(TRUE);
       ExeFile("Load.HC");
       Silent(old_silent);
+      try { ExePrint("TOOMStopTasks;"); } catch {}
     } catch {
       RelicTOOMHandleCatch(old_silent);
     }
@@ -146,6 +157,7 @@ U0 RunTOOM()
       Silent(TRUE);
       ExeFile("Load.HC");
       Silent(old_silent);
+      try { ExePrint("TOOMStopTasks;"); } catch {}
     } catch {
       RelicTOOMHandleCatch(old_silent);
     }

@@ -123,6 +123,43 @@ U0 PrependTheme(U8 *filename) {
 
 PrependTheme("::/StartOS.HC.Z");
 
+U0 PatchDefaultPalette(U8 *filename) {
+  I64 size;
+  U8 *buf = NULL;
+  if (!FileFind(filename))
+    return;
+  buf = FileRead(filename, &size);
+  if (buf) {
+    U8 *start = StrFirstOcc(buf, "gr_palette_std[16]");
+    if (start) {
+      U8 *array_start = StrFirstOcc(start, "{");
+      U8 *array_end = StrFirstOcc(start, "}");
+      if (array_start && array_end && array_end > array_start) {
+        U8 *new_vals = 
+          "{\n"
+          "  0x000000000000, 0x000000000000, 0x200052002400, 0x00009000B800,\n"
+          "  0xB80008000800, 0x600015007000, 0xA00052001000, 0x780078007400,\n"
+          "  0x380038003A00, 0x300048009000, 0x380090004800, 0x100030003500,\n"
+          "  0xFFFF38382828, 0xBBBB5000CCCC, 0xFFFFC8002800, 0x280028002600\n"
+          "}";
+        I64 prefix_len = array_start - buf;
+        I64 suffix_len = buf + size - (array_end + 1);
+        I64 new_vals_len = StrLen(new_vals);
+        U8 *new_buf = MAlloc(prefix_len + new_vals_len + suffix_len + 1);
+        MemCpy(new_buf, buf, prefix_len);
+        MemCpy(new_buf + prefix_len, new_vals, new_vals_len);
+        MemCpy(new_buf + prefix_len + new_vals_len, array_end + 1, suffix_len);
+        new_buf[prefix_len + new_vals_len + suffix_len] = 0;
+        FileWrite(filename, new_buf, prefix_len + new_vals_len + suffix_len);
+        Free(new_buf);
+      }
+    }
+    Free(buf);
+  }
+}
+
+PatchDefaultPalette("::/Adam/Gr/GrPalette.HC.Z");
+
 Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
 {
   U8 *buf = *buf_ptr;
