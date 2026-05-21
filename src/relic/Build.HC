@@ -158,6 +158,10 @@ U8 *clean_homesys =
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
+  "  if (FileFind(\"::/Home/RelicOS/RelicTheme.HC\")) {\n"
+  "    ExeFile(\"::/Home/RelicOS/RelicTheme.HC\", CCF_JUST_LOAD);\n"
+  "    RelicThemeApply;\n"
+  "  }\n"
   "  WinBorder(ON);\n"
   "  WinFocus;\n"
   "  DocTermNew;\n"
@@ -303,9 +307,9 @@ U0 RelicMakeISO(U8 *_out_iso_filename)
 
 RelicMakeISO("::/Tmp/MyDistro.ISO.C");
 
-"4. Leaving transfer drive sources intact; Windows recreates the VHD each run.\n";
+"4. Keeping transfer sources intact.\n";
 
-"5. Splitting and copying ISO to transfer drive in 2MB chunks (Bypassing FAT32 bug)...\n";
+"5. Writing ISO chunks to transfer drive...\n";
 I64 relic_iso_size;
 U8 *relic_iso_buf = NULL;
 if (FileFind("::/Tmp/MyDistro.ISO.C"))
@@ -327,7 +331,7 @@ if (relic_iso_buf) {
   "$FG,LTRED$ISO build failed before ::/Tmp/MyDistro.ISO.C was created.$FG$\n";
 }
 
-"\n$FG,CYAN$============================================$FG$\n";
-"  $FG,LTGREEN$Done! The release ISO is now in your transfer drive.$FG$\n";
-"  $FG,LTGRAY$You can now shut down the VM.$FG$\n";
-"$FG,CYAN$============================================$FG$\n";
+"\n$FG,CYAN$========================$FG$\n";
+"  $FG,LTGREEN$Done. ISO chunks ready.$FG$\n";
+"  $FG,LTGRAY$Shut down the VM.$FG$\n";
+"$FG,CYAN$========================$FG$\n";

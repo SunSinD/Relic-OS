@@ -481,8 +481,8 @@ U0 FillPoly(CDC *dc,CDoomCamera *cam,CDoomSector *os,CDC *texture,CD4 *points,I6
   if(maxx&1) maxx++;
   if(maxy&1) maxy++;
 
-  minx=ClampI64(minx,0,GR_WIDTH-2);
-  maxx=ClampI64(maxx,0,GR_WIDTH-2);
+  minx=ClampI64(minx,GR_WIDTH/mp_cnt*Gs->num+2,GR_WIDTH/mp_cnt*(Gs->num+1)-2);
+  maxx=ClampI64(maxx,GR_WIDTH/mp_cnt*Gs->num+2,GR_WIDTH/mp_cnt*(Gs->num+1)-2);
 
   for(x=minx-2;x<maxx+2;x+=2) {
     F64 worst,best;
@@ -651,8 +651,8 @@ Bool RayCastWall(CDC *to_dc,CDC *texture,CD2 *st,CD2 *en,CDoomCamera *cam,I64 le
   sx=scrn_st.x;
   ex=scrn_en.x;
 
-  ex2=ClampI64(ex,0,GR_WIDTH);
-  ix=ClampI64(sx,0,GR_WIDTH);
+  ex2=ClampI64(ex,GR_WIDTH/mp_cnt*Gs->num,GR_WIDTH/mp_cnt*(1+Gs->num));
+  ix=ClampI64(sx,GR_WIDTH/mp_cnt*Gs->num,GR_WIDTH/mp_cnt*(1+Gs->num));
 //Avoids Templeos bug with &=~1;
   ix=ix&~1;
   ex2=ex2&~1;
@@ -1457,12 +1457,40 @@ U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
   mpj.level=level;
   mpj.cam=cam;
   mp_done=0;
+
+
+  mpj.to_dc=to_dc;
+  mpj.level=level;
+  mpj.cam=cam;
+  mp_done=0;
+//This ques the Cast Jobs
+  for(idx=1;idx<mp_cnt;idx++)
+    JobQue(&MPDrawJob,&mpj,idx);
   DrawBSP(to_dc,cam,level);
+  for(idx=1;idx<mp_cnt;idx++) {
+    while(!Bt(&mp_done,idx))
+#ifdef __AIWNIOS__
+      __Sleep(3);
+#else
+     PAUSE;
+#endif
+  }
   cam->draw_walls->cnt=0;
 
   af=Server_tS*4;
   mp_done=0;
+  for(idx=mp_cnt-1;idx>=1;idx--) {
+    JobQue(&MPDrawFlatsJob,&mpj,idx);
+  }
   MPDrawFlatsJob(&mpj);
+  for(idx=1;idx<mp_cnt;idx++) {
+    while(!Bt(&mp_done,idx))
+#ifdef __AIWNIOS__
+      __Sleep(3);
+#else
+     PAUSE;
+#endif
+  }
 
   for(thing=level->things.next;thing!=&level->things;thing=thing->next) {
     sector=GetSectorForCoord(level,thing->x,thing->y);

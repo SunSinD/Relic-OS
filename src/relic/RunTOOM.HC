@@ -20,6 +20,13 @@ U0 RelicTOOMDarkWin()
 Bool RelicTOOMHandleCatch(Bool old_silent)
 {
   Silent(old_silent);
+  if (FramePtr("RELIC_TOOM_QUIT")) {
+    FramePtrDel("RELIC_TOOM_QUIT");
+    Snd;
+    FlushMsgs;
+    return TRUE;
+  }
+
   DocClear;
   "$FG,LTRED$DOOM failed to start cleanly.$FG$\n";
   "$FG,DKGRAY$Returning to the desktop...$FG$\n";
