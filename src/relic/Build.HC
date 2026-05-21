@@ -150,6 +150,7 @@ RestoreWallPaper;
 
 U8 *clean_homesys =
   "// RelicOS Minimal Boot Script\n\n"
+  "#include \"::/Home/RelicOS/RelicTheme.HC\"\n\n"
   "Bool relic_desktop_started = FALSE;\n\n"
   "U0 UserStartUp()\n"
   "{\n"
@@ -158,10 +159,7 @@ U8 *clean_homesys =
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
-  "  if (FileFind(\"::/Home/RelicOS/RelicTheme.HC\")) {\n"
-  "    ExeFile(\"::/Home/RelicOS/RelicTheme.HC\", CCF_JUST_LOAD);\n"
-  "    RelicThemeApply;\n"
-  "  }\n"
+  "  RelicThemeApply;\n"
   "  WinBorder(ON);\n"
   "  WinFocus;\n"
   "  DocTermNew;\n"
