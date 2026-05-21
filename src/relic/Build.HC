@@ -76,49 +76,34 @@ ReplaceBranding("::/Kernel.BIN.C");
 ReplaceBranding("::/0000Boot/0000Kernel.BIN.C");
 ReplaceBranding("::/StartOS.HC.Z");
 
-U0 PrependTheme(U8 *filename) {
+// RestoreStartOS: Strip any previously-injected RelicBootPalette code
+// from StartOS.HC.Z. StartOS.HC.Z is compiled at the VERY first stage
+// of boot before ANY symbols exist — we must NEVER inject code into it.
+// The dark palette is set later via PatchDefaultPalette on GrPalette.HC.Z
+// and via RelicThemeApply in HomeSys.HC.Z.
+U0 RestoreStartOS() {
   I64 size;
   U8 *buf = NULL;
-  if (!FileFind(filename))
+  if (!FileFind("::/StartOS.HC.Z"))
     return;
-  buf = FileRead(filename, &size);
+  buf = FileRead("::/StartOS.HC.Z", &size);
   if (buf) {
-    if (StrMatch("RelicBootPalette", buf)) {
-      Free(buf);
-      return;
+    U8 *marker = StrFirstOcc(buf, "RelicBootPalette;");
+    if (marker) {
+      // Find the newline after "RelicBootPalette;\n"
+      U8 *rest = StrFirstOcc(marker, "\n");
+      if (rest) {
+        rest++; // skip the newline
+        I64 new_size = size - (rest - buf);
+        if (new_size > 0)
+          FileWrite("::/StartOS.HC.Z", rest, new_size);
+      }
+      "  Repaired StartOS.HC.Z (stripped injected palette code).\n";
     }
-    U8 *theme_code = 
-      "U0 RelicBootPalette() {\n"
-      "  OutU8(0x3C8, 0); OutU8(0x3C9, 0); OutU8(0x3C9, 0); OutU8(0x3C9, 0);\n"
-      "  OutU8(0x3C8, 1); OutU8(0x3C9, 0); OutU8(0x3C9, 0); OutU8(0x3C9, 0);\n"
-      "  OutU8(0x3C8, 2); OutU8(0x3C9, 8); OutU8(0x3C9, 20); OutU8(0x3C9, 9);\n"
-      "  OutU8(0x3C8, 3); OutU8(0x3C9, 0); OutU8(0x3C9, 36); OutU8(0x3C9, 46);\n"
-      "  OutU8(0x3C8, 4); OutU8(0x3C9, 46); OutU8(0x3C9, 2); OutU8(0x3C9, 2);\n"
-      "  OutU8(0x3C8, 5); OutU8(0x3C9, 24); OutU8(0x3C9, 5); OutU8(0x3C9, 28);\n"
-      "  OutU8(0x3C8, 6); OutU8(0x3C9, 40); OutU8(0x3C9, 20); OutU8(0x3C9, 4);\n"
-      "  OutU8(0x3C8, 7); OutU8(0x3C9, 30); OutU8(0x3C9, 30); OutU8(0x3C9, 29);\n"
-      "  OutU8(0x3C8, 8); OutU8(0x3C9, 14); OutU8(0x3C9, 14); OutU8(0x3C9, 14);\n"
-      "  OutU8(0x3C8, 9); OutU8(0x3C9, 12); OutU8(0x3C9, 18); OutU8(0x3C9, 36);\n"
-      "  OutU8(0x3C8, 10); OutU8(0x3C9, 14); OutU8(0x3C9, 36); OutU8(0x3C9, 18);\n"
-      "  OutU8(0x3C8, 11); OutU8(0x3C9, 4); OutU8(0x3C9, 12); OutU8(0x3C9, 13);\n"
-      "  OutU8(0x3C8, 12); OutU8(0x3C9, 63); OutU8(0x3C9, 14); OutU8(0x3C9, 10);\n"
-      "  OutU8(0x3C8, 13); OutU8(0x3C9, 46); OutU8(0x3C9, 20); OutU8(0x3C9, 51);\n"
-      "  OutU8(0x3C8, 14); OutU8(0x3C9, 63); OutU8(0x3C9, 50); OutU8(0x3C9, 10);\n"
-      "  OutU8(0x3C8, 15); OutU8(0x3C9, 10); OutU8(0x3C9, 10); OutU8(0x3C9, 9);\n"
-      "}\n"
-      "RelicBootPalette;\n";
-    I64 theme_len = StrLen(theme_code);
-    U8 *new_buf = MAlloc(size + theme_len + 1);
-    MemCpy(new_buf, theme_code, theme_len);
-    MemCpy(new_buf + theme_len, buf, size);
-    new_buf[size + theme_len] = 0;
-    FileWrite(filename, new_buf, size + theme_len);
     Free(buf);
-    Free(new_buf);
   }
 }
-
-PrependTheme("::/StartOS.HC.Z");
+RestoreStartOS;
 
 U0 PatchDefaultPalette(U8 *filename) {
   I64 size;
