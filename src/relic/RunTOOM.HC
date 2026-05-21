@@ -12,14 +12,24 @@ U0 RelicTOOMDarkWin()
         WIF_SELF_BORDER;
   WinFocus;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
-  Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
 }
 
 Bool RelicTOOMHandleCatch(Bool old_silent)
 {
   Silent(old_silent);
+  if (FramePtr("RELIC_TOOM_QUIT")) {
+    FramePtrDel("RELIC_TOOM_QUIT");
+    Snd;
+    FlushMsgs;
+    return TRUE;
+  }
+
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
   "$FG,LTRED$DOOM failed to start cleanly.$FG$\n";
   "$FG,DKGRAY$Returning to the desktop...$FG$\n";
@@ -49,6 +59,7 @@ U0 RunTOOM()
   RelicTOOMDarkWin;
   winmgr.show_menu = FALSE;
   DocClear;
+  DCFill;
 
   if (FileFind("::/Home/TOOM/SinglePlayer.HC") ||
       FileFind("::/Home/TOOM/SinglePlayer.HC.Z")) {
@@ -125,6 +136,9 @@ U0 RunTOOM()
   }
 
   if (!found) {
+    Fs->text_attr = BLACK << 4 | LTGRAY;
+    Fs->border_attr = BLACK << 4 | DKGRAY;
+    "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
     "\n$FG,LTRED$TOOM is not installed in ::/Home/TOOM.$FG$\n";
     "$FG,LTGRAY$Rebuild the release with #include \"E:/Build.HC\";.$FG$\n\n";
     "$FG,DKGRAY$Returning to the launcher...$FG$\n";
@@ -138,4 +152,6 @@ U0 RunTOOM()
   RelicThemeApply;
   RelicChromeInstall;
   RelicTOOMDarkWin;
+  DocClear;
+  DCFill;
 }

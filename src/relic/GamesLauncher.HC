@@ -12,6 +12,14 @@ U0 RelicGamesChromeOff()
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
+U0 RelicGamesHideTextPlane()
+{
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocClear;
+}
+
 U0 RelicGameFile(U8 *filename)
 {
   RelicGamesChromeOff;
@@ -36,6 +44,7 @@ U0 RelicGameRun(I64 id)
 
   switch (id) {
     case 1:
+      RelicGamesHideTextPlane;
       ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
       ExePrint("RunTOOM;");
       break;
@@ -71,6 +80,9 @@ U0 RelicGamesLauncher()
   I64 id, ch, sc, len = 0;
 
   RelicGamesChromeOff;
+  DocTermNew;
+  RelicGamesChromeOff;
+  DocClear;
   buf[0] = 0;
 
   while (TRUE) {
