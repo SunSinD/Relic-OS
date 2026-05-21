@@ -1,3 +1,5 @@
+extern U0 RunTOOM();
+
 U0 RelicGamesChromeOff()
 {
   WinBorder(OFF);
@@ -46,7 +48,7 @@ U0 RelicGameRun(I64 id)
     case 1:
       RelicGamesHideTextPlane;
       ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
-      ExePrint("RunTOOM;");
+      RunTOOM;
       break;
     case 2:  RelicGameFile("::/Apps/Titanium/Run"); break;
     case 3:  RelicGameFile("::/Demo/Games/BlackDiamond"); break;
@@ -117,6 +119,15 @@ U0 RelicGamesLauncher()
       id = Str2I64(buf);
       if (1 <= id <= 24) {
         RelicGameRun(id);
+        if (id == 1) {
+          RelicGamesChromeOff;
+          DocTermNew;
+          RelicGamesChromeOff;
+          DocClear;
+          len = 0;
+          buf[0] = 0;
+          continue;
+        }
         break;
       }
       len = 0;

@@ -1457,12 +1457,34 @@ U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
   mpj.level=level;
   mpj.cam=cam;
   mp_done=0;
+//The rasterizer clamps each worker to its own screen slice with Gs->num.
+//All workers must run or the display is only partially redrawn.
+  for(idx=1;idx<mp_cnt;idx++)
+    JobQue(&MPDrawJob,&mpj,idx);
   DrawBSP(to_dc,cam,level);
+  for(idx=1;idx<mp_cnt;idx++) {
+    while(!Bt(&mp_done,idx))
+#ifdef __AIWNIOS__
+      __Sleep(3);
+#else
+     PAUSE;
+#endif
+  }
   cam->draw_walls->cnt=0;
 
   af=Server_tS*4;
   mp_done=0;
+  for(idx=mp_cnt-1;idx>=1;idx--)
+    JobQue(&MPDrawFlatsJob,&mpj,idx);
   MPDrawFlatsJob(&mpj);
+  for(idx=1;idx<mp_cnt;idx++) {
+    while(!Bt(&mp_done,idx))
+#ifdef __AIWNIOS__
+      __Sleep(3);
+#else
+     PAUSE;
+#endif
+  }
 
   for(thing=level->things.next;thing!=&level->things;thing=thing->next) {
     sector=GetSectorForCoord(level,thing->x,thing->y);
