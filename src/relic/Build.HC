@@ -76,6 +76,53 @@ ReplaceBranding("::/Kernel.BIN.C");
 ReplaceBranding("::/0000Boot/0000Kernel.BIN.C");
 ReplaceBranding("::/StartOS.HC.Z");
 
+U0 PrependTheme(U8 *filename) {
+  I64 size;
+  U8 *buf = NULL;
+  if (!FileFind(filename))
+    return;
+  buf = FileRead(filename, &size);
+  if (buf) {
+    if (StrMatch("RelicBootPalette", buf)) {
+      Free(buf);
+      return;
+    }
+    U8 *theme_code = 
+      "U0 RelicBootPalette() {\n"
+      "  CBGR48 pal[16];\n"
+      "  MemSet(pal, 0, sizeof(CBGR48) * 16);\n"
+      "  pal[0].r=0x0000; pal[0].g=0x0000; pal[0].b=0x0000;\n"
+      "  pal[1].r=0x0000; pal[1].g=0x0000; pal[1].b=0x0000;\n"
+      "  pal[2].r=0x2000; pal[2].g=0x5200; pal[2].b=0x2400;\n"
+      "  pal[3].r=0x0000; pal[3].g=0x9000; pal[3].b=0xB800;\n"
+      "  pal[4].r=0xB800; pal[4].g=0x0800; pal[4].b=0x0800;\n"
+      "  pal[5].r=0x6000; pal[5].g=0x1500; pal[5].b=0x7000;\n"
+      "  pal[6].r=0xA000; pal[6].g=0x5200; pal[6].b=0x1000;\n"
+      "  pal[7].r=0x7800; pal[7].g=0x7800; pal[7].b=0x7400;\n"
+      "  pal[8].r=0x3800; pal[8].g=0x3800; pal[8].b=0x3A00;\n"
+      "  pal[9].r=0x3000; pal[9].g=0x4800; pal[9].b=0x9000;\n"
+      "  pal[10].r=0x3800; pal[10].g=0x9000; pal[10].b=0x4800;\n"
+      "  pal[11].r=0x1000; pal[11].g=0x3000; pal[11].b=0x3500;\n"
+      "  pal[12].r=0xFFFF; pal[12].g=0x3838; pal[12].b=0x2828;\n"
+      "  pal[13].r=0xBBBB; pal[13].g=0x5000; pal[13].b=0xCCCC;\n"
+      "  pal[14].r=0xFFFF; pal[14].g=0xC800; pal[14].b=0x2800;\n"
+      "  pal[15].r=0x2800; pal[15].g=0x2800; pal[15].b=0x2600;\n"
+      "  GrPaletteSet(pal);\n"
+      "}\n"
+      "RelicBootPalette;\n";
+    I64 theme_len = StrLen(theme_code);
+    U8 *new_buf = MAlloc(size + theme_len + 1);
+    MemCpy(new_buf, theme_code, theme_len);
+    MemCpy(new_buf + theme_len, buf, size);
+    new_buf[size + theme_len] = 0;
+    FileWrite(filename, new_buf, size + theme_len);
+    Free(buf);
+    Free(new_buf);
+  }
+}
+
+PrependTheme("::/StartOS.HC.Z");
+
 Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
 {
   U8 *buf = *buf_ptr;
@@ -160,18 +207,18 @@ U8 *clean_homesys =
   "Bool relic_desktop_started = FALSE;\n\n"
   "U0 UserStartUp()\n"
   "{\n"
+  "  RelicThemeApply;\n"
   "  Fs->text_attr = BLACK << 4 | DKGRAY;\n"
-  "  Fs->border_attr = BLACK << 4 | DKGRAY;\n"
+  "  Fs->border_attr = BLACK << 4 | BLACK;\n"
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
-  "  RelicThemeApply;\n"
   "  WinFocus;\n"
+  "  Print(\"$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$\");\n"
+  "  DocClear;\n"
   "  if (!relic_desktop_started) {\n"
   "    relic_desktop_started = TRUE;\n"
   "    WinBorder(OFF);\n"
-  "    Print(\"$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$\");\n"
-  "    DocClear;\n"
   "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
   "    WinZBufUpdate;\n"
   "    try {\n"
@@ -194,7 +241,12 @@ U8 *clean_homesys =
   "}\n\n"
   "U0 StartUpTasks()\n"
   "{\n"
+  "  RelicThemeApply;\n"
   "  winmgr.show_menu = FALSE;\n"
+  "  Fs->text_attr = BLACK << 4 | BLACK;\n"
+  "  Fs->border_attr = BLACK << 4 | BLACK;\n"
+  "  Print(\"$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$\");\n"
+  "  DocClear;\n"
   "  User;\n"
   "}\n\n"
   "StartUpTasks;\n";

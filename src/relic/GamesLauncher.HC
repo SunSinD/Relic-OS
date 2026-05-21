@@ -115,7 +115,7 @@ U0 RelicGamesLauncher()
       if (!len)
         break;
       id = Str2I64(buf);
-      if (1 <= id <= 24) {
+      if (1 <= id && id <= 24) {
         RelicGameRun(id);
         if (id == 1) {
           RelicGamesChromeOff;

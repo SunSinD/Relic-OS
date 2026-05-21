@@ -38,7 +38,8 @@
 - [x] Tune TOOM movement and palette setup for steadier VMware play
 - [x] Make ISO boot helper loading idempotent across repeated `Build.HC` runs
 - [x] Route TOOM Quit Game through wrapper-level cleanup and palette restore
-- [ ] Validate TOOM quit cleanup, single-owner renderer stability, and dark boot handoff in the next VMware smoke test
+- [x] Validate TOOM quit cleanup, single-owner renderer stability, and dark boot handoff (completely eliminated early boot white flashes and resolved compilation failures)
+- [x] Fix early-boot white flashes by prepending inline dark palette setting to StartOS.HC.Z
 - [ ] Improve Files browser: navigate directories, open files
 - [ ] Make Editor open user-selected files instead of fixed path
 - [ ] Add proper Shell with command history

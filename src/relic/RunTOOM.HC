@@ -1,6 +1,6 @@
 // Run the TOOM copy installed into the release ISO by Build.HC.
-extern U0 RelicChromeInstall();
-extern U0 RelicThemeApply();
+// No extern declarations — load theme/chrome dynamically to avoid
+// compile-time symbol resolution failures.
 
 U0 RelicTOOMDarkWin()
 {
@@ -17,6 +17,13 @@ U0 RelicTOOMDarkWin()
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
 }
 
+U0 RelicTOOMRestoreDark()
+{
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
 Bool RelicTOOMHandleCatch(Bool old_silent)
 {
   Silent(old_silent);
@@ -27,9 +34,7 @@ Bool RelicTOOMHandleCatch(Bool old_silent)
     return TRUE;
   }
 
-  Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  RelicTOOMRestoreDark;
   DocClear;
   "$FG,LTRED$DOOM failed to start cleanly.$FG$\n";
   "$FG,DKGRAY$Returning to the desktop...$FG$\n";
@@ -46,6 +51,19 @@ U0 RelicTOOMUseIWAD()
     FramePtrAdd("USE_IWAD", StrNew("doom1.wad"));
   else
     FramePtrAdd("USE_IWAD", StrNew("freedoom1.wad"));
+}
+
+U0 RelicTOOMReloadThemeChrome()
+{
+  // Reload theme and chrome into this task's symbol table,
+  // then call the setup functions via ExePrint so we don't
+  // need extern declarations that can fail at compile time.
+  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
+    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
+  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
+    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+  ExePrint("RelicThemeApply;");
+  ExePrint("RelicChromeInstall;");
 }
 
 U0 RunTOOM()
@@ -136,21 +154,17 @@ U0 RunTOOM()
   }
 
   if (!found) {
-    Fs->text_attr = BLACK << 4 | LTGRAY;
-    Fs->border_attr = BLACK << 4 | DKGRAY;
-    "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+    RelicTOOMRestoreDark;
     "\n$FG,LTRED$TOOM is not installed in ::/Home/TOOM.$FG$\n";
     "$FG,LTGRAY$Rebuild the release with #include \"E:/Build.HC\";.$FG$\n\n";
     "$FG,DKGRAY$Returning to the launcher...$FG$\n";
     Sleep(1500);
   }
 
-  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
-    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
-  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
-    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
-  RelicThemeApply;
-  RelicChromeInstall;
+  // Restore Relic palette and reload theme/chrome via ExePrint
+  // so we don't rely on extern symbols at compile time.
+  GrPaletteSet(relic_pal);
+  RelicTOOMReloadThemeChrome;
   RelicTOOMDarkWin;
   DocClear;
   DCFill;
