@@ -1,33 +1,71 @@
 // BuildRelease.HC
 // Automatically installs RelicOS to the system and generates a bootable ISO.
 
+U8 relic_src_drv = 'E';
+if (FileFind("D:/Build.HC") || FileFind("D:/Build.HC.Z"))
+  relic_src_drv = 'D';
+else if (FileFind("E:/Build.HC") || FileFind("E:/Build.HC.Z"))
+  relic_src_drv = 'E';
+
+"Detected Relic transfer drive: %c:\n", relic_src_drv;
+
+U0 RelicCopy(U8 *src_file, U8 *dst_dir) {
+  U8 buf[256];
+  StrPrint(buf, "%c:/%s", relic_src_drv, src_file);
+  Copy(buf, dst_dir);
+}
+
+U0 RelicCopyTree(U8 *src_dir, U8 *dst_dir) {
+  U8 buf[256];
+  StrPrint(buf, "%c:/%s", relic_src_drv, src_dir);
+  CopyTree(buf, dst_dir);
+}
+
+Bool RelicFileFind(U8 *filename) {
+  U8 buf[256];
+  StrPrint(buf, "%c:/%s", relic_src_drv, filename);
+  return FileFind(buf);
+}
+
+U8 *RelicFileRead(U8 *filename, I64 *size_out=NULL) {
+  U8 buf[256];
+  StrPrint(buf, "%c:/%s", relic_src_drv, filename);
+  return FileRead(buf, size_out);
+}
+
+U0 RelicFileWrite(U8 *filename, U8 *data, I64 size) {
+  U8 buf[256];
+  StrPrint(buf, "%c:/%s", relic_src_drv, filename);
+  FileWrite(buf, data, size);
+}
+
 "\n$FG,CYAN$==============================$FG$\n";
 "  $FG,LTBLUE$RelicOS Release Builder$FG$\n";
 "$FG,CYAN$==============================$FG$\n\n";
 
 "1. Installing RelicOS to ::/Home/RelicOS/...\n";
 DirMk("::/Home/RelicOS");
-Copy("E:/RelicBoot.HC", "::/Home/RelicOS");
-Copy("E:/RelicDesktop.HC", "::/Home/RelicOS");
-Copy("E:/RelicChrome.HC", "::/Home/RelicOS");
-Copy("E:/RelicTheme.HC", "::/Home/RelicOS");
-Copy("E:/RelicWallpaper.HC", "::/Home/RelicOS");
-Copy("E:/wallpaper.raw", "::/Home/RelicOS");
-Copy("E:/RunTOOM.HC", "::/Home/RelicOS");
-Copy("E:/GamesLauncher.HC", "::/Home/RelicOS");
+RelicCopy("RelicBoot.HC", "::/Home/RelicOS");
+RelicCopy("RelicDesktop.HC", "::/Home/RelicOS");
+RelicCopy("RelicChrome.HC", "::/Home/RelicOS");
+RelicCopy("RelicTheme.HC", "::/Home/RelicOS");
+RelicCopy("RelicWallpaper.HC", "::/Home/RelicOS");
+RelicCopy("wallpaper.raw", "::/Home/RelicOS");
+RelicCopy("RunTOOM.HC", "::/Home/RelicOS");
+RelicCopy("GamesLauncher.HC", "::/Home/RelicOS");
 
 "Installing TOOM into ::/Home/TOOM so DOOM is ready on first boot...\n";
 U8 toom_drv;
 Bool toom_installed = FALSE;
-if (FileFind("E:/TOOM/SinglePlayer.HC") ||
-    FileFind("E:/TOOM/SinglePlayer.HC.Z")) {
+if (RelicFileFind("TOOM/SinglePlayer.HC") ||
+    RelicFileFind("TOOM/SinglePlayer.HC.Z")) {
   DelTree("::/Home/TOOM");
-  CopyTree("E:/TOOM/", "::/Home/TOOM");
+  RelicCopyTree("TOOM/", "::/Home/TOOM");
   Del("::/Home/TOOM/Install.HC");
   toom_installed = TRUE;
 }
-if (!toom_installed && FileFind("E:/TOOM.ISO.C")) {
-  Copy("E:/TOOM.ISO.C", "::/Home/RelicOS");
+if (!toom_installed && RelicFileFind("TOOM.ISO.C")) {
+  RelicCopy("TOOM.ISO.C", "::/Home/RelicOS");
   toom_drv = MountFile("::/Home/RelicOS/TOOM.ISO.C");
   Drv(toom_drv);
   Cd("/");
@@ -40,7 +78,7 @@ if (!toom_installed && FileFind("E:/TOOM.ISO.C")) {
   Del("::/Home/RelicOS/TOOM.ISO.C");
 }
 if (!toom_installed) {
-  "$FG,LTRED$WARNING: TOOM source was not found on E:/TOOM.$FG$\n";
+  "$FG,LTRED$WARNING: TOOM source was not found on %c:/TOOM.$FG$\n", relic_src_drv;
 }
 
 "2. Completely rebranding OS and fixing Boot Script...\n";
@@ -193,10 +231,10 @@ U0 RestoreADefine()
   I64 size;
   U8 *buf = NULL;
 
-  if (!FileFind("E:/ADefineClean.HC"))
+  if (!RelicFileFind("ADefineClean.HC"))
     return;
 
-  buf = FileRead("E:/ADefineClean.HC", &size);
+  buf = RelicFileRead("ADefineClean.HC", &size);
   if (buf) {
     FileWrite("::/Adam/ADefine.HC.Z", buf, size);
     Free(buf);
@@ -209,10 +247,10 @@ U0 RestoreWallPaper()
   I64 size;
   U8 *buf = NULL;
 
-  if (!FileFind("E:/WallPaperClean.HC"))
+  if (!RelicFileFind("WallPaperClean.HC"))
     return;
 
-  buf = FileRead("E:/WallPaperClean.HC", &size);
+  buf = RelicFileRead("WallPaperClean.HC", &size);
   if (buf) {
     FileWrite("::/Adam/WallPaper.HC.Z", buf, size);
     Free(buf);
@@ -420,7 +458,7 @@ if (relic_iso_buf) {
   I64 relic_i;
   for (relic_i = 0; relic_i < relic_chunks; relic_i++) {
     U8 relic_chunk_name[256];
-    StrPrint(relic_chunk_name, "E:/ISO.P%02d", relic_i);
+    StrPrint(relic_chunk_name, "%c:/ISO.P%02d", relic_src_drv, relic_i);
     I64 relic_write_sz = relic_chunk_sz;
     if (relic_i == relic_chunks - 1) relic_write_sz = relic_iso_size - relic_i * relic_chunk_sz;
     "  Writing %s...\n", relic_chunk_name;
