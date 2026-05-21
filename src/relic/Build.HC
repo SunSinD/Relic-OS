@@ -164,6 +164,7 @@ U8 *clean_homesys =
   "  } else\n"
   "    WinBorder(ON);\n"
   "  WinFocus;\n"
+  "  DocTermNew;\n"
   "  Print(\"$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$\");\n"
   "  DocClear;\n"
   "  LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
