@@ -1,6 +1,7 @@
 // Run the TOOM copy installed into the release ISO by Build.HC.
 extern U0 RelicChromeInstall();
 extern U0 RelicThemeApply();
+extern U0 TOOMStopTasks();
 
 U0 RelicTOOMDarkWin()
 {
@@ -22,6 +23,10 @@ Bool RelicTOOMHandleCatch(Bool old_silent)
   Silent(old_silent);
   if (FramePtr("RELIC_TOOM_QUIT")) {
     FramePtrDel("RELIC_TOOM_QUIT");
+    try {
+      TOOMStopTasks;
+    } catch {
+    }
     Snd;
     FlushMsgs;
     return TRUE;
