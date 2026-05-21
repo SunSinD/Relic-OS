@@ -226,8 +226,6 @@ U0 RelicDriveColorsRestore()
 // ---- Launch handler ----
 // Runs apps directly in the desktop task.
 // Pauses wallpaper, runs the app, then resumes.
-extern U0 RelicGamesLauncher();
-
 U0 LaunchApp(I64 idx)
 {
   Fs->draw_it = NULL;
@@ -278,7 +276,7 @@ U0 LaunchApp(I64 idx)
       if (FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
         try {
           ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
-          RelicGamesLauncher;
+          ExePrint("RelicGamesLauncher;");
         } catch {
           "\n$FG,LTRED$Games launcher failed to compile/run.$FG$\n";
           "$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
