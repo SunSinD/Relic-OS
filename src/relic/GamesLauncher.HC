@@ -1,4 +1,48 @@
 // GamesLauncher.HC — runs inline in the desktop task (no child Spawn).
+//
+// Saves the Relic dark palette before running an inline game and
+// restores a bright vanilla-style palette so games (FlapBat, Varoom,
+// etc.) that rely on stock TempleOS colors are actually visible
+// instead of rendering BLUE on a black background.
+
+CBGR48 relic_bright_pal[COLORS_NUM] = {
+  0x000000000000, // BLACK
+  0x00000000A800, // BLUE
+  0x0000A8000000, // GREEN
+  0x0000A800A800, // CYAN
+  0xA80000000000, // RED
+  0xA8000000A800, // PURPLE
+  0xA80054000000, // BROWN
+  0xA800A800A800, // LTGRAY
+  0x540054005400, // DKGRAY
+  0x54005400FCFC, // LTBLUE
+  0x5400FCFC5400, // LTGREEN
+  0x5400FCFCFCFC, // LTCYAN
+  0xFCFC54005400, // LTRED
+  0xFCFC5400FCFC, // LTPURPLE
+  0xFCFCFCFC5400, // YELLOW
+  0xFCFCFCFCFCFC  // WHITE
+};
+
+CBGR48 relic_saved_pal[COLORS_NUM];
+Bool relic_pal_saved = FALSE;
+
+U0 RelicGamesPaletteBright()
+{
+  if (!relic_pal_saved) {
+    GrPaletteGet(relic_saved_pal);
+    relic_pal_saved = TRUE;
+  }
+  GrPaletteSet(relic_bright_pal);
+}
+
+U0 RelicGamesPaletteRestore()
+{
+  if (relic_pal_saved) {
+    GrPaletteSet(relic_saved_pal);
+    relic_pal_saved = FALSE;
+  }
+}
 
 U0 RelicGamesChromeOff()
 {
@@ -32,24 +76,48 @@ U0 RelicGameRunTOOM()
   ExePrint("RunTOOM;");
 }
 
+U0 RelicGameAfter()
+{
+  // Restore palette + chrome after an inline game exits.
+  RelicGamesPaletteRestore;
+  RelicThemeApply;
+  RelicTermDark;
+  RelicGamesChromeOff;
+  DocTermNew;
+  relic_status_show_keys = FALSE;
+  FlushMsgs;
+}
+
 U0 RelicGameFile(U8 *filename)
 {
   RelicGamesChromeOff;
+  RelicGamesPaletteBright;
   FlushMsgs;
   RelicGamesScreenClear;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
-  ExePrint("#include \"%s\";", filename);
+  try {
+    ExePrint("#include \"%s\";", filename);
+  } catch {
+    Fs->catch_except = TRUE;
+  }
+  RelicGameAfter;
 }
 
 U0 RelicGamePopUp(U8 *cmd)
 {
   RelicGamesChromeOff;
+  RelicGamesPaletteBright;
   FlushMsgs;
   RelicGamesScreenClear;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
-  ExePrint("%s", cmd);
+  try {
+    ExePrint("%s", cmd);
+  } catch {
+    Fs->catch_except = TRUE;
+  }
+  RelicGameAfter;
 }
 
 U0 RelicGameRun(I64 id)
@@ -133,7 +201,8 @@ U0 RelicGamesDrawMenu(U8 *buf)
 U0 RelicGamesLauncher()
 {
   U8 buf[3];
-  I64 id, ch, sc, len = 0;
+  I64 id, ch, sc, mc, len = 0;
+  Bool need_redraw = TRUE;
 
   RelicGamesChromeOff;
   DocTermNew;
@@ -141,25 +210,33 @@ U0 RelicGamesLauncher()
   buf[0] = 0;
 
   while (TRUE) {
-    RelicGamesScreenClear;
-    RelicGamesDrawMenu(buf);
+    if (need_redraw) {
+      RelicGamesScreenClear;
+      RelicGamesDrawMenu(buf);
+      need_redraw = FALSE;
+    }
 
-    // Blocking wait — no ScanKey/WinFocus polling loop needed.
-    GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    if (RelicKillRogueChildren) {
+      WinToTop(Fs);
+      WinFocus;
+      need_redraw = TRUE;
+    }
 
-    if (ch == CH_ESC || ch == CH_SHIFT_ESC)
+    mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    if (!mc) {
+      Sleep(15);
+    } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       return;
-
-    if (ch == '\n') {
+    } else if (ch == '\n') {
       if (!len)
         return;
       id = Str2I64(buf);
       len = 0;
       buf[0] = 0;
+      need_redraw = TRUE;
       if (1 <= id && id <= 24) {
         RelicGameRun(id);
-        // Always restore chrome and loop back to the menu after
-        // any game exits, whatever the reason.
+        // After any game exits, restore chrome and redraw the menu.
         RelicTermDark;
         RelicGamesChromeOff;
         DocTermNew;
@@ -169,10 +246,12 @@ U0 RelicGamesLauncher()
       if (len) {
         len--;
         buf[len] = 0;
+        need_redraw = TRUE;
       }
     } else if ('0' <= ch && ch <= '9' && len < 2) {
       buf[len++] = ch;
       buf[len] = 0;
+      need_redraw = TRUE;
     }
   }
 }

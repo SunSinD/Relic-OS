@@ -1,4 +1,10 @@
-// Run TOOM in an isolated child task so repeat launches do not corrupt the desktop.
+// RunTOOM.HC - Launches TOOM (DOOM) in an isolated child task.
+//
+// Robust against:
+//   - Missing WAD file (clear message, blocking pause).
+//   - TOOM source not installed (clear message).
+//   - TOOM crashing on startup (post-mortem visible).
+// On clean exit, restores the Relic palette + dark chrome.
 
 U0 RelicTOOMDarkWin()
 {
@@ -19,31 +25,6 @@ U0 RelicTOOMDarkWin()
 U0 RelicTOOMRestoreDark()
 {
   RelicTermDark;
-}
-
-Bool RelicTOOMHandleCatch(Bool old_silent)
-{
-  Silent(old_silent);
-
-  try {
-    ExePrint("TOOMStopTasks;");
-  } catch {
-    Fs->animate_task = NULL;
-  }
-
-  if (FramePtr("RELIC_TOOM_QUIT")) {
-    FramePtrDel("RELIC_TOOM_QUIT");
-    Snd;
-    FlushMsgs;
-    return TRUE;
-  }
-
-  RelicTOOMRestoreDark;
-  DocClear;
-  "$FG,LTRED$DOOM failed to start cleanly.$FG$\n";
-  "$FG,DKGRAY$Press any key...$FG$\n";
-  GetChar(NULL, FALSE);
-  return FALSE;
 }
 
 U8 *RelicTOOMFindIWAD()
@@ -88,28 +69,62 @@ U0 RelicTOOMReloadThemeChrome()
   ExePrint("RelicChromeInstall;");
 }
 
-Bool RelicTOOMRunFromDir(U8 *dir, Bool *old_silent)
+// Pick the TOOM source directory that actually contains SinglePlayer.HC.
+U8 *RelicTOOMFindDir()
 {
-  U8 *iwad;
-  U8 path[256];
-  Bool ok = FALSE;
+  if (FileFind("::/Home/TOOM/SinglePlayer.HC") ||
+        FileFind("::/Home/TOOM/SinglePlayer.HC.Z"))
+    return "::/Home/TOOM";
+  if (FileFind("::/Home/RelicOS/TOOM/SinglePlayer.HC") ||
+        FileFind("::/Home/RelicOS/TOOM/SinglePlayer.HC.Z"))
+    return "::/Home/RelicOS/TOOM";
+  return NULL;
+}
 
-  StrPrint(path, "%s/SinglePlayer.HC", dir);
-  if (!FileFind(path)) {
-    StrPrint(path, "%s/SinglePlayer.HC.Z", dir);
-    if (!FileFind(path))
-      return FALSE;
+// Show a full-screen error inside DOOM's task and wait for a keypress.
+U0 RelicTOOMError(U8 *title, U8 *body)
+{
+  RelicTermDark;
+  DocClear;
+  DCFill;
+  "\n\n$FG,LTRED$%s$FG$\n\n", title;
+  "$FG,LTGRAY$%s$FG$\n\n", body;
+  "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  FlushMsgs;
+  GetChar(NULL, FALSE);
+}
+
+// Runs inside the spawned "TOOM Task" child only.
+U0 RelicTOOMChildMain()
+{
+  Bool old_silent = Silent;
+  U8 *dir, *iwad;
+  Bool quit_clean = FALSE;
+
+  RelicTOOMDarkWin;
+  winmgr.show_menu = FALSE;
+  DocClear;
+  DCFill;
+
+  dir = RelicTOOMFindDir();
+  if (!dir) {
+    RelicTOOMError("TOOM source not installed.",
+          "Reinstall DOOM by copying src/relic/TOOM/ into the VM and re-running Build.HC.");
+    return;
+  }
+
+  iwad = RelicTOOMFindIWAD();
+  if (!iwad) {
+    RelicTOOMError("No DOOM WAD found.",
+          "Put doom1.wad or freedoom1.wad in ::/Home/TOOM/ then re-run Build.HC.");
+    return;
   }
 
   Cd(dir);
-  iwad = RelicTOOMFindIWAD();
-  if (!iwad)
-    return FALSE;
-
-  RelicTOOMDarkWin;
-  DocClear;
-  DCFill;
   RelicTOOMUseIWAD(iwad);
+
   try {
     FlushMsgs;
     RelicTOOMDarkWin;
@@ -117,40 +132,21 @@ Bool RelicTOOMRunFromDir(U8 *dir, Bool *old_silent)
       ExeFile("SinglePlayer.HC", CCF_JUST_LOAD);
     else
       ExeFile("SinglePlayer.HC.Z", CCF_JUST_LOAD);
+    FramePtrAdd("RELIC_TOOM_FRESH", StrNew("1"));
     ExePrint("TOOMStart;");
-    Silent(*old_silent);
-    try { ExePrint("TOOMStopTasks;"); } catch {}
-    ok = TRUE;
+    Silent(old_silent);
+    try { ExePrint("TOOMStopTasks;"); } catch { Fs->catch_except = TRUE; }
+    quit_clean = TRUE;
   } catch {
-    RelicTOOMHandleCatch(*old_silent);
+    Silent(old_silent);
+    try { ExePrint("TOOMStopTasks;"); } catch { Fs->catch_except = TRUE; }
+    RelicTOOMError("DOOM crashed while starting.",
+          "TOOM raised an exception. Verify that doom1.wad is a valid WAD file.");
+    return;
   }
-  return ok;
-}
 
-// Runs inside the spawned "TOOM Task" child only.
-U0 RelicTOOMChildMain()
-{
-  Bool old_silent = Silent;
-  Bool found = FALSE;
-
-  RelicTOOMDarkWin;
-  winmgr.show_menu = FALSE;
-  DocClear;
-  DCFill;
-
-  if (RelicTOOMRunFromDir("::/Home/TOOM", &old_silent))
-    found = TRUE;
-  else if (RelicTOOMRunFromDir("::/Home/RelicOS/TOOM", &old_silent))
-    found = TRUE;
-  else if (RelicTOOMRunFromDir("::/Home/TOOM/Home/TOOM", &old_silent))
-    found = TRUE;
-
-  if (!found) {
-    RelicTOOMRestoreDark;
-    DocClear;
-    "$FG,LTRED$TOOM could not start in this task.$FG$\n";
-    Sleep(500);
-  }
+  if (quit_clean)
+    FramePtrDel("RELIC_TOOM_QUIT");
 }
 
 U0 RunTOOM()
@@ -158,26 +154,29 @@ U0 RunTOOM()
   CTask *task;
   Bool old_silent;
   CBGR48 relic_pal[COLORS_NUM];
-  U8 *iwad;
+  U8 *iwad, *dir;
 
   if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
     ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
 
+  // Parent-side fast preflight so we can show an inline error without
+  // spawning a child task that might itself fail invisibly.
+  dir = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
-  if (!iwad) {
+  if (!dir || !iwad) {
     DocClear;
     DCFill;
-    "\n\n$FG,LTRED$No DOOM WAD found.$FG$\n\n";
-    "$FG,LTGRAY$Put $FG,CYAN$doom1.wad$FG,LTGRAY$ or $FG,CYAN$freedoom1.wad$FG,LTGRAY$ in:$FG$\n";
-    "  ::/Home/TOOM/\n";
-    "  ::/Home/RelicOS/TOOM/\n\n";
-    "$FG,DKGRAY$On the host: copy WAD into src/relic/TOOM/,\n";
-    "then run Build.HC inside the VM.$FG$\n\n";
+    "\n\n$FG,LTRED$DOOM cannot launch.$FG$\n\n";
+    if (!dir)
+      "$FG,LTGRAY$Missing TOOM source at $FG,CYAN$::/Home/TOOM/$FG$\n";
+    if (!iwad)
+      "$FG,LTGRAY$Missing WAD: put $FG,CYAN$doom1.wad$FG,LTGRAY$ or $FG,CYAN$freedoom1.wad$FG,LTGRAY$ in $FG,CYAN$::/Home/TOOM/$FG$\n";
+    "\n$FG,DKGRAY$Build.HC should copy TOOM + WAD automatically.$FG$\n\n";
     "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
     LBts(&Fs->display_flags, DISPLAYf_SHOW);
     WinZBufUpdate;
     FlushMsgs;
-    GetChar;
+    GetChar(NULL, FALSE);
     return;
   }
 

@@ -218,6 +218,31 @@ U0 RelicChildKill()
   }
 }
 
+// Kill any task on our CPU that has us as its parent.
+// This catches the kernel terminal spawned by Ctrl+Alt+T (and similar
+// hotkeys) before it can hold focus and freeze the desktop.
+// Returns TRUE if it killed anything.
+Bool RelicKillRogueChildren()
+{
+  CTask *t, *next, *me = Fs;
+  Bool killed = FALSE;
+
+  t = me->next_task;
+  while (t && t != me) {
+    next = t->next_task;
+    if (t != relic_child_task && t->parent_task == me) {
+      try {
+        Kill(t, FALSE);
+        killed = TRUE;
+      } catch {
+        Fs->catch_except = TRUE;
+      }
+    }
+    t = next;
+  }
+  return killed;
+}
+
 U0 RelicDesktopRestore()
 {
   winmgr.show_menu = FALSE;
@@ -292,7 +317,7 @@ U0 RelicLaunchEditor()
 U0 RelicLaunchShell()
 {
   U8 line[256];
-  I64 len = 0, ch, sc;
+  I64 len = 0, ch, sc, mc;
   Bool stop = FALSE;
 
   "$FG,YELLOW$Relic Shell$FG$\n";
@@ -302,15 +327,23 @@ U0 RelicLaunchShell()
   WinZBufUpdate;
 
   while (!stop) {
-    GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    // Same hotkey defence as the desktop loop.
+    if (RelicKillRogueChildren) {
+      WinToTop(Fs);
+      WinFocus;
+    }
 
-    if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
+    mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    if (!mc) {
+      Sleep(15);
+    } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       stop = TRUE;
     } else if (ch == '\n') {
       "\n";
       line[len] = 0;
       len = 0;
-      if (!StrCmp(line, "exit") || !StrCmp(line, "Exit") || !StrCmp(line, "EXIT")) {
+      if (!StrCmp(line, "exit") || !StrCmp(line, "Exit") ||
+            !StrCmp(line, "EXIT")) {
         stop = TRUE;
       } else if (line[0]) {
         try {
@@ -454,41 +487,39 @@ U0 RelicDesktop()
   while (TRUE) {
     winmgr.show_menu = FALSE;
 
-    // MSG_REDIE fires when any child task dies (e.g. a Ctrl+Alt+T terminal).
-    // Including it lets GetMsg unblock so we can restore the desktop immediately.
-    msg_code = GetMsg(&arg1, &arg2,
-          1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE
-          | 1 << MSG_REDIE);
-    switch (msg_code) {
-      case MSG_REDIE:
-        // A child task died (e.g. rogue Ctrl+Alt+T terminal).
-        // Snap draw_it back and repaint so the desktop is visible again.
-        Fs->draw_it = &DrawDesktop;
-        WinToTop(Fs);
-        WinFocus;
+    // Defensive: kernel hotkeys like Ctrl+Alt+T spawn a child user task
+    // that steals focus. Kill any such child every tick so the desktop
+    // can never be deadlocked behind one.
+    if (RelicKillRogueChildren) {
+      WinToTop(Fs);
+      WinFocus;
+      RelicDesktopRestore;
+    }
+
+    // Non-blocking message poll so we never deadlock waiting on a queue
+    // when something else has focus.
+    msg_code = ScanMsg(&arg1, &arg2,
+          1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE);
+
+    if (msg_code == MSG_KEY_DOWN) {
+      if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
+        RelicChildKill;
         RelicDesktopRestore;
-        break;
-
-      case MSG_KEY_DOWN:
-        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
-          RelicChildKill;
-          RelicDesktopRestore;
-        } else if (arg1 >= ' ' && arg1 < 127) {
-          relic_pending_app = RelicKeyApp(arg1);
-        }
-        break;
-
-      case MSG_MS_L_DOWN:
-        relic_pending_app = RelicDockHit(arg1, arg2);
-        if (relic_pending_app < 0)
-          relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
-                ms.pos.y - relic_oy);
-        break;
-
-      case MSG_MS_MOVE:
-        if (Fs->draw_it)
-          Fs->draw_it(Fs, gr.dc);
-        break;
+      } else if (arg1 >= ' ' && arg1 < 127) {
+        relic_pending_app = RelicKeyApp(arg1);
+      }
+    } else if (msg_code == MSG_MS_L_DOWN) {
+      relic_pending_app = RelicDockHit(arg1, arg2);
+      if (relic_pending_app < 0)
+        relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
+              ms.pos.y - relic_oy);
+    } else if (msg_code == MSG_MS_MOVE) {
+      if (Fs->draw_it)
+        Fs->draw_it(Fs, gr.dc);
+    } else {
+      // No message: yield so other tasks (e.g. dying kernel terminals)
+      // get scheduled, and keep CPU sane.
+      Sleep(15);
     }
 
     if (relic_pending_app >= 0) {
