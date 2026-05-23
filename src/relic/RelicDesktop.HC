@@ -336,6 +336,8 @@ U0 RelicLaunchShell()
     mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
     if (!mc) {
       Sleep(15);
+      WinToTop(Fs);
+      WinFocus;
     } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       stop = TRUE;
     } else if (ch == '\n') {
@@ -517,9 +519,13 @@ U0 RelicDesktop()
       if (Fs->draw_it)
         Fs->draw_it(Fs, gr.dc);
     } else {
-      // No message: yield so other tasks (e.g. dying kernel terminals)
-      // get scheduled, and keep CPU sane.
+      // No message: yield CPU, then immediately reclaim our window on
+      // top. Ctrl+Alt+T may spawn a terminal (child of Adam, not us) that
+      // steals focus; WinToTop+WinFocus restores the desktop within ~15ms
+      // regardless of the rogue task's parent, so it can never stay frozen.
       Sleep(15);
+      WinToTop(Fs);
+      WinFocus;
     }
 
     if (relic_pending_app >= 0) {

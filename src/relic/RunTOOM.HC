@@ -81,19 +81,28 @@ U8 *RelicTOOMFindDir()
   return NULL;
 }
 
-// Show a full-screen error inside DOOM's task and wait for a keypress.
+// Show a full-screen error and wait for a keypress via ScanMsg loop.
+// Uses ScanMsg instead of GetChar so it can't return on a stale char.
 U0 RelicTOOMError(U8 *title, U8 *body)
 {
+  I64 ec, ea, eb;
   RelicTermDark;
   DocClear;
   DCFill;
   "\n\n$FG,LTRED$%s$FG$\n\n", title;
   "$FG,LTGRAY$%s$FG$\n\n", body;
-  "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
+  "$FG,YELLOW$Press any key to return...$FG$\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   FlushMsgs;
-  GetChar(NULL, FALSE);
+  // Wait at least 500 ms so the screen is always visible, then drain any
+  // keys that arrived during that window before blocking for a fresh one.
+  Sleep(500);
+  FlushMsgs;
+  do {
+    ec = ScanMsg(&ea, &eb, 1 << MSG_KEY_DOWN);
+    if (!ec) Sleep(15);
+  } while (!ec);
 }
 
 // Runs inside the spawned "TOOM Task" child only.
@@ -132,7 +141,9 @@ U0 RelicTOOMChildMain()
       ExeFile("SinglePlayer.HC", CCF_JUST_LOAD);
     else
       ExeFile("SinglePlayer.HC.Z", CCF_JUST_LOAD);
-    FramePtrAdd("RELIC_TOOM_FRESH", StrNew("1"));
+    // Do NOT add RELIC_TOOM_FRESH here — TOOMStart already adds it.
+    // A duplicate entry causes MainMenu to reset state=0 every tick,
+    // making it impossible to get past the main menu.
     ExePrint("TOOMStart;");
     Silent(old_silent);
     try { ExePrint("TOOMStopTasks;"); } catch { Fs->catch_except = TRUE; }
@@ -172,11 +183,18 @@ U0 RunTOOM()
     if (!iwad)
       "$FG,LTGRAY$Missing WAD: put $FG,CYAN$doom1.wad$FG,LTGRAY$ or $FG,CYAN$freedoom1.wad$FG,LTGRAY$ in $FG,CYAN$::/Home/TOOM/$FG$\n";
     "\n$FG,DKGRAY$Build.HC should copy TOOM + WAD automatically.$FG$\n\n";
-    "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
+    "$FG,YELLOW$Press any key to return...$FG$\n";
     LBts(&Fs->display_flags, DISPLAYf_SHOW);
     WinZBufUpdate;
+    Sleep(500);
     FlushMsgs;
-    GetChar(NULL, FALSE);
+    {
+      I64 ec2, ea2, eb2;
+      do {
+        ec2 = ScanMsg(&ea2, &eb2, 1 << MSG_KEY_DOWN);
+        if (!ec2) Sleep(15);
+      } while (!ec2);
+    }
     return;
   }
 

@@ -225,6 +225,8 @@ U0 RelicGamesLauncher()
     mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
     if (!mc) {
       Sleep(15);
+      WinToTop(Fs);
+      WinFocus;
     } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       return;
     } else if (ch == '\n') {
