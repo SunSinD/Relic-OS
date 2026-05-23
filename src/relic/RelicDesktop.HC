@@ -208,6 +208,7 @@ U0 RelicDesktopRefresh()
 {
   if (Fs->draw_it)
     Fs->draw_it(Fs, gr.dc);
+  RelicStatusWallPaper(Fs);
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
 }
@@ -225,6 +226,7 @@ U0 RelicDesktopRestore()
   Fs->draw_it = &DrawDesktop;
   if (Fs->draw_it)
     Fs->draw_it(Fs, gr.dc);
+  RelicStatusWallPaper(Fs);
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   FlushMsgs;
@@ -287,6 +289,8 @@ U0 RelicGamesTaskMain()
 {
   if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
     ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
+    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
   if (FileFind("::/Home/RelicOS/GamesLauncher.HC"))
     ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
   ExePrint("RelicGamesLauncher;");
@@ -296,6 +300,8 @@ U0 RelicShellTaskMain()
 {
   if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
     ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
+    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu = FALSE;
@@ -310,6 +316,8 @@ U0 RelicShellTaskMain()
   DocTermNew;
   DocClear;
   DCFill;
+  RelicStatusWallPaper(Fs);
+  "\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   UserCmdLine;
@@ -443,6 +451,7 @@ U0 RelicDesktop()
   DocClear;
   Fs->draw_it = &DrawDesktop;
   Fs->draw_it(Fs, gr.dc);
+  RelicStatusWallPaper(Fs);
   WinZBufUpdate;
 
   while (TRUE) {
@@ -474,7 +483,7 @@ U0 RelicDesktop()
         break;
 
       case MSG_MS_MOVE:
-        if (Fs->draw_it)
+        if (Fs->draw_it && !relic_child_task)
           Fs->draw_it(Fs, gr.dc);
         break;
     }
@@ -484,9 +493,7 @@ U0 RelicDesktop()
       relic_pending_app = -1;
       FlushMsgs;
       LaunchApp(i);
-      if (i == 2 || i == 3)
-        RelicDesktopRefresh;
-      else
+      if (i != 2 && i != 3)
         RelicDesktopRestore;
     }
   }

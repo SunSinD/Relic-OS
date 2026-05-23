@@ -1,5 +1,7 @@
 // GamesLauncher.HC — HolyC-safe: one statement per switch case, no goto.
 
+#define RELIC_GAMES_MENU_ROW  2
+
 U0 RelicGamesChromeOff()
 {
   WinBorder(OFF);
@@ -13,7 +15,16 @@ U0 RelicGamesChromeOff()
   Fs->border_src = 0;
   Fs->border_attr = BLACK << 4 | DKGRAY;
   Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->draw_it = NULL;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
+U0 RelicGamesScreenClear()
+{
+  DocClear;
+  DCFill;
+  if (gr.fp_wall_paper)
+    gr.fp_wall_paper(Fs);
 }
 
 U0 RelicGameRunTOOM()
@@ -26,7 +37,7 @@ U0 RelicGameFile(U8 *filename)
 {
   RelicGamesChromeOff;
   FlushMsgs;
-  DocClear;
+  RelicGamesScreenClear;
   ExePrint("#include \"%s\";", filename);
 }
 
@@ -34,14 +45,14 @@ U0 RelicGamePopUp(U8 *cmd)
 {
   RelicGamesChromeOff;
   FlushMsgs;
-  DocClear;
+  RelicGamesScreenClear;
   ExePrint("%s", cmd);
 }
 
 U0 RelicGameRun(I64 id)
 {
   RelicGamesChromeOff;
-  DocClear;
+  RelicGamesScreenClear;
   FlushMsgs;
 
   if (id == 1)
@@ -94,36 +105,46 @@ U0 RelicGameRun(I64 id)
     RelicGamePopUp("#include \"::/Apps/GrModels/Run\";View;");
 }
 
+U0 RelicGamesDrawMenu(U8 *buf)
+{
+  I64 i;
+
+  for (i = 0; i < RELIC_GAMES_MENU_ROW; i++)
+    "\n";
+  "$FG,CYAN$DOOM$FG$\n";
+  "  1. DOOM\n\n";
+  "$FG,CYAN$Fun Games$FG$\n";
+  "  2. Titanium          3. Black Diamond     4. Flap Bat\n";
+  "  5. Varoom            6. FlatTops          7. Bomber Golf\n";
+  "  8. KeepAway          9. RawHide          10. X-Caliber\n";
+  " 11. Wenceslas        12. Battle Lines\n\n";
+  "$FG,CYAN$Unfun Games$FG$\n";
+  " 13. Talons           14. Castle Frankenstein\n";
+  " 15. ZoneOut          16. ToTheFront       17. Span\n";
+  " 18. Tree Checkers    19. Digits\n\n";
+  "$FG,CYAN$More Games$FG$\n";
+  " 20. Strut            21. BigGuns          22. TheDead\n";
+  "  23. DunGen           24. Models\n\n";
+  "$FG,DKGRAY$Type a number and press Enter. Esc returns.$FG$\n\n";
+  "game> %s", buf;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+}
+
 U0 RelicGamesLauncher()
 {
   U8 buf[3];
   I64 id, ch, sc, len = 0;
 
   RelicGamesChromeOff;
-  DocClear;
+  RelicChromeInstall;
+  DocTermNew;
+  RelicGamesScreenClear;
   buf[0] = 0;
 
   while (TRUE) {
-    RelicGamesChromeOff;
-    if (ms.pos.y < 20)
-      MsSet(ms.pos.x, GR_HEIGHT / 2);
-    DocClear;
-    "$FG,5$DOOM$FG$\n";
-    "  1. DOOM\n\n";
-    "$FG,5$Fun Games$FG$\n";
-    "  2. Titanium          3. Black Diamond     4. Flap Bat\n";
-    "  5. Varoom            6. FlatTops          7. Bomber Golf\n";
-    "  8. KeepAway          9. RawHide          10. X-Caliber\n";
-    " 11. Wenceslas        12. Battle Lines\n\n";
-    "$FG,5$Unfun Games$FG$\n";
-    " 13. Talons           14. Castle Frankenstein\n";
-    " 15. ZoneOut          16. ToTheFront       17. Span\n";
-    " 18. Tree Checkers    19. Digits\n\n";
-    "$FG,5$More Games$FG$\n";
-    " 20. Strut            21. BigGuns          22. TheDead\n";
-    " 23. DunGen           24. Models\n\n";
-    "$FG,DKGRAY$Type a number and press Enter. Esc returns.$FG$\n\n";
-    "game> %s", buf;
+    RelicGamesScreenClear;
+    RelicGamesDrawMenu(buf);
 
     GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
     if (ch == CH_ESC || ch == CH_SHIFT_ESC)
@@ -138,8 +159,7 @@ U0 RelicGamesLauncher()
         if (id == 1) {
           RelicTermDark;
           RelicGamesChromeOff;
-          DocClear;
-          FlushMsgs;
+          RelicChromeInstall;
           len = 0;
           buf[0] = 0;
         } else
