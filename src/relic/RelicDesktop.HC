@@ -224,7 +224,6 @@ U0 RelicDesktopRestore()
   Fs->draw_it = &DrawDesktop;
   if (Fs->draw_it)
     Fs->draw_it(Fs, gr.dc);
-  RelicStatusWallPaper(Fs);
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   FlushMsgs;
