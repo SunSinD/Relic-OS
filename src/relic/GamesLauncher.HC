@@ -1,6 +1,5 @@
 // GamesLauncher.HC — HolyC-safe: one statement per switch case, no goto.
-
-#define RELIC_GAMES_MENU_ROW  2
+// Runs inline in the desktop task (no child Spawn) so no kernel chrome.
 
 U0 RelicGamesChromeOff()
 {
@@ -13,28 +12,25 @@ U0 RelicGamesChromeOff()
   WinFocus;
   RelicTermDark;
   Fs->border_src = 0;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
+  Fs->border_attr = BLACK << 4 | BLACK;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->draw_it = NULL;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
-}
-
-U0 RelicGamesStatusLine()
-{
-  RelicStatusFormat;
-  TextPrint(Fs, 0, 0, BLACK << 4 | LTGRAY, relic_top_line);
 }
 
 U0 RelicGamesScreenClear()
 {
   DocClear;
   DCFill;
-  RelicGamesStatusLine;
+  // Two blank rows so kernel task-name strip (if drawn) is over
+  // black, and the menu starts predictably at row 2.
+  "\n\n";
 }
 
 U0 RelicGameRunTOOM()
 {
-  ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
+  if (FileFind("::/Home/RelicOS/RunTOOM.HC"))
+    ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
   ExePrint("RunTOOM;");
 }
 
@@ -112,10 +108,6 @@ U0 RelicGameRun(I64 id)
 
 U0 RelicGamesDrawMenu(U8 *buf)
 {
-  I64 i;
-
-  for (i = 0; i < RELIC_GAMES_MENU_ROW; i++)
-    "\n";
   "$FG,5$DOOM$FG$\n";
   "  1. DOOM\n\n";
   "$FG,5$Fun Games$FG$\n";
@@ -124,12 +116,12 @@ U0 RelicGamesDrawMenu(U8 *buf)
   "  8. KeepAway          9. RawHide          10. X-Caliber\n";
   " 11. Wenceslas        12. Battle Lines\n\n";
   "$FG,5$Unfun Games$FG$\n";
-  "  13. Talons           14. Castle Frankenstein\n";
-  "  15. ZoneOut          16. ToTheFront       17. Span\n";
-  "  18. Tree Checkers    19. Digits\n\n";
+  " 13. Talons           14. Castle Frankenstein\n";
+  " 15. ZoneOut          16. ToTheFront       17. Span\n";
+  " 18. Tree Checkers    19. Digits\n\n";
   "$FG,5$More Games$FG$\n";
-  "  20. Strut            21. BigGuns          22. TheDead\n";
-  "  23. DunGen           24. Models\n\n";
+  " 20. Strut            21. BigGuns          22. TheDead\n";
+  " 23. DunGen           24. Models\n\n";
   "$FG,DKGRAY$Type a number and press Enter. Esc returns.$FG$\n\n";
   "game> %s", buf;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
@@ -140,6 +132,7 @@ U0 RelicGamesLauncher()
 {
   U8 buf[3];
   I64 id, ch, sc, len = 0;
+  Bool got_key;
 
   RelicGamesChromeOff;
   RelicChromeInstall;
@@ -152,7 +145,14 @@ U0 RelicGamesLauncher()
     RelicGamesScreenClear;
     RelicGamesDrawMenu(buf);
 
-    GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    got_key = FALSE;
+    while (!got_key) {
+      WinFocus;
+      got_key = ScanKey(&ch, &sc, FALSE);
+      if (!got_key)
+        Sleep(20);
+    }
+
     if (ch == CH_ESC || ch == CH_SHIFT_ESC)
       return;
 

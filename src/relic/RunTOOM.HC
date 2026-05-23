@@ -165,11 +165,15 @@ U0 RunTOOM()
 
   iwad = RelicTOOMFindIWAD();
   if (!iwad) {
-    PopUpOk(
-          "No DOOM WAD found.\n\n"
-          "Put doom1.wad or freedoom1.wad in\n"
-          "::/Home/TOOM or ::/Home/RelicOS/TOOM,\n"
-          "then run MakeVHD.ps1 and Build.HC.");
+    DocClear;
+    "\n\n$FG,LTRED$No DOOM WAD found.$FG$\n\n";
+    "$FG,LTGRAY$Put $FG,CYAN$doom1.wad$FG,LTGRAY$ or $FG,CYAN$freedoom1.wad$FG,LTGRAY$ in:$FG$\n";
+    "  ::/Home/TOOM/\n";
+    "  ::/Home/RelicOS/TOOM/\n\n";
+    "$FG,DKGRAY$On the host: copy WAD into src/relic/TOOM/,\n";
+    "run MakeVHD.ps1, then Build.HC inside the VM.$FG$\n\n";
+    "$FG,DKGRAY$Press any key to return to the games menu...$FG$\n";
+    GetChar;
     return;
   }
 

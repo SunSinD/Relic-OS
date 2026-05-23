@@ -2,7 +2,7 @@
 // System status strip: RelicOS version, date/time, FPS.
 
 U8 relic_top_line[STR_LEN];
-Bool relic_status_show_keys = TRUE;
+Bool relic_status_show_keys = FALSE;
 
 U0 RelicStatusFormat()
 {
@@ -15,7 +15,7 @@ U0 RelicStatusFormat()
         ds.hour, ds.min, ds.sec, winmgr.fps);
 }
 
-// Text layer (shell, games, any DocTerm window)
+// Text layer (called by kernel as gr.fp_wall_paper for non-draw_it tasks).
 U0 RelicStatusWallPaper(CTask *_task)
 {
   U8 *st;
@@ -27,21 +27,13 @@ U0 RelicStatusWallPaper(CTask *_task)
   _task->text_attr = BLACK << 4 | LTGRAY;
   TextPrint(_task, 0, 0, BLACK << 4 | LTGRAY, relic_top_line);
   if (scrncast.record)
-    TextPrint(_task, 44 - 4, 0, BLACK << 4 | RED, "*");
+    TextPrint(_task, 40, 0, BLACK << 4 | RED, "*");
 
   if (relic_status_show_keys) {
     st = ScanCode2KeyName(kbd.last_down_scan_code);
     TextPrint(_task, 80 - 18, 0, BLACK << 4 | YELLOW, "%18ts", st);
     Free(st);
   }
-}
-
-// Graphics layer (desktop draw_it — TextPrint is hidden under GrBlot)
-U0 RelicStatusGrDraw(CDC *dc)
-{
-  RelicStatusFormat;
-  dc->color = LTGRAY;
-  GrPrint(dc, 6, 3, relic_top_line);
 }
 
 U0 RelicChromeInstall()

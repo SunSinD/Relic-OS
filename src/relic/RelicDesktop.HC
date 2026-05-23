@@ -1,5 +1,6 @@
 // RelicDesktop.HC - Relic OS Desktop Environment
-// Dark dock launcher with wallpaper, direct app execution
+// All apps run inline in the desktop task (no spawned child tasks
+// for shell/games/etc.) so the TempleOS kernel chrome never appears.
 
 // ---- Constants ----
 #define DOCK_H      34
@@ -71,9 +72,11 @@ U0 RelicDriveColorsRestore()
   }
 }
 
-// ---- Drawing (defined first — HolyC requires it) ----
+// ---- Desktop draw_it (graphics layer) ----
 U0 DrawDesktop(CTask *task, CDC *dc)
 {
+  CDateStruct ds;
+  U8 buf[256];
   I64 w = dc->width;
   I64 h = dc->height;
   I64 i, bx, by;
@@ -87,10 +90,11 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   relic_ox = task->pix_left;
   relic_oy = task->pix_top;
 
-  // Reserve top row for system status strip (RelicChrome / fp_wall_paper)
+  // Top strip (always black, status drawn on top)
   dc->color = BLACK;
   GrRect(dc, 0, 0, w, TOPBAR_H);
 
+  // Wallpaper below status strip
   if (relic_wp_dc)
     GrBlot(dc, 0, TOPBAR_H, relic_wp_dc);
   else {
@@ -98,7 +102,14 @@ U0 DrawDesktop(CTask *task, CDC *dc)
     GrRect(dc, 0, TOPBAR_H, w, h - TOPBAR_H);
   }
 
-  RelicStatusGrDraw(dc);
+  // Status text drawn inline so it always appears
+  Date2Struct(&ds, Now + local_time_offset);
+  StrPrint(buf,
+        "RelicOS V1.0.0 %3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf",
+        ds.day_of_week, "ST_DAYS_OF_WEEK", ds.mon, ds.day_of_mon,
+        ds.hour, ds.min, ds.sec, winmgr.fps);
+  dc->color = LTGRAY;
+  GrPrint(dc, 6, 3, buf);
 
   // Dock background
   dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
@@ -132,7 +143,6 @@ U0 DrawDesktop(CTask *task, CDC *dc)
       dc->color = BLACK;
       GrPrint(dc, bx + 14, by + 8, app_icons[i]);
 
-      // Tooltip
       I64 tw = StrLen(app_tips[i]) * 8 + 12;
       I64 tx = bx + (DOCK_BTN_W - tw) / 2;
       I64 ty = dock_y - 20;
@@ -152,7 +162,6 @@ U0 DrawDesktop(CTask *task, CDC *dc)
     }
   }
 
-  // Center dot
   dc->color = CYAN;
   GrPlot(dc, w / 2, dock_y + DOCK_H + 3);
   GrPlot(dc, w / 2 + 1, dock_y + DOCK_H + 3);
@@ -163,7 +172,7 @@ U0 RelicDocDark()
   RelicDriveColorsDark;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->border_attr = BLACK << 4 | DKGRAY;
-  Fs->border_src = 0; // BDS_CONST
+  Fs->border_src = 0;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
@@ -172,12 +181,13 @@ U0 RelicDesktopMode()
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu = FALSE;
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER;
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
   WinFocus;
   RelicDocDark;
 }
 
+// Switch desktop task into a fullscreen text-terminal mode (used by every inline app).
+// Hides chrome by setting draw_it to NULL but suppressing all the kernel chrome we can.
 U0 RelicAppStart()
 {
   Fs->draw_it = NULL;
@@ -185,12 +195,18 @@ U0 RelicAppStart()
   WinBorder(OFF);
   WinMax;
   AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
+  Fs->border_src = 0;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
   WinFocus;
   RelicDocDark;
   DocTermNew;
   RelicDocDark;
   DocClear;
   DCFill;
+  // Push doc cursor below where TempleOS would draw a task-name strip
+  "\n\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
 }
@@ -201,14 +217,6 @@ U0 RelicChildKill()
     Kill(relic_child_task, FALSE);
     relic_child_task = NULL;
   }
-}
-
-U0 RelicDesktopRefresh()
-{
-  if (Fs->draw_it)
-    Fs->draw_it(Fs, gr.dc);
-  LBts(&Fs->display_flags, DISPLAYf_SHOW);
-  WinZBufUpdate;
 }
 
 U0 RelicDesktopRestore()
@@ -222,8 +230,7 @@ U0 RelicDesktopRestore()
   DCFill;
   RelicDesktopMode;
   Fs->draw_it = &DrawDesktop;
-  if (Fs->draw_it)
-    Fs->draw_it(Fs, gr.dc);
+  Fs->draw_it(Fs, gr.dc);
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   FlushMsgs;
@@ -282,163 +289,158 @@ U0 RelicLaunchEditor()
   Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
 }
 
-U0 RelicGamesTaskMain()
-{
-  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
-    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
-  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
-    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
-  if (FileFind("::/Home/RelicOS/GamesLauncher.HC"))
-    ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
-  ExePrint("RelicGamesLauncher;");
-}
-
-U0 RelicShellTaskMain()
-{
-  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
-    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
-  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
-    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
-  WinBorder(OFF);
-  WinMax;
-  winmgr.show_menu = FALSE;
-  AutoComplete(OFF);
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
-  WinFocus;
-  RelicTermDark;
-  Fs->border_src = 0;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->draw_it = NULL;
-  DocTermNew;
-  DocClear;
-  DCFill;
-  relic_status_show_keys = TRUE;
-  RelicStatusWallPaper(Fs);
-  "\n$FG,YELLOW$Relic Shell$FG$\n";
-  "$FG,DKGRAY$Type 'exit' or press Esc to return to the desktop.$FG$\n\n";
-  LBts(&Fs->display_flags, DISPLAYf_SHOW);
-  WinZBufUpdate;
-  UserCmdLine;
-}
-
+// Inline shell with our own REPL so Esc and `exit` both return cleanly.
 U0 RelicLaunchShell()
 {
-  if (relic_child_task && TaskValidate(relic_child_task))
-    return;
-  relic_child_task = Spawn(&RelicShellTaskMain, NULL, "Relic Shell");
-  WinToTop(relic_child_task);
+  U8 line[256];
+  I64 len = 0, ch, sc;
+  Bool stop = FALSE;
+  Bool got_key;
+
+  "$FG,YELLOW$Relic Shell$FG$\n";
+  "$FG,DKGRAY$Type a HolyC command, then Enter. Type 'exit' or press Esc to return.$FG$\n\n";
+  "$FG,LTGRAY$> $FG$";
+
+  while (!stop) {
+    WinFocus;
+    got_key = ScanKey(&ch, &sc, FALSE);
+    if (!got_key) {
+      Sleep(20);
+    } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
+      stop = TRUE;
+    } else if (ch == '\n') {
+      "\n";
+      line[len] = 0;
+      if (len > 0) {
+        if (len == 4 && (!StrCmp(line, "exit") || !StrCmp(line, "Exit") ||
+              !StrCmp(line, "EXIT")))
+          stop = TRUE;
+        else {
+          try {
+            ExePutS(line);
+          } catch {
+            PutExcept;
+          }
+        }
+      }
+      if (!stop) {
+        len = 0;
+        "\n$FG,LTGRAY$> $FG$";
+      }
+    } else if (ch == CH_BACKSPACE) {
+      if (len > 0) {
+        len--;
+        "%c", CH_BACKSPACE;
+      }
+    } else if (ch >= ' ' && ch < 127 && len < 255) {
+      line[len++] = ch;
+      "%c", ch;
+    }
+  }
 }
 
 U0 RelicLaunchGames()
 {
   if (!FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
-    PopUpOk("GamesLauncher.HC not found in ::/Home/RelicOS.");
+    "\n$FG,LTRED$GamesLauncher.HC not found in ::/Home/RelicOS.$FG$\n";
+    "$FG,DKGRAY$Press any key to return...$FG$\n";
+    GetChar;
     return;
   }
-  if (relic_child_task && TaskValidate(relic_child_task))
-    return;
-  relic_child_task = Spawn(&RelicGamesTaskMain, NULL, "Relic Games");
-  WinToTop(relic_child_task);
+  ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
+  ExePrint("RelicGamesLauncher;");
 }
 
-// ---- Launch handler ----
-// Runs apps directly in the desktop task.
-// Pauses wallpaper, runs the app, then resumes.
 U0 LaunchApp(I64 idx)
 {
   winmgr.show_menu = FALSE;
+  RelicAppStart;
 
-  if (idx == 2) {
+  if (idx == 0) {
+    "$FG,CYAN$=== Files ===$FG$\n\n";
+    Dir;
+    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+    GetChar;
+  } else if (idx == 1) {
+    RelicLaunchEditor;
+  } else if (idx == 2) {
     RelicLaunchShell;
   } else if (idx == 3) {
     RelicLaunchGames;
-  } else if (idx == 1) {
-    RelicAppStart;
-    RelicLaunchEditor;
-  } else {
-    RelicAppStart;
-    if (idx == 0) {
-      "\n\n$FG,CYAN$=== Files ===$FG$\n\n";
-      Dir;
-      "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-      GetChar;
-    } else if (idx == 4) {
-      "\n\n$FG,CYAN$=== Task Report ===$FG$\n\n";
-      TaskRep;
-      "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-      GetChar;
-    } else if (idx == 5) {
-      "\n\n$FG,CYAN$=== Memory Report ===$FG$\n\n";
-      MemRep;
-      "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-      GetChar;
-    } else if (idx == 6) {
-      "\n\n$FG,CYAN$=== System Information ===$FG$\n\n";
-      "$FG,LTGRAY$OS:        $FG,CYAN$RelicOS V1.0.0$FG$\n";
-      "$FG,LTGRAY$Kernel:    $FG,CYAN$RelicOS V1.0.0$FG$\n";
-      "$FG,LTGRAY$Resolution:$FG,CYAN$ 640x480$FG$\n";
-      "$FG,LTGRAY$Colors:    $FG,CYAN$16-color (custom dark palette)$FG$\n\n";
-      "$FG,LTGRAY$CPU Info:$FG$\n";
-      CPURep;
-      "\n$FG,LTGRAY$Disk Info:$FG$\n";
-      RelicDriveColorsDark;
-      DrvRep;
-      RelicDriveColorsRestore;
-      "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-      GetChar;
-    } else if (idx == 7) {
-      "\n\n$FG,CYAN$\n";
-      "  =========================================\n";
-      "   IN MEMORY OF TERRY A. DAVIS\n";
-      "   December 15, 1969 - August 11, 2018\n";
-      "  =========================================\n";
-      "$FG$\n";
-      "$FG,LTGRAY$  Terry Andrew Davis was an American programmer$FG$\n";
-      "$FG,LTGRAY$  and the sole creator of TempleOS - the operating$FG$\n";
-      "$FG,LTGRAY$  system that Relic OS is built upon and dedicated to.$FG$\n\n";
-      "$FG,CYAN$  Who He Was$FG$\n";
-      "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-      "  Terry was a brilliant, self-taught engineer who\n";
-      "  spent over a decade building TempleOS entirely\n";
-      "  alone - every line of code, every driver, the\n";
-      "  compiler, the kernel, the graphics system, and\n";
-      "  even the programming language (HolyC) itself.\n\n";
-      "  He held a degree in Electrical Engineering and\n";
-      "  previously worked at Ticketmaster as a systems\n";
-      "  programmer before dedicating his life to his\n";
-      "  magnum opus: a pure, ring-0, single-address-space\n";
-      "  operating system he believed was built for God.\n\n";
-      "$FG,CYAN$  His Work$FG$\n";
-      "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-      "  TempleOS is a technical marvel. Running entirely\n";
-      "  in kernel mode with no memory protection, it is\n";
-      "  one of the few operating systems ever written\n";
-      "  from scratch by a single person, including:\n\n";
-      "$FG,LTGRAY$   - HolyC: a custom C variant with JIT compilation\n";
-      "   - A full 64-bit protected-mode kernel\n";
-      "   - DolDoc: a rich text/graphics document system\n";
-      "   - A complete IDE, compiler, and assembler\n";
-      "   - 640x480, 16-color VGA with custom graphics APIs\n";
-      "   - The custom RedSea file system and disk drivers$FG$\n\n";
-      "$FG,CYAN$  Relic OS$FG$\n";
-      "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-      "  Relic OS is a modern fork of TempleOS, built as\n";
-      "  a tribute to Terry's genius and vision. It aims\n";
-      "  to bring a refined, usable desktop experience to\n";
-      "  the foundation he created - while never forgetting\n";
-      "  who made it all possible.\n\n";
-      "$FG,CYAN$  \"Thou madest him to have dominion over the works\n";
-      "   of thy hands.\" - Psalm 8:6$FG$\n\n";
-      "$FG,DKGRAY$  Rest in peace, Terry. Your work lives on.\n\n";
-      "$FG,DKGRAY$  Press any key to return to desktop...$FG$\n";
-      GetChar;
-    }
+  } else if (idx == 4) {
+    "$FG,CYAN$=== Task Report ===$FG$\n\n";
+    TaskRep;
+    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+    GetChar;
+  } else if (idx == 5) {
+    "$FG,CYAN$=== Memory Report ===$FG$\n\n";
+    MemRep;
+    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+    GetChar;
+  } else if (idx == 6) {
+    "$FG,CYAN$=== System Information ===$FG$\n\n";
+    "$FG,LTGRAY$OS:        $FG,CYAN$RelicOS V1.0.0$FG$\n";
+    "$FG,LTGRAY$Kernel:    $FG,CYAN$RelicOS V1.0.0$FG$\n";
+    "$FG,LTGRAY$Resolution:$FG,CYAN$ 640x480$FG$\n";
+    "$FG,LTGRAY$Colors:    $FG,CYAN$16-color (custom dark palette)$FG$\n\n";
+    "$FG,LTGRAY$CPU Info:$FG$\n";
+    CPURep;
+    "\n$FG,LTGRAY$Disk Info:$FG$\n";
+    RelicDriveColorsDark;
+    DrvRep;
+    RelicDriveColorsRestore;
+    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+    GetChar;
+  } else if (idx == 7) {
+    "$FG,CYAN$\n";
+    "  =========================================\n";
+    "   IN MEMORY OF TERRY A. DAVIS\n";
+    "   December 15, 1969 - August 11, 2018\n";
+    "  =========================================\n";
+    "$FG$\n";
+    "$FG,LTGRAY$  Terry Andrew Davis was an American programmer$FG$\n";
+    "$FG,LTGRAY$  and the sole creator of TempleOS - the operating$FG$\n";
+    "$FG,LTGRAY$  system that Relic OS is built upon and dedicated to.$FG$\n\n";
+    "$FG,CYAN$  Who He Was$FG$\n";
+    "$FG,DKGRAY$  -----------------------------------------$FG$\n";
+    "  Terry was a brilliant, self-taught engineer who\n";
+    "  spent over a decade building TempleOS entirely\n";
+    "  alone - every line of code, every driver, the\n";
+    "  compiler, the kernel, the graphics system, and\n";
+    "  even the programming language (HolyC) itself.\n\n";
+    "  He held a degree in Electrical Engineering and\n";
+    "  previously worked at Ticketmaster as a systems\n";
+    "  programmer before dedicating his life to his\n";
+    "  magnum opus: a pure, ring-0, single-address-space\n";
+    "  operating system he believed was built for God.\n\n";
+    "$FG,CYAN$  His Work$FG$\n";
+    "$FG,DKGRAY$  -----------------------------------------$FG$\n";
+    "  TempleOS is a technical marvel. Running entirely\n";
+    "  in kernel mode with no memory protection, it is\n";
+    "  one of the few operating systems ever written\n";
+    "  from scratch by a single person, including:\n\n";
+    "$FG,LTGRAY$   - HolyC: a custom C variant with JIT compilation\n";
+    "   - A full 64-bit protected-mode kernel\n";
+    "   - DolDoc: a rich text/graphics document system\n";
+    "   - A complete IDE, compiler, and assembler\n";
+    "   - 640x480, 16-color VGA with custom graphics APIs\n";
+    "   - The custom RedSea file system and disk drivers$FG$\n\n";
+    "$FG,CYAN$  Relic OS$FG$\n";
+    "$FG,DKGRAY$  -----------------------------------------$FG$\n";
+    "  Relic OS is a modern fork of TempleOS, built as\n";
+    "  a tribute to Terry's genius and vision. It aims\n";
+    "  to bring a refined, usable desktop experience to\n";
+    "  the foundation he created - while never forgetting\n";
+    "  who made it all possible.\n\n";
+    "$FG,CYAN$  \"Thou madest him to have dominion over the works\n";
+    "   of thy hands.\" - Psalm 8:6$FG$\n\n";
+    "$FG,DKGRAY$  Rest in peace, Terry. Your work lives on.\n\n";
+    "$FG,DKGRAY$  Press any key to return to desktop...$FG$\n";
+    GetChar;
   }
-
 }
 
-// ---- Main loop (runs forever as default shell) ----
+// ---- Main desktop loop ----
 U0 RelicDesktop()
 {
   I64 msg_code, arg1, arg2, i;
@@ -455,20 +457,9 @@ U0 RelicDesktop()
   while (TRUE) {
     winmgr.show_menu = FALSE;
 
-    if (relic_child_task && !TaskValidate(relic_child_task)) {
-      relic_child_task = NULL;
-      RelicDesktopRestore;
-    }
-
-    if (relic_child_task && TaskValidate(relic_child_task)) {
-      if (ScanKey(&arg1, &arg2, FALSE)) {
-        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
-          RelicChildKill;
-          RelicDesktopRestore;
-          FlushMsgs;
-        }
-      }
-    }
+    // Reclaim focus each iteration. If the kernel spawned a hotkey
+    // task (Ctrl+Alt+T etc.) the focus snaps back to us next loop.
+    WinFocus;
 
     msg_code = GetMsg(&arg1, &arg2,
           1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE);
@@ -477,23 +468,22 @@ U0 RelicDesktop()
         if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
           RelicChildKill;
           RelicDesktopRestore;
-        } else if (!relic_child_task) {
-          if (!Bt(kbd.down_bitmap, SC_CTRL) && !Bt(kbd.down_bitmap, SC_ALT))
-            relic_pending_app = RelicKeyApp(arg1);
+        } else if (arg1 >= ' ' && arg1 < 127) {
+          // Only react to plain printable keys.
+          // Control chars (Ctrl+letter, Alt+letter) are <0x20 and ignored.
+          relic_pending_app = RelicKeyApp(arg1);
         }
         break;
 
       case MSG_MS_L_DOWN:
-        if (!relic_child_task) {
-          relic_pending_app = RelicDockHit(arg1, arg2);
-          if (relic_pending_app < 0)
-            relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
-                  ms.pos.y - relic_oy);
-        }
+        relic_pending_app = RelicDockHit(arg1, arg2);
+        if (relic_pending_app < 0)
+          relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
+                ms.pos.y - relic_oy);
         break;
 
       case MSG_MS_MOVE:
-        if (Fs->draw_it && !relic_child_task)
+        if (Fs->draw_it)
           Fs->draw_it(Fs, gr.dc);
         break;
     }
@@ -503,8 +493,7 @@ U0 RelicDesktop()
       relic_pending_app = -1;
       FlushMsgs;
       LaunchApp(i);
-      if (i != 2 && i != 3)
-        RelicDesktopRestore;
+      RelicDesktopRestore;
     }
   }
 }
