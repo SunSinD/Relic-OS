@@ -1,5 +1,4 @@
-// GamesLauncher.HC — HolyC-safe: one statement per switch case, no goto.
-// Runs inline in the desktop task (no child Spawn) so no kernel chrome.
+// GamesLauncher.HC — runs inline in the desktop task (no child Spawn).
 
 U0 RelicGamesChromeOff()
 {
@@ -9,10 +8,9 @@ U0 RelicGamesChromeOff()
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
-  WinFocus;
   RelicTermDark;
   Fs->border_src = 0;
-  Fs->border_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->draw_it = NULL;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
@@ -22,8 +20,8 @@ U0 RelicGamesScreenClear()
 {
   DocClear;
   DCFill;
-  // Two blank rows so kernel task-name strip (if drawn) is over
-  // black, and the menu starts predictably at row 2.
+  // Row 0 is reserved for the status bar (fp_wall_paper).
+  // Two blank rows push menu content safely past it.
   "\n\n";
 }
 
@@ -39,6 +37,8 @@ U0 RelicGameFile(U8 *filename)
   RelicGamesChromeOff;
   FlushMsgs;
   RelicGamesScreenClear;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
   ExePrint("#include \"%s\";", filename);
 }
 
@@ -47,6 +47,8 @@ U0 RelicGamePopUp(U8 *cmd)
   RelicGamesChromeOff;
   FlushMsgs;
   RelicGamesScreenClear;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
   ExePrint("%s", cmd);
 }
 
@@ -132,26 +134,18 @@ U0 RelicGamesLauncher()
 {
   U8 buf[3];
   I64 id, ch, sc, len = 0;
-  Bool got_key;
 
   RelicGamesChromeOff;
-  RelicChromeInstall;
-  relic_status_show_keys = FALSE;
   DocTermNew;
-  RelicGamesScreenClear;
+  relic_status_show_keys = FALSE;
   buf[0] = 0;
 
   while (TRUE) {
     RelicGamesScreenClear;
     RelicGamesDrawMenu(buf);
 
-    got_key = FALSE;
-    while (!got_key) {
-      WinFocus;
-      got_key = ScanKey(&ch, &sc, FALSE);
-      if (!got_key)
-        Sleep(20);
-    }
+    // Blocking wait — no ScanKey/WinFocus polling loop needed.
+    GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
 
     if (ch == CH_ESC || ch == CH_SHIFT_ESC)
       return;
@@ -160,20 +154,17 @@ U0 RelicGamesLauncher()
       if (!len)
         return;
       id = Str2I64(buf);
-      if (1 <= id && id <= 24) {
-        RelicGameRun(id);
-        if (id == 1) {
-          RelicTermDark;
-          RelicGamesChromeOff;
-          RelicChromeInstall;
-          relic_status_show_keys = FALSE;
-          len = 0;
-          buf[0] = 0;
-        } else
-          return;
-      }
       len = 0;
       buf[0] = 0;
+      if (1 <= id && id <= 24) {
+        RelicGameRun(id);
+        // Always restore chrome and loop back to the menu after
+        // any game exits, whatever the reason.
+        RelicTermDark;
+        RelicGamesChromeOff;
+        DocTermNew;
+        relic_status_show_keys = FALSE;
+      }
     } else if (ch == CH_BACKSPACE) {
       if (len) {
         len--;

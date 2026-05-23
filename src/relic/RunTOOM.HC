@@ -166,13 +166,17 @@ U0 RunTOOM()
   iwad = RelicTOOMFindIWAD();
   if (!iwad) {
     DocClear;
+    DCFill;
     "\n\n$FG,LTRED$No DOOM WAD found.$FG$\n\n";
     "$FG,LTGRAY$Put $FG,CYAN$doom1.wad$FG,LTGRAY$ or $FG,CYAN$freedoom1.wad$FG,LTGRAY$ in:$FG$\n";
     "  ::/Home/TOOM/\n";
     "  ::/Home/RelicOS/TOOM/\n\n";
     "$FG,DKGRAY$On the host: copy WAD into src/relic/TOOM/,\n";
-    "run MakeVHD.ps1, then Build.HC inside the VM.$FG$\n\n";
-    "$FG,DKGRAY$Press any key to return to the games menu...$FG$\n";
+    "then run Build.HC inside the VM.$FG$\n\n";
+    "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
+    LBts(&Fs->display_flags, DISPLAYf_SHOW);
+    WinZBufUpdate;
+    FlushMsgs;
     GetChar;
     return;
   }

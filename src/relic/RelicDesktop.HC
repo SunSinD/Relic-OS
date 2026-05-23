@@ -197,7 +197,7 @@ U0 RelicAppStart()
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
   Fs->border_src = 0;
-  Fs->border_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   WinFocus;
   RelicDocDark;
@@ -205,10 +205,9 @@ U0 RelicAppStart()
   RelicDocDark;
   DocClear;
   DCFill;
-  // Push doc cursor below where TempleOS would draw a task-name strip
-  "\n\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
+  FlushMsgs;
 }
 
 U0 RelicChildKill()
@@ -289,43 +288,41 @@ U0 RelicLaunchEditor()
   Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
 }
 
-// Inline shell with our own REPL so Esc and `exit` both return cleanly.
+// Inline shell — Esc or typing "exit" returns to desktop.
 U0 RelicLaunchShell()
 {
   U8 line[256];
   I64 len = 0, ch, sc;
   Bool stop = FALSE;
-  Bool got_key;
 
   "$FG,YELLOW$Relic Shell$FG$\n";
-  "$FG,DKGRAY$Type a HolyC command, then Enter. Type 'exit' or press Esc to return.$FG$\n\n";
+  "$FG,DKGRAY$Run HolyC commands. Type $FG,YELLOW$exit$FG,DKGRAY$ or press $FG,YELLOW$Esc$FG,DKGRAY$ to return.$FG$\n\n";
   "$FG,LTGRAY$> $FG$";
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
 
   while (!stop) {
-    WinFocus;
-    got_key = ScanKey(&ch, &sc, FALSE);
-    if (!got_key) {
-      Sleep(20);
-    } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
+    GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+
+    if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       stop = TRUE;
     } else if (ch == '\n') {
       "\n";
       line[len] = 0;
-      if (len > 0) {
-        if (len == 4 && (!StrCmp(line, "exit") || !StrCmp(line, "Exit") ||
-              !StrCmp(line, "EXIT")))
-          stop = TRUE;
-        else {
-          try {
-            ExePutS(line);
-          } catch {
-            PutExcept;
-          }
+      len = 0;
+      if (!StrCmp(line, "exit") || !StrCmp(line, "Exit") || !StrCmp(line, "EXIT")) {
+        stop = TRUE;
+      } else if (line[0]) {
+        try {
+          ExePrint("%s;", line);
+        } catch {
+          PutExcept;
         }
       }
       if (!stop) {
-        len = 0;
         "\n$FG,LTGRAY$> $FG$";
+        LBts(&Fs->display_flags, DISPLAYf_SHOW);
+        WinZBufUpdate;
       }
     } else if (ch == CH_BACKSPACE) {
       if (len > 0) {
@@ -457,20 +454,26 @@ U0 RelicDesktop()
   while (TRUE) {
     winmgr.show_menu = FALSE;
 
-    // Reclaim focus each iteration. If the kernel spawned a hotkey
-    // task (Ctrl+Alt+T etc.) the focus snaps back to us next loop.
-    WinFocus;
-
+    // MSG_REDIE fires when any child task dies (e.g. a Ctrl+Alt+T terminal).
+    // Including it lets GetMsg unblock so we can restore the desktop immediately.
     msg_code = GetMsg(&arg1, &arg2,
-          1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE);
+          1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE
+          | 1 << MSG_REDIE);
     switch (msg_code) {
+      case MSG_REDIE:
+        // A child task died (e.g. rogue Ctrl+Alt+T terminal).
+        // Snap draw_it back and repaint so the desktop is visible again.
+        Fs->draw_it = &DrawDesktop;
+        WinToTop(Fs);
+        WinFocus;
+        RelicDesktopRestore;
+        break;
+
       case MSG_KEY_DOWN:
         if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
           RelicChildKill;
           RelicDesktopRestore;
         } else if (arg1 >= ' ' && arg1 < 127) {
-          // Only react to plain printable keys.
-          // Control chars (Ctrl+letter, Alt+letter) are <0x20 and ignored.
           relic_pending_app = RelicKeyApp(arg1);
         }
         break;
