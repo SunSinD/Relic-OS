@@ -362,11 +362,18 @@ U0 RelicLaunchShell()
     } else if (ch == CH_BACKSPACE) {
       if (len > 0) {
         len--;
+        // CH_BACKSPACE destructively removes the previous character
+        // from the doc. Force an immediate screen refresh so the
+        // erase is visible without waiting for the next auto-tick.
         "%c", CH_BACKSPACE;
+        LBts(&Fs->display_flags, DISPLAYf_SHOW);
+        WinZBufUpdate;
       }
     } else if (ch >= ' ' && ch < 127 && len < 255) {
       line[len++] = ch;
       "%c", ch;
+      LBts(&Fs->display_flags, DISPLAYf_SHOW);
+      WinZBufUpdate;
     }
   }
 }

@@ -1,13 +1,21 @@
 // RunTOOM.HC — launch TOOM (DOOM) from the Relic desktop.
 //
-// KEY: ExeFile("SinglePlayer.HC") WITHOUT CCF_JUST_LOAD so that
-//      all global initializers run at compile time:
-//        - doom_scrn  = DCNew(GR_WIDTH, GR_HEIGHT)
-//        - WAD loading in ModMan.HC (reads USE_IWAD frame pointer)
-//      CCF_JUST_LOAD suppresses execution, leaving doom_scrn=NULL and
-//      the WAD unloaded, which causes an immediate hardware fault.
-//      ExeFile without the flag compiles + executes + auto-calls
-//      TOOMStart (the last function in the file) in one step.
+// DESIGN: ExeFile("SinglePlayer.HC") with NO flags runs inline in the
+// current task.  This is the same design as commit 23b66fd (the version
+// that actually launched DOOM).
+//
+// Why no CCF_JUST_LOAD?  With CCF_JUST_LOAD TempleOS compiles the code
+// but does NOT execute it, so:
+//   - doom_scrn = DCNew(...)  never runs   -> doom_scrn is NULL
+//   - ModMan.HC WAD load code never runs  -> WAD is not loaded
+// TOOMStart then faults on doom_scrn==NULL and the child dies silently.
+//
+// Why no child task?  ExeFile (no flags) compiles + executes the file AND
+// then frees the compiled code heap when it returns.  Any subsequent
+// ExePrint("TOOMStopTasks;") fails because the code is gone.  TOOMStart
+// already calls TOOMStopTasks internally, so we just need ExeFile to
+// run it as the "last function" — which is exactly what ExeFile does when
+// no CCF_JUST_LOAD flag is passed.
 
 U0 RelicTOOMDarkWin()
 {
@@ -19,7 +27,7 @@ U0 RelicTOOMDarkWin()
         WIF_SELF_BORDER;
   WinFocus;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
-  Fs->border_src = 0;
+  Fs->border_src  = 0;
   Fs->text_attr   = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
@@ -35,7 +43,7 @@ U0 RelicTOOMRestoreChrome()
   ExePrint("RelicChromeInstall;");
 }
 
-// Return the TOOM source directory, or NULL if not installed.
+// Return the TOOM source dir, or NULL if not installed.
 U8 *RelicTOOMFindDir()
 {
   if (FileFind("::/Home/TOOM/SinglePlayer.HC") ||
@@ -47,16 +55,16 @@ U8 *RelicTOOMFindDir()
   return NULL;
 }
 
-// Return IWAD filename (relative, in TOOM dir), or NULL if missing.
+// Return IWAD filename (relative, caller must Cd first), or NULL.
 U8 *RelicTOOMFindIWAD()
 {
-  if (FileFind("::/Home/TOOM/doom1.wad"))    return "doom1.wad";
-  if (FileFind("::/Home/TOOM/DOOM1.WAD"))    return "DOOM1.WAD";
+  if (FileFind("::/Home/TOOM/doom1.wad"))     return "doom1.wad";
+  if (FileFind("::/Home/TOOM/DOOM1.WAD"))     return "DOOM1.WAD";
   if (FileFind("::/Home/TOOM/freedoom1.wad")) return "freedoom1.wad";
   if (FileFind("::/Home/TOOM/FREEDOOM1.WAD")) return "FREEDOOM1.WAD";
-  if (FileFind("::/Home/TOOM/doom2.wad"))    return "doom2.wad";
-  if (FileFind("::/Home/TOOM/DOOM2.WAD"))    return "DOOM2.WAD";
-  if (FileFind("::/Home/RelicOS/TOOM/doom1.wad"))    return "doom1.wad";
+  if (FileFind("::/Home/TOOM/doom2.wad"))     return "doom2.wad";
+  if (FileFind("::/Home/TOOM/DOOM2.WAD"))     return "DOOM2.WAD";
+  if (FileFind("::/Home/RelicOS/TOOM/doom1.wad"))     return "doom1.wad";
   if (FileFind("::/Home/RelicOS/TOOM/freedoom1.wad")) return "freedoom1.wad";
   return NULL;
 }
@@ -70,14 +78,11 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
 
-// Show an error for at least 500 ms, then wait for a key.
-// Uses ScanMsg loop so a stale Enter from the menu can't dismiss it.
+// Visible error for at least 500 ms, then wait for any key.
+// ScanMsg loop so a stale Enter can't dismiss it instantly.
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
-  WinBorder(OFF);
-  WinMax;
-  WinFocus;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
@@ -87,94 +92,34 @@ U0 RelicTOOMShowError(U8 *msg)
   "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
-  Sleep(500);     // Minimum visible time
-  FlushMsgs;      // Drain any stale keys from the menu
+  Sleep(500);
+  FlushMsgs;
   do {
     ec = ScanMsg(&ea, &eb, 1 << MSG_KEY_DOWN);
     if (!ec) Sleep(15);
   } while (!ec);
 }
 
-// Runs inside the isolated child task spawned by RunTOOM().
-U0 RelicTOOMChildMain()
-{
-  Bool old_silent = Silent;
-  U8 *dir, *iwad;
-
-  RelicTOOMDarkWin;
-  winmgr.show_menu = FALSE;
-  DocClear;
-  DCFill;
-
-  dir = RelicTOOMFindDir();
-  if (!dir) {
-    RelicTOOMShowError(
-      "TOOM source not found in ::/Home/TOOM/\n"
-      "Re-run Build.HC so it copies the TOOM files.");
-    return;
-  }
-
-  iwad = RelicTOOMFindIWAD();
-  if (!iwad) {
-    RelicTOOMShowError(
-      "No WAD file found in ::/Home/TOOM/\n"
-      "Copy doom1.wad or freedoom1.wad to src/relic/TOOM/\n"
-      "on the host and re-run Build.HC.");
-    return;
-  }
-
-  Cd(dir);
-  RelicTOOMUseIWAD(iwad);
-
-  // ExeFile WITHOUT CCF_JUST_LOAD: this compiles SinglePlayer.HC,
-  // executes all global initializers (DCNew for doom_scrn, WAD load
-  // via ModMan.HC), defines TOOMStart, then auto-calls it as the last
-  // function. When TOOMStart returns (user quit), ExeFile returns.
-  try {
-    FlushMsgs;
-    RelicTOOMDarkWin;
-    Silent(TRUE);
-    if (FileFind("SinglePlayer.HC"))
-      ExeFile("SinglePlayer.HC");
-    else
-      ExeFile("SinglePlayer.HC.Z");
-    Silent(old_silent);
-    // Clean up any TOOM sub-tasks left behind.
-    try { ExePrint("TOOMStopTasks;"); } catch { Fs->catch_except = TRUE; }
-  } catch {
-    Silent(old_silent);
-    try { ExePrint("TOOMStopTasks;"); } catch { Fs->catch_except = TRUE; }
-    // RELIC_TOOM_QUIT is set by TOOM's Quit Game path — if present,
-    // the user quit cleanly; no error needed.
-    if (FramePtr("RELIC_TOOM_QUIT")) {
-      FramePtrDel("RELIC_TOOM_QUIT");
-      FlushMsgs;
-      return;
-    }
-    RelicTOOMShowError(
-      "TOOM raised an exception during startup or gameplay.\n"
-      "Make sure doom1.wad (or freedoom1.wad) is valid.");
-  }
-}
-
+// Called by GamesLauncher via ExePrint("RunTOOM;").
+// Runs inline in whatever task loaded us (the games launcher / desktop).
 U0 RunTOOM()
 {
-  CTask *task;
+  Bool old_silent;
   CBGR48 relic_pal[COLORS_NUM];
   U8 *dir, *iwad;
 
-  // Quick parent-side preflight — if files are missing we can show
-  // the error right here without even spawning a child task.
   dir  = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
+
   if (!dir || !iwad) {
     DocClear;
     DCFill;
     "\n\n$FG,LTRED$DOOM cannot launch.$FG$\n\n";
     if (!dir)
-      "$FG,LTGRAY$Missing TOOM source. Re-run Build.HC.$FG$\n";
+      "$FG,LTGRAY$TOOM source missing. Re-run Build.HC.$FG$\n";
     if (!iwad)
-      "$FG,LTGRAY$Missing WAD. Copy doom1.wad to src/relic/TOOM/ then re-run Build.HC.$FG$\n";
+      "$FG,LTGRAY$No WAD found. Copy doom1.wad to src/relic/TOOM/ on the host\n"
+      "then rebuild the VHD with MakeVHD.ps1 and re-run Build.HC.$FG$\n";
     "$FG,YELLOW$\nPress any key to return...$FG$\n";
     LBts(&Fs->display_flags, DISPLAYf_SHOW);
     WinZBufUpdate;
@@ -191,17 +136,48 @@ U0 RunTOOM()
   }
 
   GrPaletteGet(relic_pal);
+  old_silent = Silent;
 
-  // Spawn an isolated child task — TOOM modifies global state heavily
-  // (palette, DC, waits, sounds). Isolation lets us restore cleanly.
-  relic_child_task = Spawn(&RelicTOOMChildMain, NULL, "TOOM Task", 0, Fs);
-  relic_child_task->border_src  = 0;
-  relic_child_task->border_attr = BLACK << 4 | DKGRAY;
-  relic_child_task->text_attr   = BLACK << 4 | LTGRAY;
-  DeathWait(&relic_child_task);
-  relic_child_task = NULL;
+  Cd(dir);
+  RelicTOOMDarkWin;
+  winmgr.show_menu = FALSE;
+  DocClear;
+  DCFill;
+  RelicTOOMUseIWAD(iwad);
 
-  // Restore Relic palette + chrome after TOOM exits.
+  // ExeFile WITHOUT CCF_JUST_LOAD:
+  //   1. Compiles SinglePlayer.HC (includes MainDrawer.HC, Wad.HC, …)
+  //   2. Executes all global initializers inline:
+  //        doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)
+  //        ModMan.HC reads USE_IWAD and calls LoadWad(iwad)
+  //   3. Calls TOOMStart as the last compiled function.
+  //   4. TOOMStart runs the main menu + gameplay loop.
+  //   5. When user presses Quit Game, TOOMStart calls TOOMStopTasks
+  //      and returns.  ExeFile then returns here.
+  try {
+    FlushMsgs;
+    RelicTOOMDarkWin;
+    Silent(TRUE);
+    if (FileFind("SinglePlayer.HC"))
+      ExeFile("SinglePlayer.HC");
+    else
+      ExeFile("SinglePlayer.HC.Z");
+    Silent(old_silent);
+  } catch {
+    Silent(old_silent);
+    // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler.
+    // If it is present the user quit cleanly — no error needed.
+    if (FramePtr("RELIC_TOOM_QUIT")) {
+      FramePtrDel("RELIC_TOOM_QUIT");
+      FlushMsgs;
+    } else {
+      RelicTOOMShowError(
+        "An exception occurred during DOOM startup or gameplay.\n"
+        "Make sure doom1.wad (or freedoom1.wad) is a valid WAD file.");
+    }
+  }
+
+  // Restore Relic palette + chrome whether DOOM exited cleanly or not.
   GrPaletteSet(relic_pal);
   RelicTOOMRestoreChrome;
   RelicTermDark;
