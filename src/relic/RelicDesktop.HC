@@ -98,8 +98,7 @@ U0 DrawDesktop(CTask *task, CDC *dc)
     GrRect(dc, 0, TOPBAR_H, w, h - TOPBAR_H);
   }
 
-  if (gr.fp_wall_paper)
-    gr.fp_wall_paper(task);
+  RelicStatusGrDraw(dc);
 
   // Dock background
   dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
@@ -208,7 +207,6 @@ U0 RelicDesktopRefresh()
 {
   if (Fs->draw_it)
     Fs->draw_it(Fs, gr.dc);
-  RelicStatusWallPaper(Fs);
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
 }
@@ -316,8 +314,10 @@ U0 RelicShellTaskMain()
   DocTermNew;
   DocClear;
   DCFill;
+  relic_status_show_keys = TRUE;
   RelicStatusWallPaper(Fs);
-  "\n";
+  "\n$FG,YELLOW$Relic Shell$FG$\n";
+  "$FG,DKGRAY$Type 'exit' or press Esc to return to the desktop.$FG$\n\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   UserCmdLine;
@@ -451,7 +451,6 @@ U0 RelicDesktop()
   DocClear;
   Fs->draw_it = &DrawDesktop;
   Fs->draw_it(Fs, gr.dc);
-  RelicStatusWallPaper(Fs);
   WinZBufUpdate;
 
   while (TRUE) {
@@ -462,6 +461,16 @@ U0 RelicDesktop()
       RelicDesktopRestore;
     }
 
+    if (relic_child_task && TaskValidate(relic_child_task)) {
+      if (ScanKey(&arg1, &arg2, FALSE)) {
+        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
+          RelicChildKill;
+          RelicDesktopRestore;
+          FlushMsgs;
+        }
+      }
+    }
+
     msg_code = GetMsg(&arg1, &arg2,
           1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE);
     switch (msg_code) {
@@ -469,8 +478,10 @@ U0 RelicDesktop()
         if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
           RelicChildKill;
           RelicDesktopRestore;
-        } else if (!relic_child_task)
-          relic_pending_app = RelicKeyApp(arg1);
+        } else if (!relic_child_task) {
+          if (!Bt(kbd.down_bitmap, SC_CTRL) && !Bt(kbd.down_bitmap, SC_ALT))
+            relic_pending_app = RelicKeyApp(arg1);
+        }
         break;
 
       case MSG_MS_L_DOWN:

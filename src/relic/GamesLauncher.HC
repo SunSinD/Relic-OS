@@ -19,12 +19,17 @@ U0 RelicGamesChromeOff()
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
+U0 RelicGamesStatusLine()
+{
+  RelicStatusFormat;
+  TextPrint(Fs, 0, 0, BLACK << 4 | LTGRAY, relic_top_line);
+}
+
 U0 RelicGamesScreenClear()
 {
   DocClear;
   DCFill;
-  if (gr.fp_wall_paper)
-    gr.fp_wall_paper(Fs);
+  RelicGamesStatusLine;
 }
 
 U0 RelicGameRunTOOM()
@@ -111,19 +116,19 @@ U0 RelicGamesDrawMenu(U8 *buf)
 
   for (i = 0; i < RELIC_GAMES_MENU_ROW; i++)
     "\n";
-  "$FG,CYAN$DOOM$FG$\n";
+  "$FG,5$DOOM$FG$\n";
   "  1. DOOM\n\n";
-  "$FG,CYAN$Fun Games$FG$\n";
+  "$FG,5$Fun Games$FG$\n";
   "  2. Titanium          3. Black Diamond     4. Flap Bat\n";
   "  5. Varoom            6. FlatTops          7. Bomber Golf\n";
   "  8. KeepAway          9. RawHide          10. X-Caliber\n";
   " 11. Wenceslas        12. Battle Lines\n\n";
-  "$FG,CYAN$Unfun Games$FG$\n";
-  " 13. Talons           14. Castle Frankenstein\n";
-  " 15. ZoneOut          16. ToTheFront       17. Span\n";
-  " 18. Tree Checkers    19. Digits\n\n";
-  "$FG,CYAN$More Games$FG$\n";
-  " 20. Strut            21. BigGuns          22. TheDead\n";
+  "$FG,5$Unfun Games$FG$\n";
+  "  13. Talons           14. Castle Frankenstein\n";
+  "  15. ZoneOut          16. ToTheFront       17. Span\n";
+  "  18. Tree Checkers    19. Digits\n\n";
+  "$FG,5$More Games$FG$\n";
+  "  20. Strut            21. BigGuns          22. TheDead\n";
   "  23. DunGen           24. Models\n\n";
   "$FG,DKGRAY$Type a number and press Enter. Esc returns.$FG$\n\n";
   "game> %s", buf;
@@ -138,6 +143,7 @@ U0 RelicGamesLauncher()
 
   RelicGamesChromeOff;
   RelicChromeInstall;
+  relic_status_show_keys = FALSE;
   DocTermNew;
   RelicGamesScreenClear;
   buf[0] = 0;
@@ -160,6 +166,7 @@ U0 RelicGamesLauncher()
           RelicTermDark;
           RelicGamesChromeOff;
           RelicChromeInstall;
+          relic_status_show_keys = FALSE;
           len = 0;
           buf[0] = 0;
         } else

@@ -56,6 +56,12 @@ U8 *RelicTOOMFindIWAD()
     return "freedoom1.wad";
   if (FileFind("::/Home/TOOM/FREEDOOM1.WAD"))
     return "FREEDOOM1.WAD";
+  if (FileFind("::/Home/RelicOS/TOOM/doom1.wad"))
+    return "doom1.wad";
+  if (FileFind("::/Home/RelicOS/TOOM/freedoom1.wad"))
+    return "freedoom1.wad";
+  if (FileFind("::/Home/RelicOS/TOOM/FREEDOOM1.WAD"))
+    return "FREEDOOM1.WAD";
   if (FileFind("::/Home/TOOM/doom2.wad"))
     return "doom2.wad";
   if (FileFind("::/Home/TOOM/DOOM2.WAD"))
@@ -134,6 +140,8 @@ U0 RelicTOOMChildMain()
 
   if (RelicTOOMRunFromDir("::/Home/TOOM", &old_silent))
     found = TRUE;
+  else if (RelicTOOMRunFromDir("::/Home/RelicOS/TOOM", &old_silent))
+    found = TRUE;
   else if (RelicTOOMRunFromDir("::/Home/TOOM/Home/TOOM", &old_silent))
     found = TRUE;
 
@@ -158,10 +166,10 @@ U0 RunTOOM()
   iwad = RelicTOOMFindIWAD();
   if (!iwad) {
     PopUpOk(
-          "No DOOM WAD in ::/Home/TOOM.\n\n"
-          "Add doom1.wad or freedoom1.wad to\n"
-          "src/relic/TOOM on the host, then run\n"
-          "MakeVHD.ps1 and Build.HC again.");
+          "No DOOM WAD found.\n\n"
+          "Put doom1.wad or freedoom1.wad in\n"
+          "::/Home/TOOM or ::/Home/RelicOS/TOOM,\n"
+          "then run MakeVHD.ps1 and Build.HC.");
     return;
   }
 
