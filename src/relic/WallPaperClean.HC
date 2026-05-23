@@ -42,8 +42,8 @@ U0 RelicEarlyDarkPalette()
   pal[13].r=0xBBBB; pal[13].g=0x5000; pal[13].b=0xCCCC;
   // 14 YELLOW - warm amber
   pal[14].r=0xFFFF; pal[14].g=0xC800; pal[14].b=0x2800;
-  // 15 WHITE - dark gray, never real white
-  pal[15].r=0x2800; pal[15].g=0x2800; pal[15].b=0x2600;
+  // 15 WHITE - visible light gray for cursor and highlights
+  pal[15].r=0xD000; pal[15].g=0xD000; pal[15].b=0xD000;
 
   GrPaletteSet(pal);
 }

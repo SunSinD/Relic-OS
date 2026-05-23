@@ -25,13 +25,7 @@ while (TRUE) {
     winmgr.show_menu = FALSE;
     RelicDesktop;
   } catch {
-    winmgr.show_menu = FALSE;
-    RelicThemeApply;
-    RelicDocDark;
-    DocClear;
+    RelicDesktopRestore;
   }
-  winmgr.show_menu = FALSE;
-  RelicThemeApply;
-  RelicDocDark;
-  DocClear;
+  RelicDesktopRestore;
 }

@@ -56,15 +56,49 @@ C:/Tmp/MyDistro.ISO.C
 Attach that generated ISO file to VMware Workstation as the CD/DVD image and
 boot from it.
 
+## Relic OS Transfer VHD (recommended)
+
+On the Windows host, sync `src/relic/` to a transfer disk:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\RelicTransfer\MakeVHD.ps1
+```
+
+VMware disk layout:
+
+| Device | Path | Purpose |
+|--------|------|---------|
+| IDE 0:0 | `C:\RelicTransfer\transfer.vhd` | Build source (`C:/Build.HC`, `C:/` tree) |
+| IDE 0:1 | `TempleOS.vmdk` | Installed Relic OS |
+
+Inside TempleOS (transfer drive = `D:`):
+
+```holyc
+Drv('D');
+CopyTree("C:/","::/Home/RelicOS/");
+```
+
+Full install / ISO export:
+
+```holyc
+Drv('D');
+Cd("/Home");
+#include "C:/Build.HC";
+```
+
+Host ISO extract after build: `C:\RelicTransfer\ExtractISO.ps1`
+
+See also `docs/CONTINUATION.md` for the full handoff checklist.
+
 ## Moving Files In And Out
 
 The clean long-term goal is to add repo tooling that can rebuild RedSea ISO
 images directly from `src/templeos/`. Until then, the practical options are:
 
+- Run `MakeVHD.ps1` and `CopyTree` as above (fastest for `src/relic/`).
 - Edit small files directly inside TempleOS, then mirror the change back into
   the repo.
-- Use a supplemental ISO or virtual disk to move changed files into the VM.
-- Use TempleOS's own distro script to generate a bootable test ISO.
+- Use TempleOS's own distro script (`Build.HC`) to generate a bootable test ISO.
 
 ## Next Tooling Target
 

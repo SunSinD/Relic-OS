@@ -80,6 +80,8 @@ U0 TallBlot(CDC *to,I64 x,I64 y,I64 h,CDC *from) {
 }
 F64 ray_cast_table_cos[GR_WIDTH/2];
 F64 ray_cast_table_sin[GR_WIDTH/2];
+F64 cos_table[GR_WIDTH];
+F64 sin_table[GR_WIDTH];
 Bool paused = FALSE,gameExit=FALSE;
 F64 time_offset=0,base_tS=tS;
 F64 paused_at=0;
@@ -379,8 +381,11 @@ I64 class CLine64 {
 I64 LineYSort(CLine64 a,CLine64 b) {
   return a.ey-b.ey;
 }
-U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,I64 idist,I64 wx,I64 wy,I64 light,Bool god_mode) {
+U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,F64 dist,F64 wxf,F64 wyf,I64 light,Bool god_mode) {
   x=GR_WIDTH-x;
+  I64 idist = ToI64(dist);
+  I64 wx = ToI64(wxf);
+  I64 wy = ToI64(wyf);
   U16 *to=&dc->body[x+y*dc->width_internal];
   I32 *db_z=&dc->depth_buf[x+y*dc->width_internal];
   if(*db_z<idist-3) return;
@@ -393,7 +398,7 @@ U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,I64 idist,I64 wx,I64 wy,I64 light
 //wx<<1 multiples by 2,which means any number*2 is even
   wx=(wx<<1)&127;
   wy=(wy<<1)&127;
-  U64 color=LookupLighting(texture->body[wx+wy*128](U16),light,idist&U32_MAX,god_mode);
+  U64 color=LookupLighting(texture->body[wx+wy*128](U16),light,dist,god_mode);
   *to=color&0xffff;
   to(U8*)+=dc->width_internal;
   *to=color>>16;
@@ -449,17 +454,7 @@ U0 FillPoly(CDC *dc,CDoomCamera *cam,CDoomSector *os,CDC *texture,CD4 *points,I6
   F64 slope,wxf,wyf,midx,slope2,angle,dist;
   I64 scrn_points[0x100],wall_skip;
   CLine64 ln,to_remove,ln2;
-  static F64 last_angle=I16_MAX; //Not possible to start with this angle
-  static F64 cos_table[GR_WIDTH];
-  static F64 sin_table[GR_WIDTH];
-  if(last_angle!=cam->angle) {
-    for(x=0;x!=GR_WIDTH;x++) {
-      angle=(ToF64(x)-GR_WIDTH/2)/GR_WIDTH*(cam->fov);
-      sin_table[x]=Sin(cam->angle+angle);
-      cos_table[x]=Cos(cam->angle+angle);
-    }
-    last_angle=cam->angle;
-  }
+
   ln.sx=points[0].start.x;
   ln.ex=ln.sx;
   ln.sy=points[0].start.y;
@@ -810,7 +805,7 @@ Bool RayCastWall(CDC *to_dc,CDC *texture,CD2 *st,CD2 *en,CDoomCamera *cam,I64 le
 	      color=texture->body[tx+ty*texture->width_internal](U16);
 	      dither_px=LookupLighting(color,light,dist,god_mode);
 	      to=&to_dc->body[GR_WIDTH-2-ix+(iy+ih2)*to_dc->width_internal];
-	      if(color&0xff!=TRANSPARENT) {
+	      if((color&0xff)!=TRANSPARENT) {
 	        ld->seen=TRUE;
 	        db_z[0]=idist;
 	        db_z[1]=idist;
@@ -1346,8 +1341,8 @@ U0 DrawSkyAndFillHoles(CDC *to_dc,CDoomLevel *l,CDoomCamera *cam) {
       ty=texture->height-2;
     for(ix=0;ix!=GR_WIDTH;ix+=2) {
       to=&to_dc->body[GR_WIDTH-2-ix+iy*to_dc->width_internal];
-      if(*to&0xff!=SKY_PIXEL) {
-	if(iy&&*to&0xff==TRANSPARENT) {
+      if((*to&0xff)!=SKY_PIXEL) {
+	if(iy&&(*to&0xff)==TRANSPARENT) {
 	  fill_color=(to(U8*)-to_dc->width_internal)[0](U16);
 	  *to=fill_color;
           to(U8*)+=to_dc->width_internal;
@@ -1421,6 +1416,13 @@ extern U0 WorldLock(Bool read=FALSE);
 extern U0 WorldUnlock(Bool read=FALSE);
 U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
   WorldLock;
+  I64 x_trig;
+  F64 angle_trig;
+  for(x_trig=0;x_trig!=GR_WIDTH;x_trig++) {
+    angle_trig=(ToF64(x_trig)-GR_WIDTH/2)/GR_WIDTH*(cam->fov);
+    sin_table[x_trig]=Sin(cam->angle+angle_trig);
+    cos_table[x_trig]=Cos(cam->angle+angle_trig);
+  }
   CDoomSubsector *ss;
   CDoomSector *sector;  
   CDoomThing *thing;
@@ -3812,13 +3814,8 @@ ent:;
      p->angle-=ToF64(ms.pos.x-GR_WIDTH/2)*pi/180.;
      MsSet(GR_WIDTH/2,GR_HEIGHT/2);
 #else
-      #define SCRN_MARGIN 200
-      #define SCRN_TURN_RATE (pi/1.5/30.)
-      if(SCRN_MARGIN>cursor_x) {
-        p->angle+=Lerp((SCRN_MARGIN-cursor_x)/ToF64(SCRN_MARGIN),0,SCRN_TURN_RATE);
-      } else if(GR_WIDTH-SCRN_MARGIN<cursor_x) {
-        p->angle-=Lerp((cursor_x-(GR_WIDTH-SCRN_MARGIN))/ToF64(SCRN_MARGIN),0,SCRN_TURN_RATE);
-      }
+     p->angle-=ToF64(ms.pos.x-GR_WIDTH/2)*pi/180.*0.25;
+     MsSet(GR_WIDTH/2,GR_HEIGHT/2);
 #endif
       p->running=FALSE;
       old_moving=p->moving;

@@ -68,16 +68,12 @@ U0 PickWads() {
 }
 
 if(iwad=FramePtr("USE_IWAD")) {
-  if(!FileFind(iwad)) {
-    PopUpOk(MStrPrint("Can't find IWAD \"%Q\"\n",iwad));
-    Exit;
-  }
+  if(!FileFind(iwad))
+    throw('NoIWAD');
   LoadWad(iwad);
 }  else
   PickWads;
 if(pwad=FramePtr("USE_PWAD")) {
-  if(!FileFind(pwad)) {
-    PopUpOk(MStrPrint("Can't find PWAD \"%Q\"\n",pwad));
-    Exit;
-  }
+  if(!FileFind(pwad))
+    throw('NoPWAD');
 }

@@ -28,9 +28,9 @@ U8 *DitherPalette(CRGB *data) {
       best_dist=1e100;
       if(!cur_pixel.a)  {
         for(canidate=0;canidate!=16;canidate++) {
-	  dist=Sqrt(Sqr(normal[canidate].r-cur_pixel.r)+
-	        Sqr(normal[canidate].g-cur_pixel.g)+
-	        Sqr(normal[canidate].b-cur_pixel.b));
+	  dist=Sqrt(Sqr(ToI64(normal[canidate].r)-cur_pixel.r)+
+	        Sqr(ToI64(normal[canidate].g)-cur_pixel.g)+
+	        Sqr(ToI64(normal[canidate].b)-cur_pixel.b));
 	    if(dist<best_dist) {
 	      best_dist=dist;
 	      best_color=canidate;
@@ -144,7 +144,7 @@ U32 godmode_mat[0x100];
 U32 light_mat[0x100][16];
 U32 LookupLighting(U16 dith,I64 light,F64 distance,Bool god_mode=FALSE) {
 //Make 0x0102 into 0x12
-  if(dith&0xff==TRANSPARENT)
+  if((dith&0xff)==TRANSPARENT)
     return 0xffffffff;//4 TRANSPARENTs
   light=light-distance*1/16.;
   if(light<15)

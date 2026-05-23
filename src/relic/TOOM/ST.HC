@@ -325,7 +325,7 @@ U0 BlotWithLighting(CDC *to,I64 x,I64 y,CDC *dc,F64 light=255,Bool invis=FALSE) 
 	      lighting=trans_pixel;
 	  } else
 	    lighting=LookupLighting(*src,light,0.,god_mode);
-	  if(lighting&0xff!=TRANSPARENT) {
+	  if((lighting&0xff)!=TRANSPARENT) {
 	    *dst=lighting&0xffff;
 	    *dst2=lighting>>16;
 	  }

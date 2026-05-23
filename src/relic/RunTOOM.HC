@@ -1,6 +1,4 @@
-// Run the TOOM copy installed into the release ISO by Build.HC.
-// No extern declarations — load theme/chrome files dynamically to avoid
-// compile-time symbol resolution failures.
+// Run TOOM in an isolated child task so repeat launches do not corrupt the desktop.
 
 U0 RelicTOOMDarkWin()
 {
@@ -12,6 +10,7 @@ U0 RelicTOOMDarkWin()
         WIF_SELF_BORDER;
   WinFocus;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
+  Fs->border_src = 0;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
@@ -19,16 +18,13 @@ U0 RelicTOOMDarkWin()
 
 U0 RelicTOOMRestoreDark()
 {
-  Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  RelicTermDark;
 }
 
 Bool RelicTOOMHandleCatch(Bool old_silent)
 {
   Silent(old_silent);
-  
-  // Safely stop background tasks in case we exited via throw('Quit')
+
   try {
     ExePrint("TOOMStopTasks;");
   } catch {
@@ -45,27 +41,39 @@ Bool RelicTOOMHandleCatch(Bool old_silent)
   RelicTOOMRestoreDark;
   DocClear;
   "$FG,LTRED$DOOM failed to start cleanly.$FG$\n";
-  "$FG,DKGRAY$Returning to the desktop...$FG$\n";
-  Sleep(1500);
+  "$FG,DKGRAY$Press any key...$FG$\n";
+  GetChar(NULL, FALSE);
   return FALSE;
 }
 
-U0 RelicTOOMUseIWAD()
+U8 *RelicTOOMFindIWAD()
+{
+  if (FileFind("::/Home/TOOM/doom1.wad"))
+    return "doom1.wad";
+  if (FileFind("::/Home/TOOM/DOOM1.WAD"))
+    return "DOOM1.WAD";
+  if (FileFind("::/Home/TOOM/freedoom1.wad"))
+    return "freedoom1.wad";
+  if (FileFind("::/Home/TOOM/FREEDOOM1.WAD"))
+    return "FREEDOOM1.WAD";
+  if (FileFind("::/Home/TOOM/doom2.wad"))
+    return "doom2.wad";
+  if (FileFind("::/Home/TOOM/DOOM2.WAD"))
+    return "DOOM2.WAD";
+  return NULL;
+}
+
+U0 RelicTOOMUseIWAD(U8 *iwad)
 {
   FramePtrDel("USE_IWAD");
   FramePtrDel("USE_PWAD");
   FramePtrDel("USE_WAD");
-  if (FileFind("doom1.wad"))
-    FramePtrAdd("USE_IWAD", StrNew("doom1.wad"));
-  else
-    FramePtrAdd("USE_IWAD", StrNew("freedoom1.wad"));
+  if (iwad)
+    FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
 
 U0 RelicTOOMReloadThemeChrome()
 {
-  // Reload theme and chrome into this task's symbol table,
-  // then call the setup functions via ExePrint so we don't
-  // need extern declarations that can fail at compile time.
   if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
     ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
   if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
@@ -74,110 +82,102 @@ U0 RelicTOOMReloadThemeChrome()
   ExePrint("RelicChromeInstall;");
 }
 
-U0 RunTOOM()
+Bool RelicTOOMRunFromDir(U8 *dir, Bool *old_silent)
 {
+  U8 *iwad;
+  U8 path[256];
+  Bool ok = FALSE;
+
+  StrPrint(path, "%s/SinglePlayer.HC", dir);
+  if (!FileFind(path)) {
+    StrPrint(path, "%s/SinglePlayer.HC.Z", dir);
+    if (!FileFind(path))
+      return FALSE;
+  }
+
+  Cd(dir);
+  iwad = RelicTOOMFindIWAD();
+  if (!iwad)
+    return FALSE;
+
+  RelicTOOMDarkWin;
+  DocClear;
+  DCFill;
+  RelicTOOMUseIWAD(iwad);
+  try {
+    FlushMsgs;
+    RelicTOOMDarkWin;
+    if (FileFind("SinglePlayer.HC"))
+      ExeFile("SinglePlayer.HC", CCF_JUST_LOAD);
+    else
+      ExeFile("SinglePlayer.HC.Z", CCF_JUST_LOAD);
+    ExePrint("TOOMStart;");
+    Silent(*old_silent);
+    try { ExePrint("TOOMStopTasks;"); } catch {}
+    ok = TRUE;
+  } catch {
+    RelicTOOMHandleCatch(*old_silent);
+  }
+  return ok;
+}
+
+// Runs inside the spawned "TOOM Task" child only.
+U0 RelicTOOMChildMain()
+{
+  Bool old_silent = Silent;
   Bool found = FALSE;
-  Bool old_silent;
-  CBGR48 relic_pal[COLORS_NUM];
-  GrPaletteGet(relic_pal);
-  old_silent = Silent;
 
   RelicTOOMDarkWin;
   winmgr.show_menu = FALSE;
   DocClear;
   DCFill;
 
-  if (FileFind("::/Home/TOOM/SinglePlayer.HC") ||
-      FileFind("::/Home/TOOM/SinglePlayer.HC.Z")) {
+  if (RelicTOOMRunFromDir("::/Home/TOOM", &old_silent))
     found = TRUE;
-    Cd("::/Home/TOOM");
-    RelicTOOMDarkWin;
-    DocClear;
-    RelicTOOMUseIWAD;
-    try {
-      FlushMsgs;
-      RelicTOOMDarkWin;
-      Silent(TRUE);
-      ExeFile("SinglePlayer.HC");
-      Silent(old_silent);
-      try { ExePrint("TOOMStopTasks;"); } catch {}
-    } catch {
-      RelicTOOMHandleCatch(old_silent);
-    }
-    GrPaletteSet(relic_pal);
-    RelicTOOMDarkWin;
-    DocClear;
-  } else if (FileFind("::/Home/TOOM/Home/TOOM/SinglePlayer.HC") ||
-        FileFind("::/Home/TOOM/Home/TOOM/SinglePlayer.HC.Z")) {
+  else if (RelicTOOMRunFromDir("::/Home/TOOM/Home/TOOM", &old_silent))
     found = TRUE;
-    Cd("::/Home/TOOM/Home/TOOM");
-    RelicTOOMDarkWin;
-    DocClear;
-    RelicTOOMUseIWAD;
-    try {
-      FlushMsgs;
-      RelicTOOMDarkWin;
-      Silent(TRUE);
-      ExeFile("SinglePlayer.HC");
-      Silent(old_silent);
-      try { ExePrint("TOOMStopTasks;"); } catch {}
-    } catch {
-      RelicTOOMHandleCatch(old_silent);
-    }
-    GrPaletteSet(relic_pal);
-    RelicTOOMDarkWin;
-    DocClear;
-  } else if (FileFind("::/Home/TOOM/Load.HC") ||
-        FileFind("::/Home/TOOM/Load.HC.Z")) {
-    found = TRUE;
-    Cd("::/Home/TOOM");
-    RelicTOOMDarkWin;
-    DocClear;
-    RelicTOOMDarkWin;
-    try {
-      FlushMsgs;
-      Silent(TRUE);
-      ExeFile("Load.HC");
-      Silent(old_silent);
-      try { ExePrint("TOOMStopTasks;"); } catch {}
-    } catch {
-      RelicTOOMHandleCatch(old_silent);
-    }
-    GrPaletteSet(relic_pal);
-    RelicTOOMDarkWin;
-  } else if (FileFind("::/Home/TOOM/Home/TOOM/Load.HC") ||
-        FileFind("::/Home/TOOM/Home/TOOM/Load.HC.Z")) {
-    found = TRUE;
-    Cd("::/Home/TOOM/Home/TOOM");
-    RelicTOOMDarkWin;
-    DocClear;
-    RelicTOOMDarkWin;
-    try {
-      FlushMsgs;
-      Silent(TRUE);
-      ExeFile("Load.HC");
-      Silent(old_silent);
-      try { ExePrint("TOOMStopTasks;"); } catch {}
-    } catch {
-      RelicTOOMHandleCatch(old_silent);
-    }
-    GrPaletteSet(relic_pal);
-    RelicTOOMDarkWin;
-  }
 
   if (!found) {
     RelicTOOMRestoreDark;
-    "\n$FG,LTRED$TOOM is not installed in ::/Home/TOOM.$FG$\n";
-    "$FG,LTGRAY$Rebuild the release with #include \"E:/Build.HC\";.$FG$\n\n";
-    "$FG,DKGRAY$Returning to the launcher...$FG$\n";
-    Sleep(1500);
+    DocClear;
+    "$FG,LTRED$TOOM could not start in this task.$FG$\n";
+    Sleep(500);
+  }
+}
+
+U0 RunTOOM()
+{
+  CTask *task;
+  Bool old_silent;
+  CBGR48 relic_pal[COLORS_NUM];
+  U8 *iwad;
+
+  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
+    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+
+  iwad = RelicTOOMFindIWAD();
+  if (!iwad) {
+    PopUpOk(
+          "No DOOM WAD in ::/Home/TOOM.\n\n"
+          "Add doom1.wad or freedoom1.wad to\n"
+          "src/relic/TOOM on the host, then run\n"
+          "MakeVHD.ps1 and Build.HC again.");
+    return;
   }
 
-  // Restore Relic palette and reload theme/chrome via ExePrint
-  // so we don't rely on extern symbols at compile time.
+  GrPaletteGet(relic_pal);
+  old_silent = Silent;
+
+  task = Spawn(&RelicTOOMChildMain, NULL, "TOOM Task", 0, Fs);
+  task->border_src = 0;
+  task->border_attr = BLACK << 4 | DKGRAY;
+  task->text_attr = BLACK << 4 | LTGRAY;
+  DeathWait(&task);
+
+  Silent(old_silent);
   GrPaletteSet(relic_pal);
   RelicTOOMReloadThemeChrome;
-  RelicTOOMDarkWin;
+  RelicTermDark;
   DocClear;
-  DCFill;
+  FlushMsgs;
 }

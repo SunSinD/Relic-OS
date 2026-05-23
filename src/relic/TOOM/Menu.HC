@@ -179,6 +179,10 @@ U64 MainMenu() {
 againm:;
   TOOMChromeOff;
   static I64 state=0,ep,s;
+  if (FramePtr("RELIC_TOOM_FRESH")) {
+    FramePtrDel("RELIC_TOOM_FRESH");
+    state=0;
+  }
   static CMenuItem *items=CreateMenu(
         "M_NGAME",'NGAME','n',
         "M_LOADG",'LOADG','l',
@@ -216,7 +220,7 @@ againm:;
         TOOMChromeOff;
         FramePtrDel("RELIC_TOOM_QUIT");
         FramePtrAdd("RELIC_TOOM_QUIT",StrNew("1"));
-        throw('Quit');
+        return 0;
       } else if(!r)
         return 0;
       break;

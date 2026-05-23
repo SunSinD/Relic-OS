@@ -8,7 +8,7 @@ U0 RelicStatusWallPaper(CTask *_task)
   CDateStruct ds;
   U8 *st;
 
-  _task->text_attr = BLACK << 4 + LTGRAY;
+  _task->text_attr = BLACK << 4 | LTGRAY;
 
   if (!(winmgr.updates & 31) || !*relic_top_line) {
     Date2Struct(&ds, Now + local_time_offset);

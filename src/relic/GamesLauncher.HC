@@ -1,3 +1,5 @@
+// GamesLauncher.HC — HolyC-safe: one statement per switch case, no goto.
+
 U0 RelicGamesChromeOff()
 {
   WinBorder(OFF);
@@ -7,17 +9,17 @@ U0 RelicGamesChromeOff()
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
   WinFocus;
-  Fs->text_attr = BLACK << 4 | LTGRAY;
+  RelicTermDark;
+  Fs->border_src = 0;
   Fs->border_attr = BLACK << 4 | DKGRAY;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
-U0 RelicGamesHideTextPlane()
+U0 RelicGameRunTOOM()
 {
-  Fs->text_attr = BLACK << 4 | BLACK;
-  Fs->border_attr = BLACK << 4 | BLACK;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-  DocClear;
+  ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
+  ExePrint("RunTOOM;");
 }
 
 U0 RelicGameFile(U8 *filename)
@@ -42,36 +44,54 @@ U0 RelicGameRun(I64 id)
   DocClear;
   FlushMsgs;
 
-  switch (id) {
-    case 1:
-      RelicGamesHideTextPlane;
-      ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
-      ExePrint("RunTOOM;");
-      break;
-    case 2:  RelicGameFile("::/Apps/Titanium/Run"); break;
-    case 3:  RelicGameFile("::/Demo/Games/BlackDiamond"); break;
-    case 4:  RelicGameFile("::/Demo/Games/FlapBat"); break;
-    case 5:  RelicGameFile("::/Demo/Games/Varoom"); break;
-    case 6:  RelicGameFile("::/Demo/Games/FlatTops"); break;
-    case 7:  RelicGameFile("::/Demo/Games/BomberGolf"); break;
-    case 8:  RelicGameFile("::/Apps/KeepAway/Run"); break;
-    case 9:  RelicGameFile("::/Demo/Games/RawHide"); break;
-    case 10: RelicGameFile("::/Apps/X-Caliber/Run"); break;
-    case 11: RelicGameFile("::/Demo/Games/Wenceslas"); break;
-    case 12: RelicGameFile("::/Demo/Games/BattleLines"); break;
-    case 13: RelicGameFile("::/Demo/Games/Talons"); break;
-    case 14: RelicGameFile("::/Demo/Games/CastleFrankenstein"); break;
-    case 15: RelicGameFile("::/Demo/Games/ZoneOut"); break;
-    case 16: RelicGameFile("::/Apps/ToTheFront/Run"); break;
-    case 17: RelicGameFile("::/Apps/Span/Run"); break;
-    case 18: RelicGameFile("::/Demo/Games/TreeCheckers.HC.Z"); break;
-    case 19: RelicGameFile("::/Demo/Games/Digits"); break;
-    case 20: RelicGameFile("::/Apps/Strut/Run"); break;
-    case 21: RelicGameFile("::/Demo/Games/BigGuns"); break;
-    case 22: RelicGameFile("::/Demo/Games/TheDead"); break;
-    case 23: RelicGameFile("::/Demo/Games/DunGen"); break;
-    case 24: RelicGamePopUp("#include \"::/Apps/GrModels/Run\";View;"); break;
-  }
+  if (id == 1)
+    RelicGameRunTOOM;
+  else if (id == 2)
+    RelicGameFile("::/Apps/Titanium/Run");
+  else if (id == 3)
+    RelicGameFile("::/Demo/Games/BlackDiamond");
+  else if (id == 4)
+    RelicGameFile("::/Demo/Games/FlapBat");
+  else if (id == 5)
+    RelicGameFile("::/Demo/Games/Varoom");
+  else if (id == 6)
+    RelicGameFile("::/Demo/Games/FlatTops");
+  else if (id == 7)
+    RelicGameFile("::/Demo/Games/BomberGolf");
+  else if (id == 8)
+    RelicGameFile("::/Apps/KeepAway/Run");
+  else if (id == 9)
+    RelicGameFile("::/Demo/Games/RawHide");
+  else if (id == 10)
+    RelicGameFile("::/Apps/X-Caliber/Run");
+  else if (id == 11)
+    RelicGameFile("::/Demo/Games/Wenceslas");
+  else if (id == 12)
+    RelicGameFile("::/Demo/Games/BattleLines");
+  else if (id == 13)
+    RelicGameFile("::/Demo/Games/Talons");
+  else if (id == 14)
+    RelicGameFile("::/Demo/Games/CastleFrankenstein");
+  else if (id == 15)
+    RelicGameFile("::/Demo/Games/ZoneOut");
+  else if (id == 16)
+    RelicGameFile("::/Apps/ToTheFront/Run");
+  else if (id == 17)
+    RelicGameFile("::/Apps/Span/Run");
+  else if (id == 18)
+    RelicGameFile("::/Demo/Games/TreeCheckers.HC.Z");
+  else if (id == 19)
+    RelicGameFile("::/Demo/Games/Digits");
+  else if (id == 20)
+    RelicGameFile("::/Apps/Strut/Run");
+  else if (id == 21)
+    RelicGameFile("::/Demo/Games/BigGuns");
+  else if (id == 22)
+    RelicGameFile("::/Demo/Games/TheDead");
+  else if (id == 23)
+    RelicGameFile("::/Demo/Games/DunGen");
+  else if (id == 24)
+    RelicGamePopUp("#include \"::/Apps/GrModels/Run\";View;");
 }
 
 U0 RelicGamesLauncher()
@@ -79,8 +99,6 @@ U0 RelicGamesLauncher()
   U8 buf[3];
   I64 id, ch, sc, len = 0;
 
-  RelicGamesChromeOff;
-  DocTermNew;
   RelicGamesChromeOff;
   DocClear;
   buf[0] = 0;
@@ -109,22 +127,23 @@ U0 RelicGamesLauncher()
 
     GetMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
     if (ch == CH_ESC || ch == CH_SHIFT_ESC)
-      break;
+      return;
 
     if (ch == '\n') {
       if (!len)
-        break;
+        return;
       id = Str2I64(buf);
       if (1 <= id && id <= 24) {
         RelicGameRun(id);
         if (id == 1) {
+          RelicTermDark;
           RelicGamesChromeOff;
           DocClear;
+          FlushMsgs;
           len = 0;
           buf[0] = 0;
-          continue;
-        }
-        break;
+        } else
+          return;
       }
       len = 0;
       buf[0] = 0;

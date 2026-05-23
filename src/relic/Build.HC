@@ -2,7 +2,9 @@
 // Automatically installs RelicOS to the system and generates a bootable ISO.
 
 U8 relic_src_drv = 'E';
-if (FileFind("D:/Build.HC") || FileFind("D:/Build.HC.Z"))
+if (FileFind("C:/Build.HC") || FileFind("C:/Build.HC.Z"))
+  relic_src_drv = 'C';
+else if (FileFind("D:/Build.HC") || FileFind("D:/Build.HC.Z"))
   relic_src_drv = 'D';
 else if (FileFind("E:/Build.HC") || FileFind("E:/Build.HC.Z"))
   relic_src_drv = 'E';
@@ -37,6 +39,19 @@ U0 RelicFileWrite(U8 *filename, U8 *data, I64 size) {
   U8 buf[256];
   StrPrint(buf, "%c:/%s", relic_src_drv, filename);
   FileWrite(buf, data, size);
+}
+
+// StrFirstOcc is a character-set search (like strpbrk), NOT a substring
+// search.  We need a real substring finder for patching source files.
+U8 *RelicStrStr(U8 *haystack, I64 hay_len, U8 *needle) {
+  I64 needle_len = StrLen(needle);
+  I64 i;
+  if (needle_len > hay_len) return NULL;
+  for (i = 0; i <= hay_len - needle_len; i++) {
+    if (!MemCmp(haystack + i, needle, needle_len))
+      return haystack + i;
+  }
+  return NULL;
 }
 
 "\n$FG,CYAN$==============================$FG$\n";
@@ -80,6 +95,27 @@ if (!toom_installed && RelicFileFind("TOOM.ISO.C")) {
 if (!toom_installed) {
   "$FG,LTRED$WARNING: TOOM source was not found on %c:/TOOM.$FG$\n", relic_src_drv;
 }
+
+"Installing DOOM IWAD (required for TOOM)...\n";
+if (RelicFileFind("TOOM/doom1.wad"))
+  RelicCopy("TOOM/doom1.wad", "::/Home/TOOM");
+else if (RelicFileFind("TOOM/DOOM1.WAD"))
+  RelicCopy("TOOM/DOOM1.WAD", "::/Home/TOOM");
+else if (RelicFileFind("TOOM/freedoom1.wad"))
+  RelicCopy("TOOM/freedoom1.wad", "::/Home/TOOM");
+else if (RelicFileFind("TOOM/FREEDOOM1.WAD"))
+  RelicCopy("TOOM/FREEDOOM1.WAD", "::/Home/TOOM");
+else if (RelicFileFind("doom1.wad"))
+  RelicCopy("doom1.wad", "::/Home/TOOM");
+else if (RelicFileFind("freedoom1.wad"))
+  RelicCopy("freedoom1.wad", "::/Home/TOOM");
+else if (FileFind("::/Home/TOOM/doom1.wad") ||
+      FileFind("::/Home/TOOM/freedoom1.wad"))
+  "  IWAD already present in ::/Home/TOOM.\n";
+else
+  "$FG,LTRED$WARNING: No doom1.wad or freedoom1.wad found!$FG$\n"
+  "  Copy freedoom1.wad into src/relic/TOOM/ on the host, run MakeVHD.ps1,\n"
+  "  then rebuild. DOOM will show a black screen without a WAD.\n";
 
 "2. Completely rebranding OS and fixing Boot Script...\n";
 U0 ReplaceBranding(U8 *filename) {
@@ -126,7 +162,7 @@ U0 RestoreStartOS() {
     return;
   buf = FileRead("::/StartOS.HC.Z", &size);
   if (buf) {
-    U8 *marker = StrFirstOcc(buf, "RelicBootPalette;");
+    U8 *marker = RelicStrStr(buf, size, "RelicBootPalette;");
     if (marker) {
       // Find the newline after "RelicBootPalette;\n"
       U8 *rest = StrFirstOcc(marker, "\n");
@@ -150,7 +186,7 @@ U0 PatchDefaultPalette(U8 *filename) {
     return;
   buf = FileRead(filename, &size);
   if (buf) {
-    U8 *start = StrFirstOcc(buf, "gr_palette_std[16]");
+    U8 *start = RelicStrStr(buf, size, "gr_palette_std");
     if (start) {
       U8 *array_start = StrFirstOcc(start, "{");
       U8 *array_end = StrFirstOcc(start, "}");
@@ -160,7 +196,7 @@ U0 PatchDefaultPalette(U8 *filename) {
           "  0x000000000000, 0x000000000000, 0x200052002400, 0x00009000B800,\n"
           "  0xB80008000800, 0x600015007000, 0xA00052001000, 0x780078007400,\n"
           "  0x380038003A00, 0x300048009000, 0x380090004800, 0x100030003500,\n"
-          "  0xFFFF38382828, 0xBBBB5000CCCC, 0xFFFFC8002800, 0x280028002600\n"
+          "  0xFFFF38382828, 0xBBBB5000CCCC, 0xFFFFC8002800, 0xD000D000D000\n"
           "}";
         I64 prefix_len = array_start - buf;
         I64 suffix_len = buf + size - (array_end + 1);
@@ -183,7 +219,7 @@ PatchDefaultPalette("::/Adam/Gr/GrPalette.HC.Z");
 Bool RelicReplaceOnce(U8 **buf_ptr, I64 *size_ptr, U8 *old_text, U8 *new_text)
 {
   U8 *buf = *buf_ptr;
-  U8 *hit = StrFirstOcc(buf, old_text);
+  U8 *hit = RelicStrStr(buf, *size_ptr, old_text);
   U8 *new_buf;
   I64 old_len, new_len, prefix_len, suffix_len, new_size;
 
@@ -224,6 +260,23 @@ Bool RelicFileReplaceOnce(U8 *filename, U8 *old_text, U8 *new_text)
     Free(buf);
   }
   return changed;
+}
+
+U0 ReplaceBrandingRecursive(U8 *filespec) {
+  CDirEntry *de = FilesFind(filespec, FUF_RECURSE), *tmp_de = de;
+  while (tmp_de) {
+    if (!(tmp_de->attr & RS_ATTR_DIR)) {
+      ReplaceBranding(tmp_de->full_name);
+    }
+    tmp_de = tmp_de->next;
+  }
+  DirEntryDel(de);
+}
+
+U0 PatchDarkKernel(U8 *filename) {
+  RelicFileReplaceOnce(filename, "WHITE<<4|BLUE", "BLACK<<4|LTGRAY");
+  RelicFileReplaceOnce(filename, "0xF1", "0x07");
+  RelicFileReplaceOnce(filename, "WHITE<<4|LTGRAY", "BLACK<<4|LTGRAY");
 }
 
 U0 RestoreADefine()
@@ -267,6 +320,7 @@ U8 *clean_homesys =
   "  RelicThemeApply;\n"
   "  Fs->text_attr = BLACK << 4 | DKGRAY;\n"
   "  Fs->border_attr = BLACK << 4 | BLACK;\n"
+  "  Fs->border_src = 0;\n"
   "  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS;\n"
   "  winmgr.show_menu = FALSE;\n"
   "  AutoComplete(OFF);\n"
@@ -274,23 +328,37 @@ U8 *clean_homesys =
   "  Print(\"$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$\");\n"
   "  DocClear;\n"
   "  if (!relic_desktop_started) {\n"
-  "    relic_desktop_started = TRUE;\n"
   "    WinBorder(OFF);\n"
   "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
   "    WinZBufUpdate;\n"
   "    try {\n"
+  "      relic_desktop_started = TRUE;\n"
   "      ExeFile(\"::/Home/RelicOS/RelicBoot.HC\");\n"
   "    } catch {\n"
+  "      relic_desktop_started = FALSE;\n"
   "      winmgr.show_menu = FALSE;\n"
+  "      Fs->border_src = 0;\n"
+  "      Fs->border_attr = BLACK << 4 | DKGRAY;\n"
+  "      Fs->text_attr = BLACK << 4 | LTGRAY;\n"
   "      WinBorder(ON);\n"
-  "      Print(\"$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$\");\n"
+  "      Print(\"$FD,LTGRAY$$BD,DKGRAY$$FG,LTGRAY$$BG,BLACK$\");\n"
   "      DocClear;\n"
   "      \"RelicOS desktop failed to start. Terminal fallback ready.\\n\";\n"
   "    }\n"
+  "  } else if (!StrCmp(Fs->task_name, \"TOOM Task\") ||\n"
+  "      !StrCmp(Fs->task_name, \"Relic Games\")) {\n"
+  "    RelicTermDark;\n"
+  "    WinBorder(OFF);\n"
+  "    winmgr.show_menu = FALSE;\n"
+  "    Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;\n"
+  "    DocClear;\n"
+  "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
+  "    WinZBufUpdate;\n"
   "  } else {\n"
+  "    RelicTermDark;\n"
   "    WinBorder(ON);\n"
   "    DocTermNew;\n"
-  "    Print(\"$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$\");\n"
+  "    RelicTermDark;\n"
   "    DocClear;\n"
   "    LBts(&Fs->display_flags,DISPLAYf_SHOW);\n"
   "    WinZBufUpdate;\n"
@@ -302,6 +370,7 @@ U8 *clean_homesys =
   "  winmgr.show_menu = FALSE;\n"
   "  Fs->text_attr = BLACK << 4 | BLACK;\n"
   "  Fs->border_attr = BLACK << 4 | BLACK;\n"
+  "  Fs->border_src = 0;\n"
   "  Print(\"$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$\");\n"
   "  DocClear;\n"
   "  User;\n"
@@ -438,6 +507,26 @@ U0 RelicMakeISO(U8 *_out_iso_filename)
     CopyTree("/Downloads", "/Distro/Downloads");
   DirMk("/Distro/Tmp");
   DirMk("/Distro/Tmp/ScrnShots");
+
+  // Rebrand all source tree files recursively inside /Distro so compiler/bootloader/OS build are 100% RelicOS
+  ReplaceBrandingRecursive("::/Distro/*.HC*");
+  ReplaceBrandingRecursive("::/Distro/*.HH*");
+  ReplaceBrandingRecursive("::/Distro/*.BIN.C");
+  ReplaceBrandingRecursive("::/Distro/*.TXT*");
+
+  // Patch default terminal attributes in kernel files (so early live-CD compilation is dark, not white)
+  PatchDarkKernel("::/Kernel/KernelA.HH");
+  PatchDarkKernel("::/Kernel/KStart64.HC");
+  PatchDarkKernel("::/Kernel/KTask.HC");
+  PatchDarkKernel("::/Kernel/KMain.HC");
+  PatchDarkKernel("::/Kernel/KStart16.HC");
+  PatchDarkKernel("::/Kernel/KStart32.HC");
+  PatchDarkKernel("/Distro/Kernel/KernelA.HH");
+  PatchDarkKernel("/Distro/Kernel/KStart64.HC");
+  PatchDarkKernel("/Distro/Kernel/KTask.HC");
+  PatchDarkKernel("/Distro/Kernel/KMain.HC");
+  PatchDarkKernel("/Distro/Kernel/KStart16.HC");
+  PatchDarkKernel("/Distro/Kernel/KStart32.HC");
 
   RedSeaISO(out_iso_filename, "/Distro", "/Distro" BOOT_DIR_KERNEL_BIN_C);
   Free(out_iso_filename);

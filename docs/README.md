@@ -8,6 +8,7 @@ This folder keeps the main project notes in one place.
 - [Subsystems](subsystems.md): boot, kernel, memory, drivers, UI, and tools.
 - [TempleOS Notes](templeos-notes.md): source notes for the fork.
 - [VMware Workflow](vmware-workflow.md): edit, build, and test loop.
+- [Continuation Prompt](CONTINUATION.md): resume a Cursor session; VM deploy without Shell.
 
 Keep docs short. If a page gets too large, split it only when that makes the
 repo easier to navigate.

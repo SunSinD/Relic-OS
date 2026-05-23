@@ -14,6 +14,7 @@
 I64 relic_ox = 0, relic_oy = 0;
 I64 relic_w = 640, relic_h = 480;
 I64 relic_pending_app = -1;
+CTask *relic_child_task = NULL;
 
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
@@ -40,6 +41,36 @@ U8 app_tips[NUM_APPS][16] = {
   "Help"
 };
 
+U0 RelicDriveColorsDark()
+{
+  I64 i;
+
+  if (!relic_drive_colors_saved) {
+    for (i = 0; i < BDT_TYPES_NUM; i++)
+      relic_old_blkdev_text_attr[i] = blkdev_text_attr[i];
+    for (i = 0; i < 3; i++)
+      relic_old_drv_text_attr[i] = drv_text_attr[i];
+    relic_drive_colors_saved = TRUE;
+  }
+
+  blkdev_text_attr[BDT_ATA] = BLACK;
+  drv_text_attr[0] = CYAN;
+  drv_text_attr[1] = LTGRAY;
+  drv_text_attr[2] = LTRED;
+}
+
+U0 RelicDriveColorsRestore()
+{
+  I64 i;
+
+  if (relic_drive_colors_saved) {
+    for (i = 0; i < BDT_TYPES_NUM; i++)
+      blkdev_text_attr[i] = relic_old_blkdev_text_attr[i];
+    for (i = 0; i < 3; i++)
+      drv_text_attr[i] = relic_old_drv_text_attr[i];
+  }
+}
+
 // ---- Drawing (defined first — HolyC requires it) ----
 U0 DrawDesktop(CTask *task, CDC *dc)
 {
@@ -56,25 +87,19 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   relic_ox = task->pix_left;
   relic_oy = task->pix_top;
 
-  // Wallpaper
-  if (relic_wp_dc)
-    GrBlot(dc, 0, 0, relic_wp_dc);
-  else {
-    dc->color = BLACK;
-    GrRect(dc, 0, 0, w, h);
-  }
-
-  // Top bar
+  // Reserve top row for system status strip (RelicChrome / fp_wall_paper)
   dc->color = BLACK;
   GrRect(dc, 0, 0, w, TOPBAR_H);
-  dc->color = CYAN;
-  GrPrint(dc, 6, 3, "RelicOS V1.0.0");
-  dc->color = DKGRAY;
-  GrPrint(dc, 132, 3, "|");
-  dc->color = LTGRAY;
-  GrPrint(dc, 148, 3, "Desktop");
-  dc->color = DKGRAY;
-  GrLine(dc, 0, TOPBAR_H, w, TOPBAR_H);
+
+  if (relic_wp_dc)
+    GrBlot(dc, 0, TOPBAR_H, relic_wp_dc);
+  else {
+    dc->color = BLACK;
+    GrRect(dc, 0, TOPBAR_H, w, h - TOPBAR_H);
+  }
+
+  if (gr.fp_wall_paper)
+    gr.fp_wall_paper(task);
 
   // Dock background
   dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
@@ -136,8 +161,10 @@ U0 DrawDesktop(CTask *task, CDC *dc)
 
 U0 RelicDocDark()
 {
+  RelicDriveColorsDark;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->border_attr = BLACK << 4 | DKGRAY;
+  Fs->border_src = 0; // BDS_CONST
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
@@ -150,6 +177,57 @@ U0 RelicDesktopMode()
         WIF_SELF_BORDER;
   WinFocus;
   RelicDocDark;
+}
+
+U0 RelicAppStart()
+{
+  Fs->draw_it = NULL;
+  winmgr.show_menu = FALSE;
+  WinBorder(OFF);
+  WinMax;
+  AutoComplete(OFF);
+  WinFocus;
+  RelicDocDark;
+  DocTermNew;
+  RelicDocDark;
+  DocClear;
+  DCFill;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+}
+
+U0 RelicChildKill()
+{
+  if (relic_child_task && TaskValidate(relic_child_task)) {
+    Kill(relic_child_task, FALSE);
+    relic_child_task = NULL;
+  }
+}
+
+U0 RelicDesktopRefresh()
+{
+  if (Fs->draw_it)
+    Fs->draw_it(Fs, gr.dc);
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+}
+
+U0 RelicDesktopRestore()
+{
+  winmgr.show_menu = FALSE;
+  relic_pending_app = -1;
+  RelicThemeApply;
+  RelicChromeInstall;
+  RelicDocDark;
+  DocClear;
+  DCFill;
+  RelicDesktopMode;
+  Fs->draw_it = &DrawDesktop;
+  if (Fs->draw_it)
+    Fs->draw_it(Fs, gr.dc);
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  FlushMsgs;
 }
 
 I64 RelicDockHit(I64 x, I64 y)
@@ -193,34 +271,68 @@ I64 RelicKeyApp(I64 ch)
   return -1;
 }
 
-U0 RelicDriveColorsDark()
+U0 RelicLaunchEditor()
 {
-  I64 i;
-
-  if (!relic_drive_colors_saved) {
-    for (i = 0; i < BDT_TYPES_NUM; i++)
-      relic_old_blkdev_text_attr[i] = blkdev_text_attr[i];
-    for (i = 0; i < 3; i++)
-      relic_old_drv_text_attr[i] = drv_text_attr[i];
-    relic_drive_colors_saved = TRUE;
-  }
-
-  blkdev_text_attr[BDT_ATA] = BLACK;
-  drv_text_attr[0] = CYAN;
-  drv_text_attr[1] = LTGRAY;
-  drv_text_attr[2] = LTRED;
+  U8 *doc;
+  U8 *init_str = "$BG,BLACK$$FG,LTGRAY$";
+  doc = FileRead("B:/RelicNote.DD");
+  if (!doc || !StrMatch("$BG,BLACK$", doc))
+    FileWrite("B:/RelicNote.DD", init_str, StrLen(init_str));
+  if (doc)
+    Free(doc);
+  Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
 }
 
-U0 RelicDriveColorsRestore()
+U0 RelicGamesTaskMain()
 {
-  I64 i;
+  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
+    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+  if (FileFind("::/Home/RelicOS/GamesLauncher.HC"))
+    ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
+  ExePrint("RelicGamesLauncher;");
+}
 
-  if (relic_drive_colors_saved) {
-    for (i = 0; i < BDT_TYPES_NUM; i++)
-      blkdev_text_attr[i] = relic_old_blkdev_text_attr[i];
-    for (i = 0; i < 3; i++)
-      drv_text_attr[i] = relic_old_drv_text_attr[i];
+U0 RelicShellTaskMain()
+{
+  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
+    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
+  WinFocus;
+  RelicTermDark;
+  Fs->border_src = 0;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  Fs->draw_it = NULL;
+  DocTermNew;
+  DocClear;
+  DCFill;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  UserCmdLine;
+}
+
+U0 RelicLaunchShell()
+{
+  if (relic_child_task && TaskValidate(relic_child_task))
+    return;
+  relic_child_task = Spawn(&RelicShellTaskMain, NULL, "Relic Shell");
+  WinToTop(relic_child_task);
+}
+
+U0 RelicLaunchGames()
+{
+  if (!FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
+    PopUpOk("GamesLauncher.HC not found in ::/Home/RelicOS.");
+    return;
   }
+  if (relic_child_task && TaskValidate(relic_child_task))
+    return;
+  relic_child_task = Spawn(&RelicGamesTaskMain, NULL, "Relic Games");
+  WinToTop(relic_child_task);
 }
 
 // ---- Launch handler ----
@@ -228,82 +340,33 @@ U0 RelicDriveColorsRestore()
 // Pauses wallpaper, runs the app, then resumes.
 U0 LaunchApp(I64 idx)
 {
-  Fs->draw_it = NULL;
   winmgr.show_menu = FALSE;
-  RelicDocDark;
-  DocClear;
-  RelicDocDark;
 
-  switch (idx) {
-    case 0:  // Files
+  if (idx == 2) {
+    RelicLaunchShell;
+  } else if (idx == 3) {
+    RelicLaunchGames;
+  } else if (idx == 1) {
+    RelicAppStart;
+    RelicLaunchEditor;
+  } else {
+    RelicAppStart;
+    if (idx == 0) {
       "\n\n$FG,CYAN$=== Files ===$FG$\n\n";
       Dir;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
-      break;
-
-    case 1:  // Editor
-      // Edit in RAM drive (B:) to prevent Read-Only crashes on LiveCD
-      U8 *doc = FileRead("B:/RelicNote.DD");
-      if (!doc || !StrMatch("$BG,BLACK$", doc)) {
-        U8 *init_str = "$BG,BLACK$$FG,LTGRAY$";
-        FileWrite("B:/RelicNote.DD", init_str, StrLen(init_str));
-      }
-      if (doc) Free(doc);
-      Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
-      break;
-
-    case 2:  // Shell (interactive mini-shell)
-      "\n\n$FG,CYAN$=== Relic Shell ===$FG$\n";
-      "$FG,DKGRAY$Type HolyC commands. Type 'exit' to return to desktop.$FG$\n\n";
-      U8 *cmd;
-      while (TRUE) {
-        cmd = GetStr("relic> ");
-        if (!StrCmp(cmd, "exit")) {
-          Free(cmd);
-          break;
-        }
-        try {
-          ExePrint("%s;", cmd);
-        } catch {
-          "$FG,RED$Error running command.$FG$\n";
-        }
-        Free(cmd);
-      }
-      break;
-
-    case 3:  // Games
-      if (FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
-        try {
-          ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
-          ExePrint("RelicGamesLauncher;");
-        } catch {
-          "\n$FG,LTRED$Games launcher failed to compile/run.$FG$\n";
-          "$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-          GetChar;
-        }
-      } else {
-        "\n$FG,LTRED$GamesLauncher.HC not found in ::/Home/RelicOS.$FG$\n";
-        "$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-        GetChar;
-      }
-      break;
-
-    case 4:  // Tasks
+    } else if (idx == 4) {
       "\n\n$FG,CYAN$=== Task Report ===$FG$\n\n";
       TaskRep;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
-      break;
-
-    case 5:  // Memory
+    } else if (idx == 5) {
       "\n\n$FG,CYAN$=== Memory Report ===$FG$\n\n";
       MemRep;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
-      break;
-
-    case 6:  // System Info
+    } else if (idx == 6) {
       "\n\n$FG,CYAN$=== System Information ===$FG$\n\n";
       "$FG,LTGRAY$OS:        $FG,CYAN$RelicOS V1.0.0$FG$\n";
       "$FG,LTGRAY$Kernel:    $FG,CYAN$RelicOS V1.0.0$FG$\n";
@@ -317,10 +380,7 @@ U0 LaunchApp(I64 idx)
       RelicDriveColorsRestore;
       "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
       GetChar;
-      break;
-
-    case 7:  // Help - Terry Davis Tribute
-      DocClear;
+    } else if (idx == 7) {
       "\n\n$FG,CYAN$\n";
       "  =========================================\n";
       "   IN MEMORY OF TERRY A. DAVIS\n";
@@ -366,14 +426,9 @@ U0 LaunchApp(I64 idx)
       "$FG,DKGRAY$  Rest in peace, Terry. Your work lives on.\n\n";
       "$FG,DKGRAY$  Press any key to return to desktop...$FG$\n";
       GetChar;
-      break;
-
+    }
   }
 
-  DocClear;
-  RelicDesktopMode;
-  Fs->draw_it = &DrawDesktop;
-  winmgr.show_menu = FALSE;
 }
 
 // ---- Main loop (runs forever as default shell) ----
@@ -383,33 +438,56 @@ U0 RelicDesktop()
 
   SettingsPush;
   AutoComplete(OFF);
+  RelicChromeInstall;
   RelicDesktopMode;
   DocClear;
   Fs->draw_it = &DrawDesktop;
+  Fs->draw_it(Fs, gr.dc);
+  WinZBufUpdate;
 
   while (TRUE) {
     winmgr.show_menu = FALSE;
-    msg_code = GetMsg(&arg1, &arg2, 1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN);
+
+    if (relic_child_task && !TaskValidate(relic_child_task)) {
+      relic_child_task = NULL;
+      RelicDesktopRestore;
+    }
+
+    msg_code = GetMsg(&arg1, &arg2,
+          1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN | 1 << MSG_MS_MOVE);
     switch (msg_code) {
       case MSG_KEY_DOWN:
-        relic_pending_app = RelicKeyApp(arg1);
+        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
+          RelicChildKill;
+          RelicDesktopRestore;
+        } else if (!relic_child_task)
+          relic_pending_app = RelicKeyApp(arg1);
         break;
 
       case MSG_MS_L_DOWN:
-        relic_pending_app = RelicDockHit(arg1, arg2);
-        if (relic_pending_app < 0)
-          relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
-                ms.pos.y - relic_oy);
+        if (!relic_child_task) {
+          relic_pending_app = RelicDockHit(arg1, arg2);
+          if (relic_pending_app < 0)
+            relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
+                  ms.pos.y - relic_oy);
+        }
+        break;
+
+      case MSG_MS_MOVE:
+        if (Fs->draw_it)
+          Fs->draw_it(Fs, gr.dc);
         break;
     }
 
     if (relic_pending_app >= 0) {
       i = relic_pending_app;
       relic_pending_app = -1;
-      while (ms.lb)
-        Sleep(10);
       FlushMsgs;
       LaunchApp(i);
+      if (i == 2 || i == 3)
+        RelicDesktopRefresh;
+      else
+        RelicDesktopRestore;
     }
   }
 }

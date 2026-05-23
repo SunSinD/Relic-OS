@@ -38,8 +38,19 @@ U0 RelicThemeApply()
   pal[13].r=0xBBBB; pal[13].g=0x5000; pal[13].b=0xCCCC;
   // 14 YELLOW - warm amber
   pal[14].r=0xFFFF; pal[14].g=0xC800; pal[14].b=0x2800;
-  // 15 WHITE - dark gray, never real white
-  pal[15].r=0x2800; pal[15].g=0x2800; pal[15].b=0x2600;
+  // 15 WHITE - bright light gray for cursor
+  pal[15].r=0xD000; pal[15].g=0xD000; pal[15].b=0xD000;
 
   GrPaletteSet(pal);
+}
+
+// Safe during boot — no kernel drive-color symbols here.
+// Call again after DocTermNew / WinBorder(ON).
+U0 RelicTermDark()
+{
+  RelicThemeApply;
+  Fs->border_src = 0; // BDS_CONST
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  Fs->text_attr = BLACK << 4 | LTGRAY;
+  "$FD,LTGRAY$$BD,DKGRAY$$FG,LTGRAY$$BG,BLACK$";
 }
