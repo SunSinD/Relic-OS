@@ -266,8 +266,8 @@ Bool RelicKillRogueChildren()
 U0 (*relic_saved_draw_it)(CTask *, CDC *) = NULL;
 U0 (*relic_saved_fp_wall_paper)(CTask *) = NULL;
 
-// Prepare screen for DOOM — hide text plane and status bar overlay.
-// SinglePlayer.HC sets Fs->draw_it=&TOOMDrawIt (same ExeFile heap).
+// Prepare screen for DOOM — DrawDesktop blits RELIC_DOOM_SCRN (same heap as
+// DrawDesktop). SinglePlayer.HC publishes that frame ptr from ExeFile.
 U0 RelicDoomBegin()
 {
   if (!relic_doom_active) {
@@ -275,11 +275,12 @@ U0 RelicDoomBegin()
     relic_saved_fp_wall_paper = gr.fp_wall_paper;
   }
   gr.fp_wall_paper = NULL;
-  relic_doom_active = FALSE;
-  Fs->draw_it = NULL;
+  relic_doom_active = TRUE;
+  Fs->draw_it = &DrawDesktop;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocTermNew;
   DocClear;
   DCFill;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);

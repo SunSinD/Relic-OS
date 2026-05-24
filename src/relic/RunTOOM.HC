@@ -1,6 +1,6 @@
 // RunTOOM.HC - TOOM launch helpers.  Compiled into the desktop heap via
-// #include from GamesLauncher.HC.  RelicGameRunTOOM() wraps RunTOOM() with
-// RelicDoomBegin/RelicDoomEnd so draw_it always points at DrawDesktop.
+// #include from GamesLauncher.HC.  RelicTOOMChildMain() runs in a spawned
+// child task so the games-menu DolDoc cannot paint over DOOM.
 
 U0 RelicTOOMDarkWin()
 {
@@ -112,6 +112,15 @@ U0 RelicTOOMShowError(U8 *msg)
   } while (!ec);
 }
 
+U0 RelicTOOMChildMain()
+{
+  try {
+    RunTOOM;
+  } catch {
+    Fs->catch_except = TRUE;
+  }
+}
+
 U0 RunTOOM()
 {
   Bool old_silent;
@@ -152,6 +161,7 @@ U0 RunTOOM()
 
   Cd(dir);
   RelicTOOMDarkWin;
+  RelicGamesHideTextPlane;
   RelicTOOMUseIWAD(iwad);
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;

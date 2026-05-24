@@ -57,15 +57,60 @@ U0 RelicGamesChromeOff()
 }
 
 // Hide the DolDoc text plane so it cannot paint over game GrBlot output.
-// This was the fix in 23b66fd that made DOOM visible (pink = text layer bleed).
+// Pink/lavender fullscreen = LTPURPLE (index 13) DolDoc bleeding over graphics.
 U0 RelicGamesHideTextPlane()
 {
-  Fs->draw_it = NULL;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocTermNew;
   DocClear;
   DCFill;
+}
+
+// Run a demo game in a child task; hide this (parent) window so its DolDoc
+// cannot composite over the child. Parent polls Esc and kills the child.
+U0 RelicGameChildMain(U8 *filename)
+{
+  RelicGamesHideTextPlane;
+  gr.fp_wall_paper = NULL;
+  RelicGamesPaletteBright;
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  WinFocus;
+  try {
+    ExePrint("#include \"%s\";", filename);
+  } catch {
+    Fs->catch_except = TRUE;
+  }
+}
+
+U0 RelicGameSpawnWait(U0 (*entry)(), U8 *arg1, U8 *task_name)
+{
+  I64 ch, sc, mc;
+
+  RelicChildKill;
+  FlushMsgs;
+  LBtr(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  relic_child_task = Spawn(entry, arg1, task_name,, Fs);
+  if (TaskValidate(relic_child_task))
+    WinToTop(relic_child_task);
+  while (TaskValidate(relic_child_task)) {
+    mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
+    if (mc && (ch == CH_ESC || ch == CH_SHIFT_ESC)) {
+      Kill(relic_child_task, FALSE);
+      break;
+    }
+    Sleep(20);
+  }
+  relic_child_task = NULL;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  WinToTop(Fs);
+  WinFocus;
+  FlushMsgs;
 }
 
 U0 RelicGamesScreenClear()
@@ -84,12 +129,7 @@ U0 RelicGameRunTOOM()
   RelicGamesPaletteBright;
   RelicGamesHideTextPlane;
   gr.fp_wall_paper = NULL;
-  RelicDoomBegin;
-  try {
-    RunTOOM;
-  } catch {
-    Fs->catch_except = TRUE;
-  }
+  RelicGameSpawnWait(&RelicTOOMChildMain, NULL, "TOOM");
   RelicDoomEnd;
 }
 
@@ -109,14 +149,8 @@ U0 RelicGameFile(U8 *filename)
   RelicGamesChromeOff;
   RelicGamesPaletteBright;
   gr.fp_wall_paper = NULL;
-  RelicGamesHideTextPlane;
   FlushMsgs;
-  DocClear;
-  try {
-    ExePrint("#include \"%s\";", filename);
-  } catch {
-    Fs->catch_except = TRUE;
-  }
+  RelicGameSpawnWait(&RelicGameChildMain, filename, "RelicGame");
   RelicGameAfter;
 }
 
@@ -208,7 +242,7 @@ U0 RelicGamesDrawMenu(U8 *buf)
   "$FG,5$More Games$FG$\n";
   " 20. Strut            21. BigGuns          22. TheDead\n";
   " 23. DunGen           24. Models\n\n";
-  "$FG,DKGRAY$Type a number and press Enter. Esc returns.$FG$\n\n";
+  "$FG,DKGRAY$Type a number and press Enter. Esc returns (also during games).$FG$\n\n";
   "game> %s", buf;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
