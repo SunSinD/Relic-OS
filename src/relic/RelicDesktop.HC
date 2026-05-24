@@ -440,8 +440,21 @@ U0 RelicLaunchGames()
     GetChar;
     return;
   }
-  ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
-  ExePrint("RelicGamesLauncher;");
+  try {
+    ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
+    ExePrint("RelicGamesLauncher;");
+  } catch {
+    I64 ec, ea, eb;
+    "\n\n$FG,LTRED$Games launcher failed to load.$FG$\n\n";
+    PutExcept;
+    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
+    LBts(&Fs->display_flags, DISPLAYf_SHOW);
+    WinZBufUpdate;
+    do {
+      ec = ScanMsg(&ea, &eb, 1 << MSG_KEY_DOWN);
+      if (!ec) Sleep(15);
+    } while (!ec);
+  }
 }
 
 U0 LaunchApp(I64 idx)

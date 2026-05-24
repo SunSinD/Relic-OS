@@ -5,6 +5,12 @@
 // etc.) that rely on stock TempleOS colors are actually visible
 // instead of rendering BLUE on a black background.
 
+extern CTask *relic_child_task;
+extern Bool RelicKillRogueChildren();
+extern U0 RelicTermDark();
+extern U0 RelicThemeApply();
+extern Bool relic_status_show_keys;
+
 CBGR48 relic_bright_pal[COLORS_NUM] = {
   0x000000000000, // BLACK
   0x00000000A800, // BLUE
@@ -143,7 +149,6 @@ U0 RelicGameFile(U8 *filename)
   }
 
   relic_child_task = child;
-  WinToBot(Fs);
   WinToTop(child);
   WinFocus;
   DocClear;
