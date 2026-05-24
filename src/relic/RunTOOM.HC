@@ -1,6 +1,5 @@
 // RunTOOM.HC - TOOM launch helpers.  Compiled into the desktop heap via
-// #include from GamesLauncher.HC.  RelicTOOMChildMain() runs in a spawned
-// child task so the games-menu DolDoc cannot paint over DOOM.
+// #include from GamesLauncher.HC.  Launched inline with RelicDoomBegin/End.
 
 U0 RelicTOOMDarkWin()
 {
@@ -114,10 +113,10 @@ U0 RelicTOOMShowError(U8 *msg)
 
 U0 RelicTOOMHideTextPlane()
 {
+  Fs->draw_it = NULL;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-  DocTermNew;
   DocClear;
   DCFill;
 }
@@ -198,12 +197,3 @@ U0 RunTOOM()
   FlushMsgs;
 }
 
-// Must be AFTER RunTOOM() — HolyC does not allow forward calls to U0 functions.
-U0 RelicTOOMChildMain()
-{
-  try {
-    RunTOOM;
-  } catch {
-    Fs->catch_except = TRUE;
-  }
-}

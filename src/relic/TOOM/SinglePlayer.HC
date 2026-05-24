@@ -19,7 +19,8 @@ FlushMsgs;
 U64 r;
 CDC *title=GetGrLump("TITLEPIC");
 TOOMChromeOff;
-Fs->draw_it=&TOOMDrawIt;
+// Relic OS: RelicDoomBegin sets draw_it=&DrawDesktop (desktop heap).
+// Do not assign TOOMDrawIt here — ExeFile heap draw_it can fail over DolDoc.
 DocClear;
 while(TRUE) {
   winmgr.show_menu=FALSE;

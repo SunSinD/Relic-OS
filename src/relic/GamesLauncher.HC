@@ -60,10 +60,10 @@ U0 RelicGamesChromeOff()
 // Pink/lavender fullscreen = LTPURPLE (index 13) DolDoc bleeding over graphics.
 U0 RelicGamesHideTextPlane()
 {
+  Fs->draw_it = NULL;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-  DocTermNew;
   DocClear;
   DCFill;
 }
@@ -72,12 +72,16 @@ U0 RelicGamesHideTextPlane()
 // cannot composite over the child. Parent polls Esc and kills the child.
 U0 RelicGameChildMain(U8 *filename)
 {
-  RelicGamesHideTextPlane;
-  gr.fp_wall_paper = NULL;
-  RelicGamesPaletteBright;
+  AutoComplete(OFF);
   WinBorder(OFF);
   WinMax;
   winmgr.show_menu = FALSE;
+  Fs->draw_it = NULL;
+  gr.fp_wall_paper = NULL;
+  RelicGamesPaletteBright;
+  RelicGamesHideTextPlane;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
   WinFocus;
   try {
     ExePrint("#include \"%s\";", filename);
@@ -95,8 +99,10 @@ U0 RelicGameSpawnWait(U0 (*entry)(), U8 *arg1, U8 *task_name)
   LBtr(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   relic_child_task = Spawn(entry, arg1, task_name,, Fs);
-  if (TaskValidate(relic_child_task))
+  if (TaskValidate(relic_child_task)) {
+    LBts(&relic_child_task->display_flags, DISPLAYf_SHOW);
     WinToTop(relic_child_task);
+  }
   while (TaskValidate(relic_child_task)) {
     mc = ScanMsg(&ch, &sc, 1 << MSG_KEY_DOWN);
     if (mc && (ch == CH_ESC || ch == CH_SHIFT_ESC)) {
@@ -129,7 +135,12 @@ U0 RelicGameRunTOOM()
   RelicGamesPaletteBright;
   RelicGamesHideTextPlane;
   gr.fp_wall_paper = NULL;
-  RelicGameSpawnWait(&RelicTOOMChildMain, NULL, "TOOM");
+  RelicDoomBegin;
+  try {
+    RunTOOM;
+  } catch {
+    Fs->catch_except = TRUE;
+  }
   RelicDoomEnd;
 }
 

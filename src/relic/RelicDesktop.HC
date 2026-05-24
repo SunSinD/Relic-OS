@@ -280,7 +280,6 @@ U0 RelicDoomBegin()
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-  DocTermNew;
   DocClear;
   DCFill;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
