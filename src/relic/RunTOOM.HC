@@ -1,21 +1,29 @@
 // RunTOOM.HC — launch TOOM (DOOM) from the Relic desktop.
 //
-// DESIGN: ExeFile("SinglePlayer.HC") with NO flags runs inline in the
-// current task.  This is the same design as commit 23b66fd (the version
-// that actually launched DOOM).
+// DESIGN NOTES:
 //
-// Why no CCF_JUST_LOAD?  With CCF_JUST_LOAD TempleOS compiles the code
-// but does NOT execute it, so:
-//   - doom_scrn = DCNew(...)  never runs   -> doom_scrn is NULL
-//   - ModMan.HC WAD load code never runs  -> WAD is not loaded
-// TOOMStart then faults on doom_scrn==NULL and the child dies silently.
+// ExeFile("SinglePlayer.HC") WITHOUT CCF_JUST_LOAD:
+//   - Compiles the file.
+//   - Executes all TOP-LEVEL statements (global initializers):
+//       doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)   <- in MainDrawer.HC
+//       ModMan.HC reads USE_IWAD and calls LoadWad(iwad)
+//   - Function DEFINITIONS (U0 TOOMStart() {...}) are compiled into the
+//     task's code heap but are NOT called automatically.
+//   - The compiled code stays in the task's code heap after ExeFile returns.
 //
-// Why no child task?  ExeFile (no flags) compiles + executes the file AND
-// then frees the compiled code heap when it returns.  Any subsequent
-// ExePrint("TOOMStopTasks;") fails because the code is gone.  TOOMStart
-// already calls TOOMStopTasks internally, so we just need ExeFile to
-// run it as the "last function" — which is exactly what ExeFile does when
-// no CCF_JUST_LOAD flag is passed.
+// After ExeFile we call ExePrint("TOOMStart;") explicitly.  TOOMStart
+// finds doom_scrn and all WAD data already initialised, runs the game,
+// and when the user quits calls TOOMStopTasks internally before returning.
+//
+// CCF_JUST_LOAD is intentionally NOT used: it skips global initializers,
+// leaving doom_scrn==NULL and the WAD unloaded, causing a silent fault.
+//
+// FRAME-POINTER HYGIENE:
+// LoadWad (inside ModMan.HC) calls FramePtrAdd("USE_IWAD",...) every time
+// it runs.  RelicTOOMUseIWAD uses FramePtrDel which only removes the FIRST
+// entry.  If we don't drain all copies before each launch the second attempt
+// picks up a stale pointer and throws 'NoIWAD' silently.  We drain all
+// copies with while-loops before every launch.
 
 U0 RelicTOOMDarkWin()
 {
@@ -71,9 +79,13 @@ U8 *RelicTOOMFindIWAD()
 
 U0 RelicTOOMUseIWAD(U8 *iwad)
 {
-  FramePtrDel("USE_IWAD");
-  FramePtrDel("USE_PWAD");
-  FramePtrDel("USE_WAD");
+  // Drain ALL accumulated copies — LoadWad adds one per run,
+  // FramePtrDel only removes the first, so we loop until gone.
+  while (FramePtr("USE_IWAD")) FramePtrDel("USE_IWAD");
+  while (FramePtr("USE_PWAD")) FramePtrDel("USE_PWAD");
+  while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
+  while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
+  while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
   if (iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
@@ -145,30 +157,31 @@ U0 RunTOOM()
   DCFill;
   RelicTOOMUseIWAD(iwad);
 
-  // ExeFile WITHOUT CCF_JUST_LOAD:
-  //   1. Compiles SinglePlayer.HC (includes MainDrawer.HC, Wad.HC, …)
-  //   2. Executes all global initializers inline:
-  //        doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)
-  //        ModMan.HC reads USE_IWAD and calls LoadWad(iwad)
-  //   3. Calls TOOMStart as the last compiled function.
-  //   4. TOOMStart runs the main menu + gameplay loop.
-  //   5. When user presses Quit Game, TOOMStart calls TOOMStopTasks
-  //      and returns.  ExeFile then returns here.
   try {
     FlushMsgs;
     RelicTOOMDarkWin;
     Silent(TRUE);
+
+    // Step 1: compile SinglePlayer.HC.  This runs all top-level
+    // initializers: doom_scrn = DCNew(...), LoadWad(iwad) in ModMan.HC.
+    // TOOMStart is compiled into the task's code heap but NOT called yet.
     if (FileFind("SinglePlayer.HC"))
       ExeFile("SinglePlayer.HC");
     else
       ExeFile("SinglePlayer.HC.Z");
+
+    // Step 2: explicitly call TOOMStart.  The compiled code is still in the
+    // task's code heap, doom_scrn is valid, WAD is loaded.
+    // TOOMStart runs the main menu + gameplay loop and calls TOOMStopTasks
+    // internally before it returns.
+    ExePrint("TOOMStart;");
+
     Silent(old_silent);
   } catch {
     Silent(old_silent);
-    // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler.
-    // If it is present the user quit cleanly — no error needed.
+    // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler when the
+    // user selects Quit Game from the menu — clean exit, no error.
     if (FramePtr("RELIC_TOOM_QUIT")) {
-      FramePtrDel("RELIC_TOOM_QUIT");
       FlushMsgs;
     } else {
       RelicTOOMShowError(
