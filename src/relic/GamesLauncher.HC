@@ -65,11 +65,17 @@ U0 RelicGamesScreenClear()
   "\n\n";
 }
 
+#include "::/Home/RelicOS/RunTOOM.HC"
+
 U0 RelicGameRunTOOM()
 {
-  if (FileFind("::/Home/RelicOS/RunTOOM.HC"))
-    ExeFile("::/Home/RelicOS/RunTOOM.HC", CCF_JUST_LOAD);
-  ExePrint("RunTOOM;");
+  RelicDoomBegin;
+  try {
+    RunTOOM;
+  } catch {
+    Fs->catch_except = TRUE;
+  }
+  RelicDoomEnd;
 }
 
 U0 RelicGameAfter()

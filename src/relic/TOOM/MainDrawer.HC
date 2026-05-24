@@ -3966,6 +3966,7 @@ end_control:;
     if(!paused||IsNetworkGameClient) {
       UpdateLevel(l);
     }
+    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }

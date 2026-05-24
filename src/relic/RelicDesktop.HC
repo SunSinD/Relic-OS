@@ -98,6 +98,8 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   // DOOM mode — blit the live game framebuffer and skip ALL desktop chrome.
   if (relic_doom_active) {
     CDC *scrn = FramePtr("RELIC_DOOM_SCRN", task);
+    if (!scrn)
+      scrn = FramePtr("RELIC_DOOM_SCRN");
     if (scrn)
       GrBlot(dc, 0, 0, scrn);
     else {
@@ -260,13 +262,12 @@ Bool RelicKillRogueChildren()
   return killed;
 }
 
-// Saved compositor state while DOOM runs inline (RunTOOM calls via ExePrint).
+// Saved compositor state while DOOM runs inline.
 U0 (*relic_saved_draw_it)(CTask *, CDC *) = NULL;
 U0 (*relic_saved_fp_wall_paper)(CTask *) = NULL;
 
-// Must be called from the RelicDesktop heap — sets draw_it to the REAL
-// &DrawDesktop pointer.  RunTOOM must NOT assign draw_it itself because
-// cross-heap function pointers cause WinMgr UndefinedExtern crashes.
+// Called directly from GamesLauncher (same heap).  Must NOT be invoked
+// via ExePrint from RunTOOM.HC — that leaves draw_it NULL and DOOM pink.
 U0 RelicDoomBegin()
 {
   if (!relic_doom_active) {
@@ -276,7 +277,13 @@ U0 RelicDoomBegin()
   gr.fp_wall_paper = NULL;
   relic_doom_active = TRUE;
   Fs->draw_it = &DrawDesktop;
+  WinBorder(OFF);
+  WinMax;
+  WinFocus;
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
   DocClear;
+  DCFill;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
   FlushMsgs;

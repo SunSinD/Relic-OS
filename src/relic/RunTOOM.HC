@@ -1,9 +1,6 @@
-// RunTOOM.HC - launch TOOM (DOOM) from the Relic desktop.
-//
-// DOOM runs INLINE in the desktop/games task.  Compositor takeover is done
-// via RelicDoomBegin/RelicDoomEnd in RelicDesktop.HC (ExePrint) so
-// Fs->draw_it points at the REAL &DrawDesktop in the desktop heap.
-// Assigning &DrawDesktop from this file crashes WinMgr (UndefinedExtern).
+// RunTOOM.HC - TOOM launch helpers.  Compiled into the desktop heap via
+// #include from GamesLauncher.HC.  RelicGameRunTOOM() wraps RunTOOM() with
+// RelicDoomBegin/RelicDoomEnd so draw_it always points at DrawDesktop.
 
 U0 RelicTOOMDarkWin()
 {
@@ -94,7 +91,6 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
-  ExePrint("RelicDoomEnd;");
   Fs->draw_it = NULL;
   WinBorder(OFF);
   WinMax;
@@ -157,7 +153,6 @@ U0 RunTOOM()
   Cd(dir);
   RelicTOOMDarkWin;
   RelicTOOMUseIWAD(iwad);
-  ExePrint("RelicDoomBegin;");
 
   try {
     FlushMsgs;
@@ -171,7 +166,6 @@ U0 RunTOOM()
     Silent(old_silent);
     GrPaletteSet(saved_pal);
     if (FramePtr("RELIC_TOOM_QUIT")) {
-      ExePrint("RelicDoomEnd;");
       FlushMsgs;
     } else {
       RelicTOOMShowError(
@@ -180,11 +174,9 @@ U0 RunTOOM()
     }
   }
 
-  ExePrint("RelicDoomEnd;");
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
   RelicTermDark;
-  Fs->draw_it = NULL;
   DocClear;
   DCFill;
   FlushMsgs;
