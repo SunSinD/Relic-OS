@@ -112,13 +112,14 @@ U0 RelicTOOMShowError(U8 *msg)
   } while (!ec);
 }
 
-U0 RelicTOOMChildMain()
+U0 RelicTOOMHideTextPlane()
 {
-  try {
-    RunTOOM;
-  } catch {
-    Fs->catch_except = TRUE;
-  }
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocTermNew;
+  DocClear;
+  DCFill;
 }
 
 U0 RunTOOM()
@@ -161,7 +162,7 @@ U0 RunTOOM()
 
   Cd(dir);
   RelicTOOMDarkWin;
-  RelicGamesHideTextPlane;
+  RelicTOOMHideTextPlane;
   RelicTOOMUseIWAD(iwad);
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
@@ -192,8 +193,17 @@ U0 RunTOOM()
 
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
-  RelicTermDark;
   DocClear;
   DCFill;
   FlushMsgs;
+}
+
+// Must be AFTER RunTOOM() — HolyC does not allow forward calls to U0 functions.
+U0 RelicTOOMChildMain()
+{
+  try {
+    RunTOOM;
+  } catch {
+    Fs->catch_except = TRUE;
+  }
 }
