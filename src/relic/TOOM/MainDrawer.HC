@@ -17,9 +17,8 @@ CTask *doom_task=Fs;
 
 // Publish doom_scrn so the Relic desktop's DrawDesktop (in a different
 // code heap) can render it during DOOM mode.  See comment on
-// relic_doom_active in RelicDesktop.HC.  Drain any stale entry first so
-// repeated launches don't accumulate copies.
-while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
+// relic_doom_active in RelicDesktop.HC.  RelicTOOMUseIWAD drains any
+// stale entry before each launch, so we only need to add a fresh one.
 FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn);
 
 U0 TOOMChromeOff()

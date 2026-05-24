@@ -96,6 +96,13 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
+  // Force doc rendering so the error text is visible.  If draw_it is
+  // pointing at DrawDesktop (or anything else), the compositor would
+  // render that instead of the doc and the error would be invisible.
+  Fs->draw_it = NULL;
+  WinBorder(OFF);
+  WinMax;
+  WinFocus;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
@@ -188,7 +195,8 @@ U0 RunTOOM()
     Silent(TRUE);
 
     // Step 1: compile SinglePlayer.HC.  This runs all top-level
-    // initializers: doom_scrn = DCNew(...), LoadWad(iwad) in ModMan.HC.
+    // initializers: doom_scrn = DCNew(...), LoadWad(iwad) in ModMan.HC,
+    // and FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn) in MainDrawer.HC.
     // TOOMStart is compiled into the task's code heap but NOT called yet.
     if (FileFind("SinglePlayer.HC"))
       ExeFile("SinglePlayer.HC");
@@ -204,6 +212,13 @@ U0 RunTOOM()
     Silent(old_silent);
   } catch {
     Silent(old_silent);
+    // Deactivate DOOM mode BEFORE showing any error message, otherwise
+    // DrawDesktop will keep rendering doom_scrn (or fallback black) and
+    // hide the error.  Also restore the palette so the error renders
+    // with the correct Relic colours.
+    relic_doom_active = FALSE;
+    gr.fp_wall_paper = old_wall_paper;
+    GrPaletteSet(relic_pal);
     // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler when the
     // user selects Quit Game from the menu — clean exit, no error.
     if (FramePtr("RELIC_TOOM_QUIT")) {
@@ -216,7 +231,7 @@ U0 RunTOOM()
   }
 
   // Deactivate DOOM compositor suppression so DrawDesktop draws normally
-  // again.
+  // again.  (No-op if catch already did it.)
   relic_doom_active = FALSE;
 
   // Restore the kernel status-bar wallpaper callback.
