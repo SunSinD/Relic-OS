@@ -432,20 +432,18 @@ U0 RelicLaunchShell()
   }
 }
 
+// Compile games launcher into the SAME heap as the desktop so internal
+// calls (RelicGamesChromeOff, etc.) never hit UndefinedExtern across
+// ExeFile/CCF_JUST_LOAD boundaries.
+#include "::/Home/RelicOS/GamesLauncher.HC"
+
 U0 RelicLaunchGames()
 {
-  if (!FileFind("::/Home/RelicOS/GamesLauncher.HC")) {
-    "\n$FG,LTRED$GamesLauncher.HC not found in ::/Home/RelicOS.$FG$\n";
-    "$FG,DKGRAY$Press any key to return...$FG$\n";
-    GetChar;
-    return;
-  }
   try {
-    ExeFile("::/Home/RelicOS/GamesLauncher.HC", CCF_JUST_LOAD);
-    ExePrint("RelicGamesLauncher;");
+    RelicGamesLauncher;
   } catch {
     I64 ec, ea, eb;
-    "\n\n$FG,LTRED$Games launcher failed to load.$FG$\n\n";
+    "\n\n$FG,LTRED$Games launcher failed.$FG$\n\n";
     PutExcept;
     "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
     LBts(&Fs->display_flags, DISPLAYf_SHOW);

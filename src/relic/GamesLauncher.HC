@@ -1,15 +1,5 @@
-// GamesLauncher.HC — runs inline in the desktop task (no child Spawn).
-//
-// Saves the Relic dark palette before running an inline game and
-// restores a bright vanilla-style palette so games (FlapBat, Varoom,
-// etc.) that rely on stock TempleOS colors are actually visible
-// instead of rendering BLUE on a black background.
-
-extern CTask *relic_child_task;
-extern Bool RelicKillRogueChildren();
-extern U0 RelicTermDark();
-extern U0 RelicThemeApply();
-extern Bool relic_status_show_keys;
+// GamesLauncher.HC — compiled into RelicDesktop.HC via #include.
+// Must live in the desktop heap; do NOT ExeFile/CCF_JUST_LOAD this file.
 
 CBGR48 relic_bright_pal[COLORS_NUM] = {
   0x000000000000, // BLACK
