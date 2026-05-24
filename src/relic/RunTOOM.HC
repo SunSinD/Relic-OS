@@ -148,6 +148,16 @@ U0 RunTOOM()
   }
 
   GrPaletteGet(relic_pal);
+  // DitherPalette() in DoomGr.HC calls GrPaletteGet at runtime to map DOOM's
+  // 256 colours to the nearest TempleOS 16-colour entry.  With the Relic dark
+  // palette active every DOOM pixel maps to YELLOW (the only bright, visible
+  // colour left in the dark palette) — producing the solid-yellow screen.
+  // Switch to the stock TempleOS palette NOW so DitherPalette sees the correct
+  // 16 colours.  relic_pal already holds the dark palette and is restored after
+  // DOOM exits.  relic_bright_pal is compiled by GamesLauncher.HC and is in the
+  // task's symbol table when this code runs.
+  GrPaletteSet(relic_bright_pal);
+
   old_silent = Silent;
 
   Cd(dir);
