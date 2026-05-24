@@ -265,7 +265,6 @@ U0 Finale(CDC *dc,I64 ep) {
     if(paused)
       if(!MainMenu)
         Unpause;
-    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }
@@ -314,7 +313,6 @@ Bool BunnyScroll(CDC *dc) {
     lump=GetGrLump(buf);
     GrBlot(dc,(GR_WIDTH-13*8*2)/2-lump->x*2,(GR_HEIGHT-8*8*2)/2-lump->y*2,lump);
 skip:;
-    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }

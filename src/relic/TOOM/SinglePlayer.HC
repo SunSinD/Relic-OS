@@ -18,8 +18,7 @@ U0 TOOMStart() {
       MsSet(ms.pos.x,GR_HEIGHT/2);
     TallBlot(doom_scrn,0,0,GR_HEIGHT,title);
     r=MainMenu;
-    GrBlot(,0,0,doom_scrn);
-    Refresh; 
+    Refresh;
     if(!r || gameExit) {
        gameExit=TRUE;
        DocClear;

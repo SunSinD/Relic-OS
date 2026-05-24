@@ -14,6 +14,17 @@ CDC *doom_scrn=DCNew(GR_WIDTH,GR_HEIGHT);
 doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
+
+// Compositor callback: called by Refresh/WinZBufUpdate for every redraw.
+// Blits the current doom_scrn into the task's window pixel buffer (dc).
+// Using draw_it ensures DOOM renders through the normal TempleOS window
+// compositing path instead of writing to gr.dc directly (which gets
+// overwritten by other tasks' windows during compositing).
+U0 TOOMDrawIt(CTask *task, CDC *dc) {
+  if (doom_scrn)
+    GrBlot(dc, 0, 0, doom_scrn);
+}
+
 U0 TOOMChromeOff()
 {
   WinBorder(OFF);
@@ -23,6 +34,7 @@ U0 TOOMChromeOff()
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
   WinFocus;
+  Fs->draw_it = &TOOMDrawIt;
 }
 
 I64 FrameCnt(CDC **arr) {
@@ -3959,7 +3971,6 @@ end_control:;
     if(!paused||IsNetworkGameClient) {
       UpdateLevel(l);
     }
-    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }

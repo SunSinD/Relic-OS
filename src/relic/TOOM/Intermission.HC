@@ -348,7 +348,6 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
       FlushMsgs;
       state++;
     }
-    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }

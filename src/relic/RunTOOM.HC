@@ -200,6 +200,10 @@ U0 RunTOOM()
     }
   }
 
+  // Reset draw_it first so the Relic compositor doesn't keep calling
+  // TOOMDrawIt (which references doom_scrn that will be freed shortly).
+  Fs->draw_it = NULL;
+
   // Restore Relic palette + chrome whether DOOM exited cleanly or not.
   GrPaletteSet(relic_pal);
   RelicTOOMRestoreChrome;
