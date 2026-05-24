@@ -17,16 +17,6 @@ I64 relic_w = 640, relic_h = 480;
 I64 relic_pending_app = -1;
 CTask *relic_child_task = NULL;
 
-// DOOM compositor takeover.  Set TRUE by RunTOOM before TOOMStart runs.
-// When TRUE, DrawDesktop reads doom_scrn from the frame-pointer system
-// (added by MainDrawer.HC's top-level code as RELIC_DOOM_SCRN) and blits
-// it into dc, replacing ALL desktop chrome.  Frame pointers are used
-// instead of a direct global because doom_scrn is created by code that
-// runs inside ExeFile — a separate code/data heap from the desktop's
-// persistent one — and frame pointers are the standard kernel-supported
-// way to share named values across that boundary.
-Bool relic_doom_active = FALSE;
-
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
   LTBLUE, LTBLUE, YELLOW,
@@ -99,21 +89,6 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   relic_h = h;
   relic_ox = task->pix_left;
   relic_oy = task->pix_top;
-
-  // DOOM compositor takeover — blit doom_scrn into the window dc so the
-  // compositor copies DOOM to gr.dc on every refresh and never overdraws
-  // it with desktop chrome.  doom_scrn is published by MainDrawer.HC as
-  // the frame pointer RELIC_DOOM_SCRN on the same task (the desktop).
-  if (relic_doom_active) {
-    CDC *scrn = FramePtr("RELIC_DOOM_SCRN", task);
-    if (scrn) {
-      GrBlot(dc, 0, 0, scrn);
-    } else {
-      dc->color = BLACK;
-      GrRect(dc, 0, 0, dc->width, dc->height);
-    }
-    return;
-  }
 
   // Top strip (always black, status drawn on top)
   dc->color = BLACK;

@@ -2,28 +2,27 @@
 //
 // DESIGN NOTES:
 //
-// ExeFile("SinglePlayer.HC") WITHOUT CCF_JUST_LOAD:
-//   - Compiles the file.
-//   - Executes all TOP-LEVEL statements (global initializers):
-//       doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)   <- in MainDrawer.HC
-//       ModMan.HC reads USE_IWAD and calls LoadWad(iwad)
-//   - Function DEFINITIONS (U0 TOOMStart() {...}) are compiled into the
-//     task's code heap but are NOT called automatically.
-//   - The compiled code stays in the task's code heap after ExeFile returns.
+// SinglePlayer.HC's game loop is TOP-LEVEL code, not wrapped in a
+// function.  ExeFile("SinglePlayer.HC") without CCF_JUST_LOAD does
+// everything we need in one call:
+//   1. Compiles the file (defines doom_scrn, MainMenu, TallBlot, ...).
+//   2. Executes all top-level statements:
+//        - doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)        (MainDrawer.HC)
+//        - LoadWad(iwad) via ModMan.HC reads USE_IWAD     (Wad.HC)
+//        - The main while-loop in SinglePlayer.HC (game)
+//   3. Returns when the user picks Quit Game (gameExit=TRUE breaks the loop).
 //
-// After ExeFile we call ExePrint("TOOMStart;") explicitly.  TOOMStart
-// finds doom_scrn and all WAD data already initialised, runs the game,
-// and when the user quits calls TOOMStopTasks internally before returning.
+// CCF_JUST_LOAD must NOT be used: it skips top-level execution, leaving
+// doom_scrn=NULL, the WAD unloaded, and the game loop never starting.
 //
-// CCF_JUST_LOAD is intentionally NOT used: it skips global initializers,
-// leaving doom_scrn==NULL and the WAD unloaded, causing a silent fault.
+// We do NOT need ExePrint("TOOMStart;") — there is no TOOMStart function;
+// the loop is at top level so ExeFile runs it inline.
 //
 // FRAME-POINTER HYGIENE:
 // LoadWad (inside ModMan.HC) calls FramePtrAdd("USE_IWAD",...) every time
 // it runs.  RelicTOOMUseIWAD uses FramePtrDel which only removes the FIRST
-// entry.  If we don't drain all copies before each launch the second attempt
-// picks up a stale pointer and throws 'NoIWAD' silently.  We drain all
-// copies with while-loops before every launch.
+// entry.  We drain all copies with while-loops before every launch so
+// repeated launches always see a clean frame-pointer state.
 
 U0 RelicTOOMDarkWin()
 {
@@ -86,7 +85,6 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
   while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
   while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
   while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
-  while (FramePtr("RELIC_DOOM_SCRN"))  FramePtrDel("RELIC_DOOM_SCRN");
   if (iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
@@ -127,7 +125,6 @@ U0 RunTOOM()
   Bool old_silent;
   CBGR48 relic_pal[COLORS_NUM];
   U8 *dir, *iwad;
-  U0 (*old_wall_paper)(CTask *);
 
   dir  = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
@@ -176,48 +173,24 @@ U0 RunTOOM()
   DCFill;
   RelicTOOMUseIWAD(iwad);
 
-  // Activate DOOM compositor suppression BEFORE ExeFile.  When TRUE,
-  // DrawDesktop returns immediately and does NOT touch the framebuffer.
-  // DOOM owns every pixel and writes doom_scrn directly to gr.dc via
-  // GrBlot(,0,0,doom_scrn) in its render loop.  This is DOOM's original
-  // design — we just suppress the desktop chrome instead of trying to
-  // re-point draw_it across the ExeFile heap boundary.
-  relic_doom_active = TRUE;
-
-  // Suppress the kernel status-bar wallpaper callback so DOOM owns every
-  // pixel.  Saved so we can restore it when DOOM exits.
-  old_wall_paper = gr.fp_wall_paper;
-  gr.fp_wall_paper = NULL;
-
   try {
     FlushMsgs;
     RelicTOOMDarkWin;
     Silent(TRUE);
 
-    // Step 1: compile SinglePlayer.HC.  This runs all top-level
-    // initializers: doom_scrn = DCNew(...), LoadWad(iwad) in ModMan.HC,
-    // and FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn) in MainDrawer.HC.
-    // TOOMStart is compiled into the task's code heap but NOT called yet.
+    // Compile + run SinglePlayer.HC.  The file's top-level game loop
+    // executes inline, owns the screen, and returns when the user picks
+    // Quit Game.  See the design comment at the top of this file.
     if (FileFind("SinglePlayer.HC"))
       ExeFile("SinglePlayer.HC");
     else
       ExeFile("SinglePlayer.HC.Z");
 
-    // Step 2: explicitly call TOOMStart.  The compiled code is still in the
-    // task's code heap, doom_scrn is valid, WAD is loaded.
-    // TOOMStart runs the main menu + gameplay loop and calls TOOMStopTasks
-    // internally before it returns.
-    ExePrint("TOOMStart;");
-
     Silent(old_silent);
   } catch {
     Silent(old_silent);
-    // Deactivate DOOM mode BEFORE showing any error message, otherwise
-    // DrawDesktop will keep rendering doom_scrn (or fallback black) and
-    // hide the error.  Also restore the palette so the error renders
-    // with the correct Relic colours.
-    relic_doom_active = FALSE;
-    gr.fp_wall_paper = old_wall_paper;
+    // Restore the palette first so the error message renders with the
+    // correct Relic colours instead of DOOM's bright palette.
     GrPaletteSet(relic_pal);
     // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler when the
     // user selects Quit Game from the menu — clean exit, no error.
@@ -229,13 +202,6 @@ U0 RunTOOM()
         "Make sure doom1.wad (or freedoom1.wad) is a valid WAD file.");
     }
   }
-
-  // Deactivate DOOM compositor suppression so DrawDesktop draws normally
-  // again.  (No-op if catch already did it.)
-  relic_doom_active = FALSE;
-
-  // Restore the kernel status-bar wallpaper callback.
-  gr.fp_wall_paper = old_wall_paper;
 
   // Restore Relic palette + chrome whether DOOM exited cleanly or not.
   GrPaletteSet(relic_pal);

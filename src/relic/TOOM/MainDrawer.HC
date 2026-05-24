@@ -14,13 +14,6 @@ CDC *doom_scrn=DCNew(GR_WIDTH,GR_HEIGHT);
 doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
-
-// Publish doom_scrn so the Relic desktop's DrawDesktop (in a different
-// code heap) can render it during DOOM mode.  See comment on
-// relic_doom_active in RelicDesktop.HC.  RelicTOOMUseIWAD drains any
-// stale entry before each launch, so we only need to add a fresh one.
-FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn);
-
 U0 TOOMChromeOff()
 {
   WinBorder(OFF);
