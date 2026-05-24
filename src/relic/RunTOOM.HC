@@ -36,6 +36,33 @@ U0 RelicTOOMRestoreChrome()
   ExePrint("RelicChromeInstall;");
 }
 
+// Set a known-good TempleOS-style 16-color palette using explicit
+// channel assignment (r/g/b).  This avoids packed-literal ambiguity and
+// gives DoomGr.HC's DitherPalette a stable target.
+U0 RelicTOOMPaletteVanilla()
+{
+  CBGR48 pal[COLORS_NUM];
+
+  pal[BLACK].r=0x0000; pal[BLACK].g=0x0000; pal[BLACK].b=0x0000;
+  pal[BLUE].r=0x0000;  pal[BLUE].g=0x0000;  pal[BLUE].b=0xA800;
+  pal[GREEN].r=0x0000; pal[GREEN].g=0xA800; pal[GREEN].b=0x0000;
+  pal[CYAN].r=0x0000;  pal[CYAN].g=0xA800;  pal[CYAN].b=0xA800;
+  pal[RED].r=0xA800;   pal[RED].g=0x0000;   pal[RED].b=0x0000;
+  pal[PURPLE].r=0xA800;pal[PURPLE].g=0x0000;pal[PURPLE].b=0xA800;
+  pal[BROWN].r=0xA800; pal[BROWN].g=0x5400; pal[BROWN].b=0x0000;
+  pal[LTGRAY].r=0xA800;pal[LTGRAY].g=0xA800;pal[LTGRAY].b=0xA800;
+  pal[DKGRAY].r=0x5400;pal[DKGRAY].g=0x5400;pal[DKGRAY].b=0x5400;
+  pal[LTBLUE].r=0x5400;pal[LTBLUE].g=0x5400;pal[LTBLUE].b=0xFCFC;
+  pal[LTGREEN].r=0x5400;pal[LTGREEN].g=0xFCFC;pal[LTGREEN].b=0x5400;
+  pal[LTCYAN].r=0x5400;pal[LTCYAN].g=0xFCFC;pal[LTCYAN].b=0xFCFC;
+  pal[LTRED].r=0xFCFC; pal[LTRED].g=0x5400; pal[LTRED].b=0x5400;
+  pal[LTPURPLE].r=0xFCFC; pal[LTPURPLE].g=0x5400; pal[LTPURPLE].b=0xFCFC;
+  pal[YELLOW].r=0xFCFC; pal[YELLOW].g=0xFCFC; pal[YELLOW].b=0x5400;
+  pal[WHITE].r=0xFCFC; pal[WHITE].g=0xFCFC; pal[WHITE].b=0xFCFC;
+
+  GrPaletteSet(pal);
+}
+
 // Return the TOOM source dir, or NULL if not installed.
 U8 *RelicTOOMFindDir()
 {
@@ -131,6 +158,7 @@ U0 RelicTOOMChildMain(U8 *data)
   Cd(dir);
   old_silent = Silent;
   Silent(TRUE);
+  RelicTOOMPaletteVanilla;
 
   try {
     if (FileFind("SinglePlayer.HC"))
@@ -138,9 +166,23 @@ U0 RelicTOOMChildMain(U8 *data)
     else
       ExeFile("SinglePlayer.HC.Z");
   } catch {
-    // Swallow — parent inspects RELIC_TOOM_QUIT and shows an error if
-    // the child died unexpectedly.  Setting a marker on the parent task
-    // would race, so we just let DeathWait detect the exit.
+    // Surface the real exception inside the child so launch failures are
+    // visible instead of silently falling back to a flat color screen.
+    Silent(old_silent);
+    Fs->draw_it = NULL;
+    WinBorder(OFF);
+    WinMax;
+    WinFocus;
+    Fs->text_attr = BLACK << 4 | LTGRAY;
+    "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+    DocClear;
+    DCFill;
+    "\n\n$FG,LTRED$DOOM child crashed.$FG$\n\n";
+    PutExcept;
+    "\n$FG,YELLOW$Press any key to return...$FG$\n";
+    LBts(&Fs->display_flags, DISPLAYf_SHOW);
+    WinZBufUpdate;
+    GetChar;
     Fs->catch_except = TRUE;
   }
 
@@ -185,7 +227,7 @@ U0 RunTOOM()
   // Save current palette + switch to bright so DOOM's DitherPalette
   // maps colours against the standard TempleOS 16-colour palette.
   GrPaletteGet(relic_pal);
-  GrPaletteSet(relic_bright_pal);
+  RelicTOOMPaletteVanilla;
 
   // Build "dir;iwad" arg for the child task.
   StrPrint(arg, "%s;%s", dir, iwad);
