@@ -1,44 +1,30 @@
 // RunTOOM.HC — launch TOOM (DOOM) from the Relic desktop.
 //
-// DESIGN NOTES:
+// ARCHITECTURE: DOOM runs in a CHILD TASK spawned from the games launcher.
 //
-// SinglePlayer.HC's game loop is TOP-LEVEL code, not wrapped in a
-// function.  ExeFile("SinglePlayer.HC") without CCF_JUST_LOAD does
-// everything we need in one call:
-//   1. Compiles the file (defines doom_scrn, MainMenu, TallBlot, ...).
-//   2. Executes all top-level statements:
-//        - doom_scrn = DCNew(GR_WIDTH, GR_HEIGHT)        (MainDrawer.HC)
-//        - LoadWad(iwad) via ModMan.HC reads USE_IWAD     (Wad.HC)
-//        - The main while-loop in SinglePlayer.HC (game)
-//   3. Returns when the user picks Quit Game (gameExit=TRUE breaks the loop).
+// Why a child task?  DOOM writes its rendered frame buffer directly to
+// gr.dc via GrBlot(,0,0,doom_scrn).  The kernel screen-update task then
+// recomposites all task windows on top of gr.dc.  If DOOM ran inline in
+// the desktop task, DrawDesktop (the desktop's draw_it) would get called
+// during every composite cycle and paint the wallpaper over DOOM's pixels.
+// That's why earlier inline attempts produced a uniformly pink/yellow
+// screen — the wallpaper was being composited over DOOM each frame.
 //
-// CCF_JUST_LOAD must NOT be used: it skips top-level execution, leaving
-// doom_scrn=NULL, the WAD unloaded, and the game loop never starting.
+// In a child task, the child's draw_it is NULL by default.  The child's
+// doc is empty (DocClear).  Only DOOM writes to gr.dc, so DOOM is what
+// shows on screen.
 //
-// We do NOT need ExePrint("TOOMStart;") — there is no TOOMStart function;
-// the loop is at top level so ExeFile runs it inline.
+// SinglePlayer.HC's game loop is top-level code (NOT wrapped in a
+// function).  ExeFile("SinglePlayer.HC") without CCF_JUST_LOAD compiles
+// the file AND executes its top-level statements (creates doom_scrn,
+// loads the WAD, runs the game loop).  When the user picks Quit Game,
+// gameExit becomes TRUE, the loop breaks, ExeFile returns, the child
+// task naturally terminates.
 //
-// FRAME-POINTER HYGIENE:
-// LoadWad (inside ModMan.HC) calls FramePtrAdd("USE_IWAD",...) every time
-// it runs.  RelicTOOMUseIWAD uses FramePtrDel which only removes the FIRST
-// entry.  We drain all copies with while-loops before every launch so
-// repeated launches always see a clean frame-pointer state.
-
-U0 RelicTOOMDarkWin()
-{
-  WinBorder(OFF);
-  WinMax;
-  winmgr.show_menu = FALSE;
-  AutoComplete(OFF);
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER;
-  WinFocus;
-  MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
-  Fs->border_src  = 0;
-  Fs->text_attr   = BLACK << 4 | BLACK;
-  Fs->border_attr = BLACK << 4 | BLACK;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-}
+// FRAME-POINTER HYGIENE: LoadWad (inside ModMan.HC) calls
+// FramePtrAdd("USE_IWAD", ...) every run.  RelicTOOMUseIWAD drains all
+// accumulated copies before each launch so repeated launches see clean
+// state.
 
 U0 RelicTOOMRestoreChrome()
 {
@@ -76,27 +62,10 @@ U8 *RelicTOOMFindIWAD()
   return NULL;
 }
 
-U0 RelicTOOMUseIWAD(U8 *iwad)
-{
-  // Drain ALL accumulated copies — LoadWad adds one per run,
-  // FramePtrDel only removes the first, so we loop until gone.
-  while (FramePtr("USE_IWAD")) FramePtrDel("USE_IWAD");
-  while (FramePtr("USE_PWAD")) FramePtrDel("USE_PWAD");
-  while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
-  while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
-  while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
-  if (iwad)
-    FramePtrAdd("USE_IWAD", StrNew(iwad));
-}
-
 // Visible error for at least 500 ms, then wait for any key.
-// ScanMsg loop so a stale Enter can't dismiss it instantly.
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
-  // Force doc rendering so the error text is visible.  If draw_it is
-  // pointing at DrawDesktop (or anything else), the compositor would
-  // render that instead of the doc and the error would be invisible.
   Fs->draw_it = NULL;
   WinBorder(OFF);
   WinMax;
@@ -118,13 +87,73 @@ U0 RelicTOOMShowError(U8 *msg)
   } while (!ec);
 }
 
+// Runs in the CHILD task.  The parent passes dir + ";" + iwad as `data`.
+// We parse it, Cd, set USE_IWAD, then ExeFile DOOM which executes inline.
+U0 RelicTOOMChildMain(U8 *data)
+{
+  U8 *dir, *iwad, *sep, buf[512];
+  Bool old_silent;
+
+  // Parse "dir;iwad" — separator is the first ';'.
+  StrCpy(buf, data);
+  sep = StrFirstOcc(buf, ";");
+  if (!sep) {
+    "Bad TOOM child arg\n";
+    return;
+  }
+  *sep = 0;
+  dir  = buf;
+  iwad = sep + 1;
+
+  // Take ownership of the screen.  Child task has no draw_it, no doc
+  // content — only DOOM's GrBlot writes will show on gr.dc.
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
+  Fs->draw_it = NULL;
+  Fs->border_src  = 0;
+  Fs->text_attr   = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocClear;
+  DCFill;
+  WinFocus;
+  MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
+
+  // DOOM's ModMan.HC reads USE_IWAD from THIS task's frame pointers.
+  while (FramePtr("USE_IWAD")) FramePtrDel("USE_IWAD");
+  while (FramePtr("USE_PWAD")) FramePtrDel("USE_PWAD");
+  while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
+  FramePtrAdd("USE_IWAD", StrNew(iwad));
+
+  Cd(dir);
+  old_silent = Silent;
+  Silent(TRUE);
+
+  try {
+    if (FileFind("SinglePlayer.HC"))
+      ExeFile("SinglePlayer.HC");
+    else
+      ExeFile("SinglePlayer.HC.Z");
+  } catch {
+    // Swallow — parent inspects RELIC_TOOM_QUIT and shows an error if
+    // the child died unexpectedly.  Setting a marker on the parent task
+    // would race, so we just let DeathWait detect the exit.
+    Fs->catch_except = TRUE;
+  }
+
+  Silent(old_silent);
+}
+
 // Called by GamesLauncher via ExePrint("RunTOOM;").
-// Runs inline in whatever task loaded us (the games launcher / desktop).
+// Runs in the desktop / games-launcher task.
 U0 RunTOOM()
 {
-  Bool old_silent;
   CBGR48 relic_pal[COLORS_NUM];
-  U8 *dir, *iwad;
+  U8 *dir, *iwad, arg[512];
+  CTask *child;
 
   dir  = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
@@ -153,57 +182,29 @@ U0 RunTOOM()
     return;
   }
 
+  // Save current palette + switch to bright so DOOM's DitherPalette
+  // maps colours against the standard TempleOS 16-colour palette.
   GrPaletteGet(relic_pal);
-  // DitherPalette() in DoomGr.HC calls GrPaletteGet at runtime to map DOOM's
-  // 256 colours to the nearest TempleOS 16-colour entry.  With the Relic dark
-  // palette active every DOOM pixel maps to YELLOW (the only bright, visible
-  // colour left in the dark palette) — producing the solid-yellow screen.
-  // Switch to the stock TempleOS palette NOW so DitherPalette sees the correct
-  // 16 colours.  relic_pal already holds the dark palette and is restored after
-  // DOOM exits.  relic_bright_pal is compiled by GamesLauncher.HC and is in the
-  // task's symbol table when this code runs.
   GrPaletteSet(relic_bright_pal);
 
-  old_silent = Silent;
-
-  Cd(dir);
-  RelicTOOMDarkWin;
-  winmgr.show_menu = FALSE;
+  // Suppress our own draw_it so we don't compete with the child.
+  Fs->draw_it = NULL;
   DocClear;
   DCFill;
-  RelicTOOMUseIWAD(iwad);
 
-  try {
-    FlushMsgs;
-    RelicTOOMDarkWin;
-    Silent(TRUE);
+  // Build "dir;iwad" arg for the child task.
+  StrPrint(arg, "%s;%s", dir, iwad);
 
-    // Compile + run SinglePlayer.HC.  The file's top-level game loop
-    // executes inline, owns the screen, and returns when the user picks
-    // Quit Game.  See the design comment at the top of this file.
-    if (FileFind("SinglePlayer.HC"))
-      ExeFile("SinglePlayer.HC");
-    else
-      ExeFile("SinglePlayer.HC.Z");
-
-    Silent(old_silent);
-  } catch {
-    Silent(old_silent);
-    // Restore the palette first so the error message renders with the
-    // correct Relic colours instead of DOOM's bright palette.
-    GrPaletteSet(relic_pal);
-    // RELIC_TOOM_QUIT is set by TOOM's own Quit Game handler when the
-    // user selects Quit Game from the menu — clean exit, no error.
-    if (FramePtr("RELIC_TOOM_QUIT")) {
-      FlushMsgs;
-    } else {
-      RelicTOOMShowError(
-        "An exception occurred during DOOM startup or gameplay.\n"
-        "Make sure doom1.wad (or freedoom1.wad) is a valid WAD file.");
-    }
+  // Spawn the DOOM child task.  Spawn returns when the task has been
+  // created; we then DeathWait until it terminates.
+  child = Spawn(&RelicTOOMChildMain, StrNew(arg), "TOOM");
+  if (child) {
+    relic_child_task = child;
+    DeathWait(&child);
+    relic_child_task = NULL;
   }
 
-  // Restore Relic palette + chrome whether DOOM exited cleanly or not.
+  // Restore Relic palette + chrome.
   GrPaletteSet(relic_pal);
   RelicTOOMRestoreChrome;
   RelicTermDark;
