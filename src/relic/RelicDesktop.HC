@@ -439,7 +439,7 @@ U0 RelicLaunchShell()
 }
 
 // Compile games launcher into the SAME heap as the desktop so internal
-// calls (RelicGamesChromeOff, etc.) never hit UndefinedExtern across
+// calls never hit UndefinedExtern across
 // ExeFile/CCF_JUST_LOAD boundaries.
 #include "::/Home/RelicOS/GamesLauncher.HC"
 

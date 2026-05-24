@@ -31,7 +31,6 @@ while(TRUE) {
   TallBlot(doom_scrn,0,0,GR_HEIGHT,title);
   r=MainMenu;
   TOOMChromeOff;
-  GrBlot(,0,0,doom_scrn);
   Refresh;
   if(!r || gameExit) {
      gameExit=TRUE;

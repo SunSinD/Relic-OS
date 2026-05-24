@@ -1,5 +1,8 @@
-// RunTOOM.HC - TOOM launch helpers.  Compiled into the desktop heap via
-// #include from GamesLauncher.HC.  Launched inline with RelicDoomBegin/End.
+// RunTOOM.HC — DOOM/TOOM launch (included from GamesLauncher.HC / RelicDesktop heap).
+//
+// Pink screen fix: never GrBlot(,0,0,doom_scrn) then Refresh on this task.
+// RelicDoomBegin sets draw_it=&DrawDesktop; DrawDesktop blits RELIC_DOOM_SCRN.
+// This file must NOT set Fs->draw_it=NULL during gameplay.
 
 U0 RelicTOOMDarkWin()
 {
@@ -82,7 +85,6 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
   while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
   while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
   while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
-  while (FramePtr("RELIC_DOOM_SCRN"))  FramePtrDel("RELIC_DOOM_SCRN");
   if (iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
@@ -90,10 +92,8 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
-  Fs->draw_it = NULL;
-  WinBorder(OFF);
-  WinMax;
-  WinFocus;
+
+  RelicDoomEnd;
   Fs->text_attr = BLACK << 4 | LTGRAY;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
@@ -103,22 +103,11 @@ U0 RelicTOOMShowError(U8 *msg)
   "$FG,YELLOW$Press any key to return to the games menu...$FG$\n";
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
-  Sleep(500);
   FlushMsgs;
   do {
     ec = ScanMsg(&ea, &eb, 1 << MSG_KEY_DOWN);
     if (!ec) Sleep(15);
   } while (!ec);
-}
-
-U0 RelicTOOMHideTextPlane()
-{
-  Fs->draw_it = NULL;
-  Fs->text_attr = BLACK << 4 | BLACK;
-  Fs->border_attr = BLACK << 4 | BLACK;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
-  DocClear;
-  DCFill;
 }
 
 U0 RunTOOM()
@@ -131,19 +120,19 @@ U0 RunTOOM()
   iwad = RelicTOOMFindIWAD();
 
   if (!dir || !iwad) {
-    Fs->draw_it = NULL;
+    RelicDoomEnd;
+    Fs->text_attr = BLACK << 4 | LTGRAY;
+    "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
     DocClear;
     DCFill;
     "\n\n$FG,LTRED$DOOM cannot launch.$FG$\n\n";
     if (!dir)
       "$FG,LTGRAY$TOOM source missing. Re-run Build.HC.$FG$\n";
     if (!iwad)
-      "$FG,LTGRAY$No WAD found. Copy doom1.wad to src/relic/TOOM/ on the host\n"
-      "then rebuild the VHD with MakeVHD.ps1 and re-run Build.HC.$FG$\n";
+      "$FG,LTGRAY$No WAD found. Copy doom1.wad to src/relic/TOOM/ then Build.HC.$FG$\n";
     "$FG,YELLOW$\nPress any key to return...$FG$\n";
     LBts(&Fs->display_flags, DISPLAYf_SHOW);
     WinZBufUpdate;
-    Sleep(500);
     FlushMsgs;
     {
       I64 ec2, ea2, eb2;
@@ -161,17 +150,12 @@ U0 RunTOOM()
 
   Cd(dir);
   RelicTOOMDarkWin;
-  RelicTOOMHideTextPlane;
   RelicTOOMUseIWAD(iwad);
-  Fs->text_attr = BLACK << 4 | BLACK;
-  Fs->border_attr = BLACK << 4 | BLACK;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
   DocClear;
   DCFill;
-  gr.fp_wall_paper = NULL;
+  FlushMsgs;
 
   try {
-    FlushMsgs;
     Silent(TRUE);
     if (FileFind("SinglePlayer.HC"))
       ExeFile("SinglePlayer.HC");
@@ -185,15 +169,12 @@ U0 RunTOOM()
       FlushMsgs;
     } else {
       RelicTOOMShowError(
-        "An exception occurred during DOOM startup or gameplay.\n"
-        "Make sure doom1.wad (or freedoom1.wad) is a valid WAD file.");
+        "Exception during DOOM startup or gameplay.\n"
+        "Ensure doom1.wad (or freedoom1.wad) is valid.");
     }
   }
 
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
-  DocClear;
-  DCFill;
   FlushMsgs;
 }
-
