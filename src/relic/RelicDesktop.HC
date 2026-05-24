@@ -17,6 +17,15 @@ I64 relic_w = 640, relic_h = 480;
 I64 relic_pending_app = -1;
 CTask *relic_child_task = NULL;
 
+// DOOM compositor override.  Set TRUE by RunTOOM before TOOMStart runs.
+// When TRUE, DrawDesktop blits doom_scrn into the window pixel buffer
+// instead of drawing the wallpaper/dock.  We do it this way instead of
+// re-pointing Fs->draw_it because functions compiled inside ExeFile
+// (TOOMStart, etc.) live in a different heap and the function-pointer
+// assignment is unreliable across that boundary.
+Bool relic_doom_active = FALSE;
+CDC  *relic_doom_dc = NULL;
+
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
   LTBLUE, LTBLUE, YELLOW,
@@ -89,6 +98,14 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   relic_h = h;
   relic_ox = task->pix_left;
   relic_oy = task->pix_top;
+
+  // DOOM compositor override — see comment on relic_doom_active above.
+  // Render doom_scrn full-screen and skip ALL desktop chrome (no top bar,
+  // no wallpaper, no dock) so DOOM owns every pixel.
+  if (relic_doom_active && relic_doom_dc) {
+    GrBlot(dc, 0, 0, relic_doom_dc);
+    return;
+  }
 
   // Top strip (always black, status drawn on top)
   dc->color = BLACK;

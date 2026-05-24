@@ -15,15 +15,13 @@ doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
 
-// Compositor callback: called by Refresh/WinZBufUpdate for every redraw.
-// Blits the current doom_scrn into the task's window pixel buffer (dc).
-// Using draw_it ensures DOOM renders through the normal TempleOS window
-// compositing path instead of writing to gr.dc directly (which gets
-// overwritten by other tasks' windows during compositing).
-U0 TOOMDrawIt(CTask *task, CDC *dc) {
-  if (doom_scrn)
-    GrBlot(dc, 0, 0, doom_scrn);
-}
+// Publish doom_scrn pointer to the desktop's compositor.  The Relic desktop's
+// DrawDesktop reads relic_doom_dc when relic_doom_active is TRUE and renders
+// it full-screen instead of the desktop chrome.  Set here (not in RunTOOM)
+// because doom_scrn is created by the DCNew above which runs during the
+// ExeFile compile, AFTER RunTOOM's own setup code has already executed.
+extern CDC *relic_doom_dc;
+relic_doom_dc = doom_scrn;
 
 U0 TOOMChromeOff()
 {
@@ -34,7 +32,6 @@ U0 TOOMChromeOff()
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
   WinFocus;
-  Fs->draw_it = &TOOMDrawIt;
 }
 
 I64 FrameCnt(CDC **arr) {

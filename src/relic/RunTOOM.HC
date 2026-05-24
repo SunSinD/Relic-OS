@@ -119,6 +119,7 @@ U0 RunTOOM()
   Bool old_silent;
   CBGR48 relic_pal[COLORS_NUM];
   U8 *dir, *iwad;
+  U0 (*old_wall_paper)(CTask *);
 
   dir  = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
@@ -167,6 +168,20 @@ U0 RunTOOM()
   DCFill;
   RelicTOOMUseIWAD(iwad);
 
+  // Activate DOOM compositor override BEFORE ExeFile.  MainDrawer.HC's
+  // top-level code assigns relic_doom_dc = doom_scrn when ExeFile runs it.
+  // With relic_doom_active=TRUE, the desktop's DrawDesktop callback (which
+  // is always Fs->draw_it) renders doom_scrn full-screen instead of the
+  // wallpaper/dock.  This avoids the function-pointer lifetime issue with
+  // setting draw_it = &TOOMDrawIt from inside ExeFile'd code.
+  relic_doom_active = TRUE;
+  relic_doom_dc = NULL;
+
+  // Suppress the kernel status-bar wallpaper callback so DOOM owns every
+  // pixel.  Saved so we can restore it when DOOM exits.
+  old_wall_paper = gr.fp_wall_paper;
+  gr.fp_wall_paper = NULL;
+
   try {
     FlushMsgs;
     RelicTOOMDarkWin;
@@ -200,9 +215,14 @@ U0 RunTOOM()
     }
   }
 
-  // Reset draw_it first so the Relic compositor doesn't keep calling
-  // TOOMDrawIt (which references doom_scrn that will be freed shortly).
-  Fs->draw_it = NULL;
+  // Deactivate DOOM compositor override BEFORE freeing anything.  Clearing
+  // relic_doom_active first ensures DrawDesktop stops touching relic_doom_dc
+  // (which points into doom_scrn) the next time it's called.
+  relic_doom_active = FALSE;
+  relic_doom_dc = NULL;
+
+  // Restore the kernel status-bar wallpaper callback.
+  gr.fp_wall_paper = old_wall_paper;
 
   // Restore Relic palette + chrome whether DOOM exited cleanly or not.
   GrPaletteSet(relic_pal);
