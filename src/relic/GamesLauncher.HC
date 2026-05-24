@@ -88,19 +88,76 @@ U0 RelicGameAfter()
   FlushMsgs;
 }
 
-U0 RelicGameFile(U8 *filename)
+// Runs IN the child game task: configure window, then #include the game.
+U0 RelicGameChildRun(U8 *filename)
 {
-  RelicGamesChromeOff;
-  RelicGamesPaletteBright;
-  FlushMsgs;
-  RelicGamesScreenClear;
-  LBts(&Fs->display_flags, DISPLAYf_SHOW);
-  WinZBufUpdate;
+  WinBorder(OFF);
+  WinMax;
+  winmgr.show_menu = FALSE;
+  AutoComplete(OFF);
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
+        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+  Fs->draw_it = NULL;
+  Fs->border_src  = 0;
+  Fs->text_attr   = BLACK << 4 | LTGRAY;
+  Fs->border_attr = BLACK << 4 | DKGRAY;
+  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  DocClear;
+  DCFill;
+  WinFocus;
+  MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
   try {
     ExePrint("#include \"%s\";", filename);
   } catch {
     Fs->catch_except = TRUE;
   }
+  Free(filename);
+}
+
+// Launch arbitrary game in a child task; parent polls global scancode
+// for Esc and kills the child if held.  This is the only way to quit
+// stock TempleOS demo games (FlapBat, Varoom, etc.) which don't handle
+// Esc themselves.
+U0 RelicGameFile(U8 *filename)
+{
+  CTask *child;
+  U8 *arg;
+
+  RelicGamesChromeOff;
+  RelicGamesPaletteBright;
+  FlushMsgs;
+  RelicGamesScreenClear;
+  "$FG,LTGRAY$Loading $FG,LTCYAN$%s$FG$\n", filename;
+  "$FG,DKGRAY$Hold Esc to quit.$FG$\n";
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+
+  arg = StrNew(filename);
+  child = Spawn(&RelicGameChildRun, arg, "Game");
+  if (!child) {
+    Free(arg);
+    "$FG,LTRED$Failed to spawn game task.$FG$\n";
+    Sleep(800);
+    RelicGameAfter;
+    return;
+  }
+
+  // Poll the system-wide keyboard down-bitmap so we can detect Esc
+  // even though the child task has window focus.
+  while (TaskValidate(child)) {
+    if (Bt(kbd.down_bitmap, SC_ESC)) {
+      try {
+        Kill(child, FALSE);
+      } catch {
+        Fs->catch_except = TRUE;
+      }
+      break;
+    }
+    Sleep(30);
+  }
+  while (TaskValidate(child)) Sleep(15);
+  FlushMsgs;
+
   RelicGameAfter;
 }
 
