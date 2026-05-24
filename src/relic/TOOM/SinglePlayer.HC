@@ -19,6 +19,7 @@ FlushMsgs;
 U64 r;
 CDC *title=GetGrLump("TITLEPIC");
 TOOMChromeOff;
+Fs->draw_it=&TOOMDrawIt;
 DocClear;
 while(TRUE) {
   winmgr.show_menu=FALSE;

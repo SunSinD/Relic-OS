@@ -266,8 +266,8 @@ Bool RelicKillRogueChildren()
 U0 (*relic_saved_draw_it)(CTask *, CDC *) = NULL;
 U0 (*relic_saved_fp_wall_paper)(CTask *) = NULL;
 
-// Called directly from GamesLauncher (same heap).  Must NOT be invoked
-// via ExePrint from RunTOOM.HC — that leaves draw_it NULL and DOOM pink.
+// Prepare screen for DOOM — hide text plane and status bar overlay.
+// SinglePlayer.HC sets Fs->draw_it=&TOOMDrawIt (same ExeFile heap).
 U0 RelicDoomBegin()
 {
   if (!relic_doom_active) {
@@ -275,13 +275,11 @@ U0 RelicDoomBegin()
     relic_saved_fp_wall_paper = gr.fp_wall_paper;
   }
   gr.fp_wall_paper = NULL;
-  relic_doom_active = TRUE;
-  Fs->draw_it = &DrawDesktop;
-  WinBorder(OFF);
-  WinMax;
-  WinFocus;
+  relic_doom_active = FALSE;
+  Fs->draw_it = NULL;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
   DocClear;
   DCFill;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
@@ -292,6 +290,7 @@ U0 RelicDoomBegin()
 U0 RelicDoomEnd()
 {
   relic_doom_active = FALSE;
+  Fs->draw_it = NULL;
   while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
   if (relic_saved_fp_wall_paper)
     gr.fp_wall_paper = relic_saved_fp_wall_paper;

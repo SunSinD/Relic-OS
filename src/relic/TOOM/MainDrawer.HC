@@ -21,6 +21,13 @@ CTask *doom_task=Fs;
 while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
 FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn);
 
+// draw_it in the SAME ExeFile heap as doom_scrn — Refresh blits each frame.
+U0 TOOMDrawIt(CTask *task, CDC *dc)
+{
+  if (doom_scrn)
+    GrBlot(dc, 0, 0, doom_scrn);
+}
+
 U0 TOOMChromeOff()
 {
   WinBorder(OFF);

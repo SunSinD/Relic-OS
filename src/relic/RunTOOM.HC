@@ -153,6 +153,12 @@ U0 RunTOOM()
   Cd(dir);
   RelicTOOMDarkWin;
   RelicTOOMUseIWAD(iwad);
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocClear;
+  DCFill;
+  gr.fp_wall_paper = NULL;
 
   try {
     FlushMsgs;

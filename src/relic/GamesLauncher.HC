@@ -48,12 +48,24 @@ U0 RelicGamesChromeOff()
   AutoComplete(OFF);
   Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
         WIF_SELF_BORDER;
+  WinFocus;
   RelicTermDark;
   Fs->border_src = 0;
   Fs->border_attr = BLACK << 4 | DKGRAY;
   Fs->text_attr = BLACK << 4 | LTGRAY;
-  Fs->draw_it = NULL;
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+}
+
+// Hide the DolDoc text plane so it cannot paint over game GrBlot output.
+// This was the fix in 23b66fd that made DOOM visible (pink = text layer bleed).
+U0 RelicGamesHideTextPlane()
+{
+  Fs->draw_it = NULL;
+  Fs->text_attr = BLACK << 4 | BLACK;
+  Fs->border_attr = BLACK << 4 | BLACK;
+  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
+  DocClear;
+  DCFill;
 }
 
 U0 RelicGamesScreenClear()
@@ -69,6 +81,9 @@ U0 RelicGamesScreenClear()
 
 U0 RelicGameRunTOOM()
 {
+  RelicGamesPaletteBright;
+  RelicGamesHideTextPlane;
+  gr.fp_wall_paper = NULL;
   RelicDoomBegin;
   try {
     RunTOOM;
@@ -80,7 +95,6 @@ U0 RelicGameRunTOOM()
 
 U0 RelicGameAfter()
 {
-  // Restore palette + chrome after an inline game exits.
   RelicGamesPaletteRestore;
   RelicThemeApply;
   RelicTermDark;
@@ -90,83 +104,19 @@ U0 RelicGameAfter()
   FlushMsgs;
 }
 
-// Runs IN the child game task: configure window, then #include the game.
-U0 RelicGameChildRun(U8 *filename)
+U0 RelicGameFile(U8 *filename)
 {
-  WinBorder(OFF);
-  WinMax;
-  winmgr.show_menu = FALSE;
-  AutoComplete(OFF);
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
-  Fs->draw_it = NULL;
-  Fs->border_src  = 0;
-  Fs->text_attr   = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | DKGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  RelicGamesChromeOff;
+  RelicGamesPaletteBright;
+  gr.fp_wall_paper = NULL;
+  RelicGamesHideTextPlane;
+  FlushMsgs;
   DocClear;
-  DCFill;
-  WinToTop(Fs);
-  WinFocus;
-  MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
   try {
     ExePrint("#include \"%s\";", filename);
   } catch {
     Fs->catch_except = TRUE;
   }
-  Free(filename);
-}
-
-// Launch game in a child task.  Parent stays blank and behind the child
-// so its doc layer never composites over the game's GrBlot output.
-U0 RelicGameFile(U8 *filename)
-{
-  CTask *child;
-  U8 *arg;
-  U0 (*saved_fp)(CTask *);
-
-  RelicGamesChromeOff;
-  RelicGamesPaletteBright;
-  saved_fp = gr.fp_wall_paper;
-  gr.fp_wall_paper = NULL;
-  FlushMsgs;
-  DocClear;
-  DCFill;
-
-  arg = StrNew(filename);
-  child = Spawn(&RelicGameChildRun, arg, "Game");
-  if (!child) {
-    Free(arg);
-    gr.fp_wall_paper = saved_fp;
-    "$FG,LTRED$Failed to spawn game task.$FG$\n";
-    Sleep(800);
-    RelicGameAfter;
-    return;
-  }
-
-  relic_child_task = child;
-  WinToTop(child);
-  WinFocus;
-  DocClear;
-
-  while (TaskValidate(child)) {
-    if (Bt(kbd.down_bitmap, SC_ESC)) {
-      try {
-        Kill(child, FALSE);
-      } catch {
-        Fs->catch_except = TRUE;
-      }
-      break;
-    }
-    Sleep(30);
-  }
-  while (TaskValidate(child)) Sleep(15);
-
-  relic_child_task = NULL;
-  WinToTop(Fs);
-  WinFocus;
-  gr.fp_wall_paper = saved_fp;
-  FlushMsgs;
   RelicGameAfter;
 }
 
