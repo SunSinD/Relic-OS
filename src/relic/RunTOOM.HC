@@ -1,21 +1,17 @@
 // RunTOOM.HC - launch TOOM (DOOM) from the Relic desktop.
 //
-// ARCHITECTURE: DOOM runs INLINE in the games-launcher task (same task
-// as the desktop).  Originally tried Spawn'd child task, but the child's
-// window never became foreground reliably and we ended up with a flat
-// pink/black fallback.  Inline works because:
+// DOOM runs INLINE in the desktop/games task.  Direct GrBlot(,0,0,doom_scrn)
+// writes get overwritten on Refresh by the doc layer — that is the pink-screen
+// bug.  The fix is the compositor takeover:
 //
-//   1. GamesLauncher's RelicGamesChromeOff sets Fs->draw_it = NULL, so
-//      the desktop's DrawDesktop wallpaper is NOT composited.
-//   2. We switch palette to vanilla TempleOS so DOOM's DitherPalette in
-//      DoomGr.HC maps the 256-color WAD against correct 16 colors.
-//   3. SinglePlayer.HC's TOP-LEVEL game loop runs directly inside
-//      ExeFile.  DOOM writes its rendered frame to gr.dc via
-//      GrBlot(,0,0,doom_scrn) every tick.  With draw_it=NULL and an
-//      empty doc, the compositor does not overdraw DOOM's frames.
-//
-// CCF_JUST_LOAD must NOT be used: it suppresses top-level execution,
-// so doom_scrn would be NULL and the loop would never start.
+//   1. RunTOOM sets relic_doom_active=TRUE and Fs->draw_it=&DrawDesktop.
+//   2. MainDrawer.HC publishes doom_scrn as frame ptr RELIC_DOOM_SCRN.
+//   3. DrawDesktop blits doom_scrn full-screen instead of wallpaper/dock.
+//   4. SinglePlayer.HC updates doom_scrn each frame and calls Refresh.
+//   5. Vanilla palette is applied so DitherPalette maps WAD colors correctly.
+
+extern U0 DrawDesktop(CTask *task, CDC *dc);
+extern Bool relic_doom_active;
 
 U0 RelicTOOMDarkWin()
 {
@@ -43,8 +39,6 @@ U0 RelicTOOMRestoreChrome()
   ExePrint("RelicChromeInstall;");
 }
 
-// Explicit channel-assigned vanilla TempleOS palette so DitherPalette
-// has a stable target regardless of any boot-time palette patches.
 U0 RelicTOOMPaletteVanilla()
 {
   CBGR48 pal[COLORS_NUM];
@@ -100,6 +94,7 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
   while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
   while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
   while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
+  while (FramePtr("RELIC_DOOM_SCRN"))  FramePtrDel("RELIC_DOOM_SCRN");
   if (iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
@@ -107,6 +102,7 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
+  relic_doom_active = FALSE;
   Fs->draw_it = NULL;
   WinBorder(OFF);
   WinMax;
@@ -128,12 +124,11 @@ U0 RelicTOOMShowError(U8 *msg)
   } while (!ec);
 }
 
-// Called by GamesLauncher via ExePrint("RunTOOM;").
-// Runs INLINE in the desktop / games-launcher task.
 U0 RunTOOM()
 {
   Bool old_silent;
   CBGR48 saved_pal[COLORS_NUM];
+  U0 (*saved_fp_wall_paper)(CTask *);
   U8 *dir, *iwad;
 
   dir  = RelicTOOMFindDir();
@@ -170,21 +165,16 @@ U0 RunTOOM()
 
   Cd(dir);
   RelicTOOMDarkWin;
-  Fs->draw_it = NULL;
-  // Make the doc visible (LTGRAY on BLACK) so diagnostic prints below
-  // are readable.  Once DOOM starts blitting full-screen it overwrites
-  // the screen anyway.
-  Fs->text_attr   = BLACK << 4 | LTGRAY;
-  Fs->border_attr = BLACK << 4 | LTGRAY;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
+  RelicTOOMUseIWAD(iwad);
+
+  // Compositor takeover — DrawDesktop blits doom_scrn each Refresh.
+  saved_fp_wall_paper = gr.fp_wall_paper;
+  gr.fp_wall_paper = NULL;
+  relic_doom_active = TRUE;
+  Fs->draw_it = &DrawDesktop;
   DocClear;
-  DCFill;
-  "$FG,LTGRAY$Loading DOOM...$FG$\n";
-  "$FG,DKGRAY$dir : $FG,LTGRAY$%s$FG$\n", dir;
-  "$FG,DKGRAY$iwad: $FG,LTGRAY$%s$FG$\n", iwad;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
   WinZBufUpdate;
-  RelicTOOMUseIWAD(iwad);
 
   try {
     FlushMsgs;
@@ -206,6 +196,9 @@ U0 RunTOOM()
     }
   }
 
+  relic_doom_active = FALSE;
+  while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
+  gr.fp_wall_paper = saved_fp_wall_paper;
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
   RelicTermDark;

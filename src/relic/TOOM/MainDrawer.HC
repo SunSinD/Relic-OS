@@ -14,6 +14,13 @@ CDC *doom_scrn=DCNew(GR_WIDTH,GR_HEIGHT);
 doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
+
+// Publish doom_scrn so DrawDesktop (RelicDesktop heap) can blit it while
+// relic_doom_active is TRUE.  Frame pointers are the reliable way to share
+// a CDC* across ExeFile's separate code heap boundary.
+while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
+FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn);
+
 U0 TOOMChromeOff()
 {
   WinBorder(OFF);
@@ -3959,7 +3966,6 @@ end_control:;
     if(!paused||IsNetworkGameClient) {
       UpdateLevel(l);
     }
-    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }

@@ -17,6 +17,11 @@ I64 relic_w = 640, relic_h = 480;
 I64 relic_pending_app = -1;
 CTask *relic_child_task = NULL;
 
+// Set TRUE by RunTOOM while SinglePlayer.HC is running inline.
+// DrawDesktop blits doom_scrn (published as RELIC_DOOM_SCRN frame ptr
+// by MainDrawer.HC) instead of wallpaper/dock so DOOM owns every pixel.
+Bool relic_doom_active = FALSE;
+
 I64 app_colors[NUM_APPS] = {
   CYAN, CYAN, CYAN, LTBLUE,
   LTBLUE, LTBLUE, YELLOW,
@@ -89,6 +94,18 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   relic_h = h;
   relic_ox = task->pix_left;
   relic_oy = task->pix_top;
+
+  // DOOM mode — blit the live game framebuffer and skip ALL desktop chrome.
+  if (relic_doom_active) {
+    CDC *scrn = FramePtr("RELIC_DOOM_SCRN", task);
+    if (scrn)
+      GrBlot(dc, 0, 0, scrn);
+    else {
+      dc->color = BLACK;
+      GrRect(dc, 0, 0, w, h);
+    }
+    return;
+  }
 
   // Top strip (always black, status drawn on top)
   dc->color = BLACK;
