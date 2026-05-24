@@ -187,11 +187,6 @@ U0 RunTOOM()
   GrPaletteGet(relic_pal);
   GrPaletteSet(relic_bright_pal);
 
-  // Suppress our own draw_it so we don't compete with the child.
-  Fs->draw_it = NULL;
-  DocClear;
-  DCFill;
-
   // Build "dir;iwad" arg for the child task.
   StrPrint(arg, "%s;%s", dir, iwad);
 
