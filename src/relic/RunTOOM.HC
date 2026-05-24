@@ -86,6 +86,7 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
   while (FramePtr("USE_WAD"))  FramePtrDel("USE_WAD");
   while (FramePtr("RELIC_TOOM_QUIT"))  FramePtrDel("RELIC_TOOM_QUIT");
   while (FramePtr("RELIC_TOOM_FRESH")) FramePtrDel("RELIC_TOOM_FRESH");
+  while (FramePtr("RELIC_DOOM_SCRN"))  FramePtrDel("RELIC_DOOM_SCRN");
   if (iwad)
     FramePtrAdd("USE_IWAD", StrNew(iwad));
 }
@@ -168,14 +169,13 @@ U0 RunTOOM()
   DCFill;
   RelicTOOMUseIWAD(iwad);
 
-  // Activate DOOM compositor override BEFORE ExeFile.  MainDrawer.HC's
-  // top-level code assigns relic_doom_dc = doom_scrn when ExeFile runs it.
-  // With relic_doom_active=TRUE, the desktop's DrawDesktop callback (which
-  // is always Fs->draw_it) renders doom_scrn full-screen instead of the
-  // wallpaper/dock.  This avoids the function-pointer lifetime issue with
-  // setting draw_it = &TOOMDrawIt from inside ExeFile'd code.
+  // Activate DOOM compositor suppression BEFORE ExeFile.  When TRUE,
+  // DrawDesktop returns immediately and does NOT touch the framebuffer.
+  // DOOM owns every pixel and writes doom_scrn directly to gr.dc via
+  // GrBlot(,0,0,doom_scrn) in its render loop.  This is DOOM's original
+  // design — we just suppress the desktop chrome instead of trying to
+  // re-point draw_it across the ExeFile heap boundary.
   relic_doom_active = TRUE;
-  relic_doom_dc = NULL;
 
   // Suppress the kernel status-bar wallpaper callback so DOOM owns every
   // pixel.  Saved so we can restore it when DOOM exits.
@@ -215,11 +215,9 @@ U0 RunTOOM()
     }
   }
 
-  // Deactivate DOOM compositor override BEFORE freeing anything.  Clearing
-  // relic_doom_active first ensures DrawDesktop stops touching relic_doom_dc
-  // (which points into doom_scrn) the next time it's called.
+  // Deactivate DOOM compositor suppression so DrawDesktop draws normally
+  // again.
   relic_doom_active = FALSE;
-  relic_doom_dc = NULL;
 
   // Restore the kernel status-bar wallpaper callback.
   gr.fp_wall_paper = old_wall_paper;

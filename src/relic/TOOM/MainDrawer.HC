@@ -15,13 +15,12 @@ doom_scrn->flags|=DCF_NO_TRANSPARENTS;
 extern U0 PlaySound(U8 *name);
 CTask *doom_task=Fs;
 
-// Publish doom_scrn pointer to the desktop's compositor.  The Relic desktop's
-// DrawDesktop reads relic_doom_dc when relic_doom_active is TRUE and renders
-// it full-screen instead of the desktop chrome.  Set here (not in RunTOOM)
-// because doom_scrn is created by the DCNew above which runs during the
-// ExeFile compile, AFTER RunTOOM's own setup code has already executed.
-extern CDC *relic_doom_dc;
-relic_doom_dc = doom_scrn;
+// Publish doom_scrn so the Relic desktop's DrawDesktop (in a different
+// code heap) can render it during DOOM mode.  See comment on
+// relic_doom_active in RelicDesktop.HC.  Drain any stale entry first so
+// repeated launches don't accumulate copies.
+while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
+FramePtrAdd("RELIC_DOOM_SCRN", doom_scrn);
 
 U0 TOOMChromeOff()
 {
@@ -3968,6 +3967,7 @@ end_control:;
     if(!paused||IsNetworkGameClient) {
       UpdateLevel(l);
     }
+    GrBlot(,0,0,doom_scrn);
     TOOMChromeOff;
     Refresh;
   }
