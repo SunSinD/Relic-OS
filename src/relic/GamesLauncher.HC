@@ -104,6 +104,7 @@ U0 RelicGameChildRun(U8 *filename)
   "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
   DCFill;
+  WinToTop(Fs);
   WinFocus;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
   try {
@@ -114,36 +115,39 @@ U0 RelicGameChildRun(U8 *filename)
   Free(filename);
 }
 
-// Launch arbitrary game in a child task; parent polls global scancode
-// for Esc and kills the child if held.  This is the only way to quit
-// stock TempleOS demo games (FlapBat, Varoom, etc.) which don't handle
-// Esc themselves.
+// Launch game in a child task.  Parent stays blank and behind the child
+// so its doc layer never composites over the game's GrBlot output.
 U0 RelicGameFile(U8 *filename)
 {
   CTask *child;
   U8 *arg;
+  U0 (*saved_fp)(CTask *);
 
   RelicGamesChromeOff;
   RelicGamesPaletteBright;
+  saved_fp = gr.fp_wall_paper;
+  gr.fp_wall_paper = NULL;
   FlushMsgs;
-  RelicGamesScreenClear;
-  "$FG,LTGRAY$Loading $FG,LTCYAN$%s$FG$\n", filename;
-  "$FG,DKGRAY$Hold Esc to quit.$FG$\n";
-  LBts(&Fs->display_flags, DISPLAYf_SHOW);
-  WinZBufUpdate;
+  DocClear;
+  DCFill;
 
   arg = StrNew(filename);
   child = Spawn(&RelicGameChildRun, arg, "Game");
   if (!child) {
     Free(arg);
+    gr.fp_wall_paper = saved_fp;
     "$FG,LTRED$Failed to spawn game task.$FG$\n";
     Sleep(800);
     RelicGameAfter;
     return;
   }
 
-  // Poll the system-wide keyboard down-bitmap so we can detect Esc
-  // even though the child task has window focus.
+  relic_child_task = child;
+  WinToBot(Fs);
+  WinToTop(child);
+  WinFocus;
+  DocClear;
+
   while (TaskValidate(child)) {
     if (Bt(kbd.down_bitmap, SC_ESC)) {
       try {
@@ -156,8 +160,12 @@ U0 RelicGameFile(U8 *filename)
     Sleep(30);
   }
   while (TaskValidate(child)) Sleep(15);
-  FlushMsgs;
 
+  relic_child_task = NULL;
+  WinToTop(Fs);
+  WinFocus;
+  gr.fp_wall_paper = saved_fp;
+  FlushMsgs;
   RelicGameAfter;
 }
 

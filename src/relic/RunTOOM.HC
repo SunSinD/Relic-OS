@@ -1,17 +1,9 @@
 // RunTOOM.HC - launch TOOM (DOOM) from the Relic desktop.
 //
-// DOOM runs INLINE in the desktop/games task.  Direct GrBlot(,0,0,doom_scrn)
-// writes get overwritten on Refresh by the doc layer — that is the pink-screen
-// bug.  The fix is the compositor takeover:
-//
-//   1. RunTOOM sets relic_doom_active=TRUE and Fs->draw_it=&DrawDesktop.
-//   2. MainDrawer.HC publishes doom_scrn as frame ptr RELIC_DOOM_SCRN.
-//   3. DrawDesktop blits doom_scrn full-screen instead of wallpaper/dock.
-//   4. SinglePlayer.HC updates doom_scrn each frame and calls Refresh.
-//   5. Vanilla palette is applied so DitherPalette maps WAD colors correctly.
-
-extern U0 DrawDesktop(CTask *task, CDC *dc);
-extern Bool relic_doom_active;
+// DOOM runs INLINE in the desktop/games task.  Compositor takeover is done
+// via RelicDoomBegin/RelicDoomEnd in RelicDesktop.HC (ExePrint) so
+// Fs->draw_it points at the REAL &DrawDesktop in the desktop heap.
+// Assigning &DrawDesktop from this file crashes WinMgr (UndefinedExtern).
 
 U0 RelicTOOMDarkWin()
 {
@@ -102,7 +94,7 @@ U0 RelicTOOMUseIWAD(U8 *iwad)
 U0 RelicTOOMShowError(U8 *msg)
 {
   I64 ec, ea, eb;
-  relic_doom_active = FALSE;
+  ExePrint("RelicDoomEnd;");
   Fs->draw_it = NULL;
   WinBorder(OFF);
   WinMax;
@@ -128,7 +120,6 @@ U0 RunTOOM()
 {
   Bool old_silent;
   CBGR48 saved_pal[COLORS_NUM];
-  U0 (*saved_fp_wall_paper)(CTask *);
   U8 *dir, *iwad;
 
   dir  = RelicTOOMFindDir();
@@ -166,15 +157,7 @@ U0 RunTOOM()
   Cd(dir);
   RelicTOOMDarkWin;
   RelicTOOMUseIWAD(iwad);
-
-  // Compositor takeover — DrawDesktop blits doom_scrn each Refresh.
-  saved_fp_wall_paper = gr.fp_wall_paper;
-  gr.fp_wall_paper = NULL;
-  relic_doom_active = TRUE;
-  Fs->draw_it = &DrawDesktop;
-  DocClear;
-  LBts(&Fs->display_flags, DISPLAYf_SHOW);
-  WinZBufUpdate;
+  ExePrint("RelicDoomBegin;");
 
   try {
     FlushMsgs;
@@ -188,6 +171,7 @@ U0 RunTOOM()
     Silent(old_silent);
     GrPaletteSet(saved_pal);
     if (FramePtr("RELIC_TOOM_QUIT")) {
+      ExePrint("RelicDoomEnd;");
       FlushMsgs;
     } else {
       RelicTOOMShowError(
@@ -196,9 +180,7 @@ U0 RunTOOM()
     }
   }
 
-  relic_doom_active = FALSE;
-  while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
-  gr.fp_wall_paper = saved_fp_wall_paper;
+  ExePrint("RelicDoomEnd;");
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
   RelicTermDark;

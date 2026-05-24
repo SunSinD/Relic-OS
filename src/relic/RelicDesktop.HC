@@ -260,8 +260,45 @@ Bool RelicKillRogueChildren()
   return killed;
 }
 
+// Saved compositor state while DOOM runs inline (RunTOOM calls via ExePrint).
+U0 (*relic_saved_draw_it)(CTask *, CDC *) = NULL;
+U0 (*relic_saved_fp_wall_paper)(CTask *) = NULL;
+
+// Must be called from the RelicDesktop heap — sets draw_it to the REAL
+// &DrawDesktop pointer.  RunTOOM must NOT assign draw_it itself because
+// cross-heap function pointers cause WinMgr UndefinedExtern crashes.
+U0 RelicDoomBegin()
+{
+  if (!relic_doom_active) {
+    relic_saved_draw_it = Fs->draw_it;
+    relic_saved_fp_wall_paper = gr.fp_wall_paper;
+  }
+  gr.fp_wall_paper = NULL;
+  relic_doom_active = TRUE;
+  Fs->draw_it = &DrawDesktop;
+  DocClear;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinZBufUpdate;
+  FlushMsgs;
+}
+
+U0 RelicDoomEnd()
+{
+  relic_doom_active = FALSE;
+  while (FramePtr("RELIC_DOOM_SCRN")) FramePtrDel("RELIC_DOOM_SCRN");
+  if (relic_saved_fp_wall_paper)
+    gr.fp_wall_paper = relic_saved_fp_wall_paper;
+  if (relic_saved_draw_it)
+    Fs->draw_it = relic_saved_draw_it;
+  relic_saved_draw_it = NULL;
+  relic_saved_fp_wall_paper = NULL;
+  FlushMsgs;
+}
+
 U0 RelicDesktopRestore()
 {
+  if (relic_doom_active)
+    RelicDoomEnd;
   winmgr.show_menu = FALSE;
   relic_pending_app = -1;
   RelicThemeApply;
