@@ -5,6 +5,16 @@ Each entry marks a point where Relic OS diverges from the TempleOS baseline.
 
 ---
 
+## [Unreleased]
+
+### Changed
+- README: screenshots, shorter intro, a Feedback section.
+- Roadmap rewritten as Done / Next / Later / Known issues.
+- Issue forms: simple bug report and an "Idea or feedback" form.
+- README artwork is stored in the repo (`docs/images/`) instead of imgur.
+
+---
+
 ## [0.4.0] - 2026-10-30
 
 First public release with a downloadable ISO. Tested in VMware Workstation (install and live CD) and QEMU (fresh install, boot from disk, DOOM).

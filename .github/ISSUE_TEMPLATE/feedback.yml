@@ -1,0 +1,11 @@
+name: Idea or feedback
+description: Something you'd like to see, or your thoughts after trying it.
+title: "[Idea]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea or thoughts
+    validations:
+      required: true

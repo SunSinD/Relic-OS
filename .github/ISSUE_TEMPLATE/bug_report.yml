@@ -1,33 +1,27 @@
 name: Bug report
-description: Report incorrect behavior, broken documentation, or tooling failure.
+description: Something crashed, froze or looks wrong.
 title: "[Bug]: "
-labels: ["bug", "needs-triage"]
+labels: ["bug"]
 body:
   - type: textarea
     id: summary
     attributes:
-      label: Summary
-      description: What happened?
-    validations:
-      required: true
-  - type: textarea
-    id: expected
-    attributes:
-      label: Expected behavior
-      description: What should have happened instead?
+      label: What happened?
+      description: A screenshot helps. If it crashed, press Ctrl+Alt+V and take a photo of that screen.
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: Reproduction steps
-      description: Include commands, emulator configuration, logs, or links.
+      label: How do I make it happen?
+      description: The keys you pressed or the app or game you opened.
     validations:
       required: false
-  - type: textarea
-    id: environment
+  - type: input
+    id: setup
     attributes:
-      label: Environment
-      description: Host OS, compiler, emulator, CPU architecture, and branch.
+      label: Your setup
+      description: Relic OS version, VM software (VMware, VirtualBox, QEMU...) or real hardware, live CD or installed.
+      placeholder: v0.4.0, VMware Workstation 17, installed
     validations:
-      required: false
+      required: true
