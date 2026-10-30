@@ -1,7 +1,7 @@
 # Getting Started
 
-Relic OS is early. The best first work is organizing the fork and making the
-next technical step clear.
+To build and run Relic OS, follow [vmware-workflow.md](vmware-workflow.md):
+one command (`tools\relic.ps1 dev`) syncs `src/relic/` into the VM and boots it.
 
 ## Good First Tasks
 

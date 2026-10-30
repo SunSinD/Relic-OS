@@ -39,6 +39,51 @@ U0 TOOMChromeOff()
   WinFocus;
 }
 
+// Relic OS presenter hand-shake.  doom_scrn is rendered IN PLACE, so if the
+// WinMgr blits it mid-frame the player sees torn, half-rasterised slices
+// ("pixelation" while moving).  The desktop draw_it (RelicDrawDoomFrame)
+// reads this flag through the RELIC_DOOM_BUSY frame ptr and only snapshots
+// doom_scrn while it is clear, i.e. between TOOMFrameEnd and the next
+// TOOMFrameBegin.  Hold it for the whole frame composition (world, HUD,
+// menu overlays) and release right before Refresh.
+I64 doom_scrn_in_draw=0;
+while (FramePtr("RELIC_DOOM_BUSY")) FramePtrDel("RELIC_DOOM_BUSY");
+FramePtrAdd("RELIC_DOOM_BUSY", &doom_scrn_in_draw);
+
+U0 TOOMFrameBegin()
+{
+  LBts(&doom_scrn_in_draw,0);
+}
+
+//Front buffer: the desktop presenter only ever shows THIS copy, which is
+//refreshed with a finished frame by TOOMPresent.  doom_scrn itself is drawn
+//in place and must never reach the screen half-done.
+CDC *doom_front=DCNew(GR_WIDTH,GR_HEIGHT);
+doom_front->flags|=DCF_NO_TRANSPARENTS;
+DCFill(doom_front,BLACK);
+while (FramePtr("RELIC_DOOM_FRONT")) FramePtrDel("RELIC_DOOM_FRONT");
+FramePtrAdd("RELIC_DOOM_FRONT", doom_front);
+
+//Publish doom_scrn as a complete frame.  Bits above bit 0 of
+//doom_scrn_in_draw count published frames (the desktop shows DOOM fps).
+//TRANSPARENT pixels (never drawn, e.g. the 2 edge columns) keep the old
+//front pixel, like stock TOOM blitting onto the persistent gr.dc.
+U0 TOOMPresent()
+{
+  I64 i,n=doom_scrn->width_internal*doom_scrn->height;
+  U8 *src=doom_scrn->body,*dst=doom_front->body;
+  for(i=0;i<n;i++)
+    if(src[i]!=TRANSPARENT)
+      dst[i]=src[i];
+  doom_scrn_in_draw+=2;
+}
+
+U0 TOOMFrameEnd()
+{
+  if(LBtr(&doom_scrn_in_draw,0))
+    TOOMPresent;
+}
+
 I64 FrameCnt(CDC **arr) {
   I64 i=0;
   while(i<4&&arr[i])
@@ -94,8 +139,6 @@ U0 TallBlot(CDC *to,I64 x,I64 y,I64 h,CDC *from) {
 }
 F64 ray_cast_table_cos[GR_WIDTH/2];
 F64 ray_cast_table_sin[GR_WIDTH/2];
-F64 cos_table[GR_WIDTH];
-F64 sin_table[GR_WIDTH];
 Bool paused = FALSE,gameExit=FALSE;
 F64 time_offset=0,base_tS=tS;
 F64 paused_at=0;
@@ -119,7 +162,6 @@ U0 Unpause(F64 to=-1) {
 class CJobRunnerData {
   U0 (*fptr)(U8*);
 };
-I64 doom_scrn_in_draw=0;
 CDoomSector *GetSectorForCoord(CDoomLevel *level,F64 x,F64 y) {
   CDoomSubsector *ss;
   CDoomBSPNode *node=DoomWhichBSPNode(x,y,level,&ss);
@@ -395,11 +437,8 @@ I64 class CLine64 {
 I64 LineYSort(CLine64 a,CLine64 b) {
   return a.ey-b.ey;
 }
-U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,F64 dist,F64 wxf,F64 wyf,I64 light,Bool god_mode) {
+U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,I64 idist,I64 wx,I64 wy,I64 light,Bool god_mode) {
   x=GR_WIDTH-x;
-  I64 idist = ToI64(dist);
-  I64 wx = ToI64(wxf);
-  I64 wy = ToI64(wyf);
   U16 *to=&dc->body[x+y*dc->width_internal];
   I32 *db_z=&dc->depth_buf[x+y*dc->width_internal];
   if(*db_z<idist-3) return;
@@ -412,7 +451,7 @@ U0 SectorPlot(CDC *dc,CDC *texture,I64 x,I64 y,F64 dist,F64 wxf,F64 wyf,I64 ligh
 //wx<<1 multiples by 2,which means any number*2 is even
   wx=(wx<<1)&127;
   wy=(wy<<1)&127;
-  U64 color=LookupLighting(texture->body[wx+wy*128](U16),light,dist,god_mode);
+  U64 color=LookupLighting(texture->body[wx+wy*128](U16),light,idist&U32_MAX,god_mode);
   *to=color&0xffff;
   to(U8*)+=dc->width_internal;
   *to=color>>16;
@@ -468,7 +507,17 @@ U0 FillPoly(CDC *dc,CDoomCamera *cam,CDoomSector *os,CDC *texture,CD4 *points,I6
   F64 slope,wxf,wyf,midx,slope2,angle,dist;
   I64 scrn_points[0x100],wall_skip;
   CLine64 ln,to_remove,ln2;
-
+  static F64 last_angle=I16_MAX; //Not possible to start with this angle
+  static F64 cos_table[GR_WIDTH];
+  static F64 sin_table[GR_WIDTH];
+  if(last_angle!=cam->angle) {
+    for(x=0;x!=GR_WIDTH;x++) {
+      angle=(ToF64(x)-GR_WIDTH/2)/GR_WIDTH*(cam->fov);
+      sin_table[x]=Sin(cam->angle+angle);
+      cos_table[x]=Cos(cam->angle+angle);
+    }
+    last_angle=cam->angle;
+  }
   ln.sx=points[0].start.x;
   ln.ex=ln.sx;
   ln.sy=points[0].start.y;
@@ -1430,13 +1479,6 @@ extern U0 WorldLock(Bool read=FALSE);
 extern U0 WorldUnlock(Bool read=FALSE);
 U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
   WorldLock;
-  I64 x_trig;
-  F64 angle_trig;
-  for(x_trig=0;x_trig!=GR_WIDTH;x_trig++) {
-    angle_trig=(ToF64(x_trig)-GR_WIDTH/2)/GR_WIDTH*(cam->fov);
-    sin_table[x_trig]=Sin(cam->angle+angle_trig);
-    cos_table[x_trig]=Cos(cam->angle+angle_trig);
-  }
   CDoomSubsector *ss;
   CDoomSector *sector;  
   CDoomThing *thing;
@@ -1508,7 +1550,8 @@ U0 DrawDoomWorld(CDoomCamera *cam,CDoomLevel *level,CDC *to_dc) {
       DrawAThing(to_dc,thing,cam);
   }
   DrawSkyAndFillHoles(to_dc,l,cam);
-  LBtr(&doom_scrn_in_draw,0);
+//The busy flag stays set: the caller finishes the frame (HUD, menu) and
+//releases it with TOOMFrameEnd right before Refresh.
   WorldUnlock;
 }
 
@@ -1521,6 +1564,11 @@ U0 SongTaskDOOM(I64 LEVEL)
 
 CTask *music_task=NULL;
 CTask *toom_animate_task=NULL;
+#define TOOM_TURN_SPEED 2.6 //radians per second, x2 with Shift
+Bool toom_ms_armed=FALSE;
+#define TOOM_MS_TURN 0.35 //degrees per mouse pixel
+I64 toom_ms_last_x=0;
+F64 toom_turn_last=0.,toom_turn_t=0.;
 CTask *toom_faces_task=NULL;
 
 
@@ -3702,6 +3750,8 @@ U8 *NextLevel(U8 *nm,Bool special=FALSE) {
 extern Bool MPTalk(CDC *,U8 *connection);
 U0 PlayLevel(Bool init=TRUE) { 
   MsSet(GR_WIDTH/2,GR_HEIGHT/2);
+  toom_ms_armed=FALSE;
+  toom_ms_last_x=ms_hard.pos.x;
   TOOMChromeOff;
   DocClear;
   Bool transition=FALSE;
@@ -3745,7 +3795,8 @@ ent:;
     new=DCCopy(gr.dc2);
     UpdateCameraFromPlayer(&cam,p);
     DrawDoomWorld(&cam,l,new);
-    ScreenMelt(gr.dc,new,old);
+    TOOMFrameEnd;
+    ScreenMelt(doom_scrn,new,old);
     DCDel(old),DCDel(new);
     Unpause;
   }
@@ -3772,15 +3823,19 @@ ent:;
       new=DCCopy(gr.dc2);
       UpdateCameraFromPlayer(&cam,p);
       DrawDoomWorld(&cam,l,new);
+      TOOMFrameEnd;
       ScreenMelt(doom_scrn,new,old);
       DCDel(old),DCDel(new);
       Unpause;
     }
     UpdateCameraFromPlayer(&cam,p);
+    TOOMFrameBegin;
     DrawDoomWorld(&cam,l,doom_scrn);
     TOOMChromeOff;
-    if(ms.pos.y<20)
+    if(ms.pos.y<20) {
       MsSet(ms.pos.x,GR_HEIGHT/2);
+      toom_ms_last_x=ms_hard.pos.x;
+    }
 
     if(talk_active&&IsNetworkGameClient) {
       ST_Start(p);
@@ -3828,8 +3883,15 @@ ent:;
      p->angle-=ToF64(ms.pos.x-GR_WIDTH/2)*pi/180.;
      MsSet(GR_WIDTH/2,GR_HEIGHT/2);
 #else
-     p->angle-=ToF64(ms.pos.x-GR_WIDTH/2)*pi/180.*0.25;
-     MsSet(GR_WIDTH/2,GR_HEIGHT/2);
+//Turn by the change in the raw hardware position.  MsSet(center) every
+//frame raced the WinMgr: it adds mouse packets to ms_hard just before DOOM
+//ran, so the recenter erased every movement before ms.pos ever saw it.
+//The cursor is kept at the center by moving ms.offset instead, which never
+//touches ms_hard.
+     p->angle-=ToF64(ms_hard.pos.x-toom_ms_last_x)*pi/180.*TOOM_MS_TURN;
+     toom_ms_last_x=ms_hard.pos.x;
+     ms.offset.x=GR_WIDTH/2-ToI64(ms.scale.x*ms_hard.pos.x);
+     ms.offset.y=GR_HEIGHT/2-ToI64(ms.scale.y*ms_hard.pos.y);
 #endif
       p->running=FALSE;
       old_moving=p->moving;
@@ -3853,13 +3915,23 @@ ent:;
 	  move_angle=pi;
 	  move_mag=1;
         }
-        if(Bt(kbd.down_bitmap,Char2ScanCode('a'))||Bt(kbd.down_bitmap,SC_CURSOR_LEFT)) {
+//Relic OS: keyboard play that works on any VM or machine (mouse look is
+//optional): Left/Right arrows turn, A/D strafe, Ctrl fires.
+        toom_turn_t=Server_tS-toom_turn_last;
+        toom_turn_last=Server_tS;
+        if(toom_turn_t<0.||toom_turn_t>.25)
+          toom_turn_t=0.;
+        if(Bt(kbd.down_bitmap,SC_CURSOR_LEFT))
+          p->angle+=toom_turn_t*TOOM_TURN_SPEED*(1.+Bt(kbd.down_bitmap,SC_SHIFT));
+        if(Bt(kbd.down_bitmap,SC_CURSOR_RIGHT))
+          p->angle-=toom_turn_t*TOOM_TURN_SPEED*(1.+Bt(kbd.down_bitmap,SC_SHIFT));
+        if(Bt(kbd.down_bitmap,Char2ScanCode('a'))) {
 	  p->running=Bt(kbd.down_bitmap,SC_SHIFT);
 	  p->side_moving=TRUE;
 	  move_angle_side=pi/2;
 	  move_mag_side=1;
         }
-        if(Bt(kbd.down_bitmap,Char2ScanCode('d'))||Bt(kbd.down_bitmap,SC_CURSOR_RIGHT)) {
+        if(Bt(kbd.down_bitmap,Char2ScanCode('d'))) {
 	  p->running=Bt(kbd.down_bitmap,SC_SHIFT);
 	  p->side_moving=TRUE;
 	  move_angle_side=-pi/2;
@@ -3881,7 +3953,11 @@ ent:;
             p->side_movement_start_tS=Server_tS;
 
 
-        if(ms.lb) {
+//The mouse button only counts once it has been seen released in this
+//level: VMware passes the click that grabs the mouse into the guest.
+        if(!ms.lb)
+          toom_ms_armed=TRUE;
+        if(Bt(kbd.down_bitmap,SC_CTRL)||(toom_ms_armed&&ms.lb)) {
 	  ST_Fire(p);
         } else if(weaponIndex==6&&(WEAPON_FIRE==p->weapon_state||WEAPON_REFIRE==p->weapon_state)){ //Account for weapon pause on plasma gun
 	  p->last_attack=Server_tS;
@@ -3934,6 +4010,7 @@ ent:;
       while((mr=ScanMsg(&a,&b))!=MSG_NULL) {
         if(mr==MSG_KEY_DOWN&&a==CH_ESC) {
 	  paused=TRUE;
+	  TOOMFrameEnd;
 	  Refresh;
 	  FlushMsgs; //Flush Esc msg
 	  break;
@@ -3957,10 +4034,15 @@ play_again:
       AIWNIOS_SetCaptureMouse(0);
 #endif
       mr=MainMenu;
+      toom_ms_last_x=ms_hard.pos.x; //menu cursor moves must not turn the view
       if(gameExit) {
+//Quit Game from the Esc menu: leave the level cleanly.  SinglePlayer.HC
+//sees gameExit, stops the helper tasks and returns to the Relic games menu.
         paused=FALSE;
         active_menu=NULL;
+        in_level=FALSE;
         Snd;
+        TOOMFrameEnd;
         FlushMsgs;
         return;
       }
@@ -3974,6 +4056,7 @@ end_control:;
       UpdateLevel(l);
     }
     TOOMChromeOff;
+    TOOMFrameEnd;
     Refresh;
   }
   if(gameExit) {
@@ -3981,10 +4064,12 @@ end_control:;
     paused=FALSE;
     in_level=FALSE;
     active_menu=NULL;
+    TOOMFrameEnd;
     FlushMsgs;
     return;
   }
 ret:
+  TOOMFrameEnd;
   Snd;
   if(!IsNetworkGameClient) {
     p->weapon_state=0;

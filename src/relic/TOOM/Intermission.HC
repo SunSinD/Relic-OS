@@ -283,6 +283,7 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
   FlushMsgs;
   while(state<2) {
     TOOMChromeOff;
+    TOOMFrameBegin;
 
     if(!FramePtr("DOOM2")) {
       GrBlot(doom_scrn,0,0,background);
@@ -330,7 +331,10 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
 	  LoadGrLump(wad,buf); //Will load once
 	  dc=GetGrLump(buf);
         }
-        if(!dc) return; //??? TODO text intermission
+        if(!dc) {
+          TOOMFrameEnd;
+          return; //??? TODO text intermission
+        }
         GrBlot(doom_scrn,(GR_WIDTH-dc->width)/2,y,dc);
         DrawStats(doom_scrn,lev,ep,l,(tS-start_ts)*30.);
       }else {
@@ -349,6 +353,7 @@ U0 Intermission(CDoomLevel *lev,I64 ep,I64 l) {
       state++;
     }
     TOOMChromeOff;
+    TOOMFrameEnd;
     Refresh;
   }
   if(FramePtr("DOOM2"))

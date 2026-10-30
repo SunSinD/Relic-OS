@@ -10,24 +10,50 @@ U0 RelicTOOMDarkWin()
   WinMax;
   winmgr.show_menu = FALSE;
   AutoComplete(OFF);
-  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-        WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+  // Keep WIF_FOCUS_TASK_MENU set: clearing it is what makes the WinMgr
+  // draw the "File Edit Insert..." pull-down on row 0.
+  Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
+  RelicMenuOff;
   WinFocus;
   MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
-  Fs->border_src  = 0;
+  Fs->border_src  = BDS_CONST;
   Fs->text_attr   = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
 }
 
+// Theme/chrome are compiled in this heap (RelicBoot include chain), so a
+// direct call is all that is needed after the game returns.
 U0 RelicTOOMRestoreChrome()
 {
-  if (FileFind("::/Home/RelicOS/RelicChrome.HC"))
-    ExeFile("::/Home/RelicOS/RelicChrome.HC", CCF_JUST_LOAD);
-  if (FileFind("::/Home/RelicOS/RelicTheme.HC"))
-    ExeFile("::/Home/RelicOS/RelicTheme.HC", CCF_JUST_LOAD);
-  ExePrint("RelicThemeApply;");
-  ExePrint("RelicChromeInstall;");
+  RelicThemeApply;
+  RelicChromeInstall;
+}
+
+// TOOM's headers use #ifndef guards (MENU, DOOM_WAD, ...).  Defines live in
+// this task's hash table for as long as the task lives, so on a second
+// launch the guarded files would be skipped and the new game loop would be
+// bound to stale code and a stale doom_scrn (black screen).  Drop the guard
+// defines so every launch recompiles the whole game.
+U8 *relic_toom_guards[19] = {
+  "MENU", "DOOM_WAD", "FAST_TRIG", "INTERMISSION", "FUN_WITH_FRIENDS",
+  "MUS_H", "SET_H", "LIGHTING_H", "THINKER_H", "COLLISION_H", "AUTOMAP_H",
+  "DOORS", "PHYSICS", "SAVE_H", "MONSTER_GR", "DOOM_MAIN", "SKY_PIXEL",
+  "MUZZLE_FLASH_LIGHT", "SWSTRING"
+};
+
+U0 RelicTOOMClearDefines()
+{
+  I64 i;
+  CHash *h;
+
+  for (i = 0; i < 19; i++) {
+    h = HashSingleTableFind(relic_toom_guards[i], Fs->hash_table, HTT_DEFINE_STR);
+    while (h) {
+      HashRemDel(h, Fs->hash_table);
+      h = HashSingleTableFind(relic_toom_guards[i], Fs->hash_table, HTT_DEFINE_STR);
+    }
+  }
 }
 
 U0 RelicTOOMPaletteVanilla()
@@ -114,7 +140,7 @@ U0 RunTOOM()
 {
   Bool old_silent;
   CBGR48 saved_pal[COLORS_NUM];
-  U8 *dir, *iwad;
+  U8 *dir, *iwad, *old_dir;
 
   dir  = RelicTOOMFindDir();
   iwad = RelicTOOMFindIWAD();
@@ -147,10 +173,12 @@ U0 RunTOOM()
   GrPaletteGet(saved_pal);
   RelicTOOMPaletteVanilla;
   old_silent = Silent;
+  old_dir = DirCur;
 
   Cd(dir);
   RelicTOOMDarkWin;
   RelicTOOMUseIWAD(iwad);
+  RelicTOOMClearDefines;
   DocClear;
   DCFill;
   FlushMsgs;
@@ -163,6 +191,7 @@ U0 RunTOOM()
       ExeFile("SinglePlayer.HC.Z");
     Silent(old_silent);
   } catch {
+    Fs->catch_except = TRUE;
     Silent(old_silent);
     GrPaletteSet(saved_pal);
     if (FramePtr("RELIC_TOOM_QUIT")) {
@@ -174,7 +203,13 @@ U0 RunTOOM()
     }
   }
 
+  // Back on the games task: any child the game left behind (animate,
+  // sound) is told to stop through gameExit; give them a moment to leave.
+  Sleep(50);
+  Cd(old_dir);
+  Free(old_dir);
   GrPaletteSet(saved_pal);
   RelicTOOMRestoreChrome;
+  MsSet(GR_WIDTH / 2, GR_HEIGHT / 2);
   FlushMsgs;
 }

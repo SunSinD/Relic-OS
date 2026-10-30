@@ -226,6 +226,7 @@ U0 Finale(CDC *dc,I64 ep) {
   coff=0;
   while(TRUE) {
     TOOMChromeOff;
+    TOOMFrameBegin;
     ch=(Server_tS-start_tS)*TEXT_SPEED;
     if(ch+coff>cnt) {
       ch=cnt;
@@ -266,8 +267,12 @@ U0 Finale(CDC *dc,I64 ep) {
       if(!MainMenu)
         Unpause;
     TOOMChromeOff;
+    TOOMFrameEnd;
     Refresh;
+    if(gameExit)
+      break;
   }
+  TOOMFrameEnd;
   Refresh;
   DCFill;
 }
@@ -280,6 +285,7 @@ Bool BunnyScroll(CDC *dc) {
   I64 scrolled,finale_cnt,stage,ascii;
   while(TRUE) {
     TOOMChromeOff;
+    TOOMFrameBegin;
     finale_cnt=(Server_tS-st)*30.;
     scrolled=(finale_cnt-230)/2;
     if(scrolled>320)
@@ -314,8 +320,12 @@ Bool BunnyScroll(CDC *dc) {
     GrBlot(dc,(GR_WIDTH-13*8*2)/2-lump->x*2,(GR_HEIGHT-8*8*2)/2-lump->y*2,lump);
 skip:;
     TOOMChromeOff;
+    TOOMFrameEnd;
     Refresh;
+    if(gameExit)
+      break;
   }
+  TOOMFrameEnd;
   DCFill;
   return FALSE;
 

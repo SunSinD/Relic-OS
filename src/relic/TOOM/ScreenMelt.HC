@@ -13,7 +13,7 @@ U0 ScreenMelt(CDC *to,CDC *new,CDC *old) {
     continue=FALSE;
     for(i=0;i!=w;i++) {
       for(y=0;y<offsets[i];y+=2) {
-	if(y>=2+to->height) break;
+	if(y+1>=to->height) break; //rows y and y+1 are written
 	src=&new->body[new->width*y+i*2];
         dst=&to->body[to->width*y+i*2];
 	*dst=*src;
@@ -33,6 +33,7 @@ U0 ScreenMelt(CDC *to,CDC *new,CDC *old) {
       }
       offsets[i]+=32;
     }
+    TOOMPresent;
     Refresh;
   }
   Free(offsets);

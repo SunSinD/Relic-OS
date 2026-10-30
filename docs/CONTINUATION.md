@@ -1,115 +1,64 @@
-# Relic OS — Session Continuation Prompt
+# Relic OS - Continuation Prompt
 
-Copy everything in the **"Paste into Cursor"** section below into a new chat to resume work without losing context.
-
----
-
-## Paste into Cursor
+Paste the block below into a new chat with any AI coding assistant to pick up
+where the last session stopped.
 
 ```
-I'm continuing work on Relic OS (TempleOS fork): https://github.com/SunSinD/Relic-OS
+You are working on my repo Relic OS, a fork of TempleOS V5.03 written in HolyC:
+https://github.com/SunSinD/Relic-OS
+Local clone: <path to your clone> (Windows, VMware Workstation, Python 3)
+Plain-text TempleOS source for checking APIs: python tools\tosz.py <file>.HC.Z out.HC (expands any src/templeos .Z file)
 
-## Goal
-Ship a stable dark desktop (wallpaper + dock), working Shell/Games/TOOM, system status bar with time/date, and a repeatable VMware build loop.
+Dev loop (already set up and working):
+- powershell -ExecutionPolicy Bypass -File tools\relic.ps1 dev
+  Powers off the VM, writes src\relic\ to a FAT32 transfer disk, boots the VM.
+  The guest's HomeSys.HC copies the new files in and starts the desktop (~25 s).
+- tools\relic.ps1 shot  -> build\shots\latest.png (screenshot of the VMware window; VNC misreports moving frames)
+- tools\relic.ps1 log   -> prints ::/Home/Boot.LOG from the VM disk
+- python tools\vnc.py type "Dir;" --enter   /   python tools\vnc.py key Escape
+  Keyboard works over VNC, mouse clicks do not. Desktop keys: F E S G T M I H.
+- tools\relic.ps1 iso   -> build\RelicOS-v0.4.0.iso (guest runs Build.HC by itself)
+- The VM lives in build\vm\RelicOS (git-ignored). Transfer disk is E: after a dev boot (G: when mounted manually for setup).
 
-## My environment
-- **Host:** Windows 10/11, VMware Workstation
-- **Repo:** `C:\Users\SunSD\Relic-OS`
-- **Transfer VHD:** `C:\RelicTransfer\transfer.vhd` (sync via `C:\RelicTransfer\MakeVHD.ps1` — copies `src\relic\` → VHD as `C:/`)
-- **VM:** `C:\Users\SunSD\Documents\Virtual Machines\TempleOS\TempleOS.vmx`
-  - **IDE 0:0** → transfer VHD (Build.HC / source)
-  - **IDE 0:1** → `TempleOS.vmdk` (installed system)
-  - CD disconnected after install; boot from vmdk
-- **ISO export (host):** `C:\RelicTransfer\ExtractISO.ps1` → `RelicOS_v1.0.0.iso`
+Boot chain: HomeSys.HC (dev sync) -> RelicStartUp.HC (UserStartUp/SrvStartUp)
+-> RelicBoot.HC -> Theme -> Chrome (status bar) -> Wallpaper -> Install prompt
+-> RelicDesktop.HC (dock, apps, Shell task) which includes GamesLauncher.HC -> RunTOOM.HC -> TOOM/.
 
-## Current blockers (fix these first)
-1. **Shell dock button (>_) still freezes the desktop** (cursor moves, wallpaper/dock stop updating). Latest fix in repo may not be on the VM yet — I could not open Shell to run `CopyTree`.
-2. **Verify system top bar** shows `RelicOS V1.0.0` + day + date + time + FPS via `RelicChrome.HC` / `gr.fp_wall_paper` — NOT drawn on wallpaper. No "Desktop" text on wallpaper.
-3. **Deploy latest sources to VM** without Shell if needed (see below).
+HolyC rules (each one broke the OS before):
+- Never re-declare an already defined function with extern (calls become "Undefined Extern").
+- ToI64(x) - U8 is unsigned; convert both sides with ToF64 for signed math.
+- HomeSys must keep SrvStartUp or every popup is invisible.
+- No continue; define functions before use; Relic Shell lines max 1023 chars.
+- Changes to HomeSys.HC apply one boot later; everything else on the next boot.
+- Dev sync is opt-in with ::/Home/RelicDev.TXT; that flag must never ship in the ISO.
+- Dev discovery checks only FAT32 ATA drives, never an empty CD drive.
+- Display goes through RelicDisplay.HC (VMware SVGA II or Bochs VBE); planar VGA in VMs costs ~270 ms per full screen.
+  Ctrl+Alt+V returns to VGA (shows debugger/crash text); ::/Home/RelicNoSVGA.TXT forces VGA from boot.
+- DOOM controls: mouse or arrows turn, A/D strafe, W/S move, Ctrl or left click fires, Shift runs.
+- DOOM mouse look reads the ms_hard.pos delta; never MsSet the cursor every frame (it erases the movement).
+- Never rewrite ::/Kernel.BIN.C or ::/0000Boot/* on a running system (boot sectors use disk positions).
+- reg is a HolyC keyword; #include on the same line as a statement runs before it.
 
-## Deploy sources without Shell
-**Option A — Host sync + reboot:**
-1. On Windows (admin): `powershell -ExecutionPolicy Bypass -File C:\RelicTransfer\MakeVHD.ps1`
-2. Boot VM with transfer disk attached as IDE 0:0
-3. In TempleOS installer/desktop (any working prompt): `Drv('D'); CopyTree("C:/","::/Home/RelicOS/");`
-4. Reboot from `TempleOS.vmdk`
+How to work:
+1. Read roadmap/README.md and the files you will touch before editing.
+2. Make the change, run tools\relic.ps1 dev, take screenshots over VNC and check the result yourself.
+   If something breaks, find the cause in the guest (dump buffers to the transfer disk, read them on the host) instead of guessing.
+3. Update roadmap/README.md and CHANGELOG.md, commit with a clear message, push to main.
+   Do not commit build/, ISOs, VMDKs or screenshots.
 
-**Option B — Full rebuild inside VM:**
-```holyc
-Drv('D');
-Cd("/Home");
-#include "C:/Build.HC";
+Task for this session:
+<describe what you want next, e.g. "Files browser that can navigate folders and open files in the Editor">
 ```
 
-## Architecture (desktop)
-| Component | File | Role |
-|-----------|------|------|
-| Boot chain | `RelicBoot.HC` | Theme → Chrome → Wallpaper → `RelicDesktop` loop |
-| Status strip | `RelicChrome.HC` | `gr.fp_wall_paper` — `RelicOS V1.0.0` + clock + FPS |
-| Wallpaper | `RelicWallpaper.HC` | `wallpaper.raw` 640×480 |
-| Desktop | `RelicDesktop.HC` | `draw_it` = dock + wallpaper (below TOPBAR_H), no OS text on wallpaper |
-| Games | `GamesLauncher.HC` | Numeric menu; TOOM via `ExePrint("RunTOOM;")` |
-| DOOM | `RunTOOM.HC` + `TOOM/` | Child task; needs `freedoom1.wad` in `::/Home/RelicOS/TOOM/` |
-| Build | `Build.HC` | Installs to `::/Home/RelicOS`, ISO export, HomeSys patches |
+## Last session (2026-10-30, v0.4.0 release)
 
-**Shell (intended design):** `RelicShellTaskMain` spawned as independent task (NOT child of desktop `Fs`). Desktop loop must NOT use `DeathWait` or `while (ms.lb)`. Esc → `RelicChildKill` + `RelicDesktopRestore` (no `MsSet` — do not move mouse).
-
-**Wallpaper draw:** `GrBlot(dc, 0, TOPBAR_H, relic_wp_dc)` then `gr.fp_wall_paper(task)` so status strip is never covered.
-
-## HolyC constraints (do not break)
-| Avoid | Use instead |
-|-------|-------------|
-| `continue;` | Restructure loop / `return` |
-| `goto` in Relic shell/desktop | `return` / if-else |
-| Multi-statement `switch` cases | One statement per case or if/else |
-| `RunTOOM()` / `if (!Func())` | `ExePrint("RunTOOM;");` |
-| `'\n'` in `StrFirstOcc` | `"\n"` |
-| Assignment inside `if (x = ...)` | Separate lines |
-| `{ }` inside `switch` cases | Extract `U0` functions |
-| `RelicDriveAttrsDark` in `RelicTheme.HC` at boot | Drive colors only in `RelicDesktop.HC` |
-| Forward refs like `RelicGamesLauncher;` in desktop | `ExePrint("...");` after `ExeFile` |
-
-Functions must be **defined before use** in boot compile order.
-
-## Resolved in recent commits (verify on VM)
-- White terminal borders → `Fs->border_src = 0`, `RelicTermDark`
-- Boot crashes → no `continue`/bad switch, no StartOS injection
-- Games compile error line 23 → `ExePrint("RunTOOM;")` not `RunTOOM;`
-- TOOM in desktop task → child task via `RunTOOM.HC`
-- Editable text on wallpaper → `RelicAppStart` / `draw_it = NULL` for text apps
-- `freedoom1.wad` added under `src/relic/TOOM/` (~27 MB)
-
-## Next tasks (priority)
-1. Confirm Shell opens in separate window; desktop stays responsive; `exit` or Esc closes shell.
-2. Confirm status bar always visible with `RelicOS V1.0.0` + live clock.
-3. Test all dock buttons: Fi, Ed, >_, Gm, Tk, Mm, Si, ?
-4. Test Games → 1 → TOOM → Quit returns to launcher cleanly.
-5. If Shell still freezes: debug `GetMsg` vs child focus, remove any remaining blocking waits, consider inline `UserCmdLine` only in child task.
-6. Roadmap: Files browser navigation, Editor file picker, Shell history, Settings panel.
-
-## Key files to read first
-- `src/relic/RelicDesktop.HC`
-- `src/relic/RelicChrome.HC`
-- `src/relic/GamesLauncher.HC`
-- `src/relic/Build.HC`
-- `docs/CONTINUATION.md` (this file)
-- `roadmap/README.md`
-
-Please read those files, help me deploy to the VM, fix Shell freeze if still broken, and continue desktop polish.
-```
-
----
-
-## Last session summary (2026-05-23)
-
-- Iterated dock hover, Esc handling, async child tasks for Shell/Games.
-- Removed custom "Desktop" text from `DrawDesktop`; restored version string on system strip only.
-- Fixed wallpaper covering status bar (blit below `TOPBAR_H`).
-- Added `RelicShellTaskMain`, removed `while (ms.lb)` hang, spawn without parent `Fs`.
-- User could not test latest build — Shell unusable for `CopyTree`.
-
----
-
-## Agent transcript (prior chat)
-
-Cursor transcript ID: `7d95b6e6-987a-4d11-8303-4d9f8995c914` (full tool history if needed).
+- Fixed the desktop crash, pink DOOM, invisible popups; verified Shell, Games, DOOM, Flap Bat, all dock apps in VMware.
+- Built the one-command dev loop and hands-free ISO build.
+- Rebuilt the ISO and verified a fresh install boots without the CD and without the dev-sync flag.
+- Repaired the installed dev VM boot script; dev sync works with the CD disconnected.
+- New VM installation leaves the transfer disk detached so the installer chooses the system disk.
+- Host regression checks: python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py".
+- DOOM: colour restored (2-colour dithering + saturation boost), front-buffer presenter, 30 fps moving with the SVGA driver and 4 vCPUs.
+- Fixed the Titanium crash (corrupt sprite in stock TempleOS), a DOOM level-start crash (screen melt overrun) and DOOM mouse look.
+- Released v0.4.0 on GitHub with the ISO; tested install + boot in VMware and QEMU.
+- Known issues are listed in `roadmap/README.md`.

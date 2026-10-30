@@ -3,7 +3,7 @@
 Imported from local ISO:
 
 ```text
-C:\Users\SunSD\Downloads\TempleOS.ISO
+%USERPROFILE%\Downloads\TempleOS.ISO
 ```
 
 SHA-256:

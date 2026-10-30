@@ -11,8 +11,9 @@ WinBorder(OFF);
 WinMax;
 winmgr.show_menu=FALSE;
 AutoComplete(OFF);
-Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS -
-      WIF_SELF_BORDER - WIF_FOCUS_TASK_MENU;
+// WIF_FOCUS_TASK_MENU stays SET: clearing it makes the WinMgr draw the
+// DolDoc pull-down ("File Edit Insert...") on row 0 during the game.
+Fs->win_inhibit = WIG_TASK_DFT - WIF_SELF_FOCUS - WIF_SELF_BORDER;
 MsSet(GR_WIDTH/2,GR_HEIGHT/2);
 gameExit=FALSE;
 FlushMsgs;
@@ -28,9 +29,13 @@ while(TRUE) {
     break;
   if(ms.pos.y<20)
     MsSet(ms.pos.x,GR_HEIGHT/2);
+  // Hold the presenter while the title + menu are composed so the desktop
+  // never shows a title screen with the menu half drawn.
+  TOOMFrameBegin;
   TallBlot(doom_scrn,0,0,GR_HEIGHT,title);
   r=MainMenu;
   TOOMChromeOff;
+  TOOMFrameEnd;
   Refresh;
   if(!r || gameExit) {
      gameExit=TRUE;
@@ -43,5 +48,6 @@ active_menu=NULL;
 paused=FALSE;
 in_level=FALSE;
 TOOMStopTasks;
+TOOMFrameEnd;
 FlushMsgs;
 DocClear;

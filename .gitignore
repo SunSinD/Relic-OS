@@ -1,11 +1,10 @@
 # Relic OS - .gitignore
 
-# Binary assets (too large for git, included in releases)
-*.raw
-
-# Build artifacts
+# Local build output: VM, transfer disk, ISO, screenshots (see tools/relic.ps1)
+build/
 *.iso
 *.vhd
+*.vmdk
 
 # Temporary imported source archives/extractions
 TOOM.zip
@@ -15,6 +14,7 @@ TOOM_Extracted/
 __pycache__/
 *.pyc
 
-# Editor
+# Editor / local AI tool config
+.cursor/
 *.swp
 *.bak

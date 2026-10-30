@@ -9,36 +9,55 @@
 
 static U8 *doom_palette_dithered=NULL;
 
+// Relic OS colour matching.
+// TempleOS has 16 colours, so every Doom colour becomes a 2-pixel dither
+// of two palette entries (the "mix" c&0xF / c>>4, 255 candidates).  Doom's
+// palette is muted while the VGA palette is saturated, so a plain nearest-
+// colour match turns most browns/greens/tans into grey.  Boost saturation
+// (x1.8) and brightness (x1.15) first, like other low-colour Doom ports.
+// All maths is F64: ToI64(x)-U8 is UNSIGNED in HolyC (the old pink bug).
+#define DOOM_SAT_BOOST 1.8
+#define DOOM_BRIGHT_BOOST 1.15
+
+F64 DoomClamp255(F64 v) {
+  if(v<0.) return 0.;
+  if(v>255.) return 255.;
+  return v;
+}
+
 U8 *DitherPalette(CRGB *data) {
   U8 *ret=MAlloc(16*16);
   CBGR48 palette48[16];
-  I64 x,y,canidate,best_color;
-  F64 best_dist,dist;
-  CRGB normal[16],cur_pixel;
+  I64 i,c,best_color;
+  F64 best_dist,dist,r,g,b,l,mr[256],mg[256],mb[256];
   GrPaletteGet(palette48);
-  for(x=0;x!=16;x++) {
-    normal[x].r=ToF64(palette48[x].r)/0xffff*0xff;
-    normal[x].g=ToF64(palette48[x].g)/0xffff*0xff;
-    normal[x].b=ToF64(palette48[x].b)/0xffff*0xff;
+  for(c=0;c!=256;c++) {
+    mr[c]=(ToF64(palette48[c&0xf].r)+ToF64(palette48[c>>4].r))/2./257.;
+    mg[c]=(ToF64(palette48[c&0xf].g)+ToF64(palette48[c>>4].g))/2./257.;
+    mb[c]=(ToF64(palette48[c&0xf].b)+ToF64(palette48[c>>4].b))/2./257.;
   }
-  for(x=0;x!=16;x++) {
-    for(y=0;y!=16;y++) {
-      cur_pixel=data[x+y*16];
+  for(i=0;i!=256;i++) {
+    if(data[i].a)
+      ret[i]=TRANSPARENT;
+    else {
+      r=ToF64(data[i].r);
+      g=ToF64(data[i].g);
+      b=ToF64(data[i].b);
+      l=(r+g+b)/3.;
+      r=DoomClamp255((l+(r-l)*DOOM_SAT_BOOST)*DOOM_BRIGHT_BOOST);
+      g=DoomClamp255((l+(g-l)*DOOM_SAT_BOOST)*DOOM_BRIGHT_BOOST);
+      b=DoomClamp255((l+(b-l)*DOOM_SAT_BOOST)*DOOM_BRIGHT_BOOST);
       best_color=0;
       best_dist=1e100;
-      if(!cur_pixel.a)  {
-        for(canidate=0;canidate!=16;canidate++) {
-	  dist=Sqrt(Sqr(ToI64(normal[canidate].r)-cur_pixel.r)+
-	        Sqr(ToI64(normal[canidate].g)-cur_pixel.g)+
-	        Sqr(ToI64(normal[canidate].b)-cur_pixel.b));
-	    if(dist<best_dist) {
-	      best_dist=dist;
-	      best_color=canidate;
-	    }
+//0xFF (WHITE|WHITE) is skipped: it is the TRANSPARENT code
+      for(c=0;c!=TRANSPARENT;c++) {
+        dist=Sqr(mr[c]-r)+Sqr(mg[c]-g)+Sqr(mb[c]-b);
+        if(dist<best_dist) {
+          best_dist=dist;
+          best_color=c;
         }
-        ret[x+y*16]=best_color|best_color<<4;
-      } else
-        ret[x+y*16]=TRANSPARENT;
+      }
+      ret[i]=best_color;
     }
   }
   ret[TRANSPARENT]=TRANSPARENT;
@@ -157,78 +176,120 @@ U32 LookupLighting(U16 dith,I64 light,F64 distance,Bool god_mode=FALSE) {
   return light_mat[dith][light>>4]; //>>5 is divide by 16 (256/16==16)
 }
 U0 InitGodmodeTable() {
-  CBGR48 pal[16],dimmed,raw_color;
-  F64 best_dist,cur_dist;
-  GrPaletteGet(pal);
+  CBGR48 pal[16];
   static I64 gray[4]={LTGRAY,DKGRAY,BLACK,WHITE};
-  I64 ix,best_color,c1,iy;
+  I64 ix,ix2,best_color,c1,c2,iy;
+  F64 best_dist,cur_dist,rr,rg,rb,dr,dg,db;
+  GrPaletteGet(pal);
   for(iy=0;iy!=0x100;iy++) {
-    raw_color.r=ToF64(pal[iy&0xf].r+pal[iy>>4].r)/2.;
-    raw_color.g=ToF64(pal[iy&0xf].g+pal[iy>>4].g)/2.;
-    raw_color.b=ToF64(pal[iy&0xf].b+pal[iy>>4].b)/2.;
-        best_dist=I16_MAX;
-        best_color=0;
+    rr=(ToF64(pal[iy&0xf].r)+ToF64(pal[iy>>4].r))/2.;
+    rg=(ToF64(pal[iy&0xf].g)+ToF64(pal[iy>>4].g))/2.;
+    rb=(ToF64(pal[iy&0xf].b)+ToF64(pal[iy>>4].b))/2.;
+    best_dist=1e100;
+    best_color=0;
     for(ix=0;ix!=4;ix++) {
+      for(ix2=0;ix2!=4;ix2++) {
         c1=gray[ix];
-        dimmed.r=pal[c1].r;
-        dimmed.g=pal[c1].g;
-        dimmed.b=pal[c1].b;
-//"Invert" the colros
-	dimmed.r=U16_MAX-dimmed.r;
-	dimmed.g=U16_MAX-dimmed.g;
-	dimmed.b=U16_MAX-dimmed.b;
-        cur_dist=Sqrt(Sqr(dimmed.r-raw_color.r)+
-	      Sqr(dimmed.g-raw_color.g)+
-	      Sqr(dimmed.b-raw_color.b));
-//Pick the most opposite color as the palette is inverse
+        c2=gray[ix2];
+//"Invert" the colors: pick the most opposite grey dither
+        dr=U16_MAX-(ToF64(pal[c1].r)+ToF64(pal[c2].r))/2.;
+        dg=U16_MAX-(ToF64(pal[c1].g)+ToF64(pal[c2].g))/2.;
+        db=U16_MAX-(ToF64(pal[c1].b)+ToF64(pal[c2].b))/2.;
+        cur_dist=Sqr(dr-rr)+Sqr(dg-rg)+Sqr(db-rb);
         if(cur_dist<best_dist) {
-	  best_dist=cur_dist;
-	  best_color=c1|c1<<4;
+          best_dist=cur_dist;
+          best_color=c1|c2<<4;
         }
+      }
     }
-    godmode_mat[iy].u8[0]=best_color&0xf;
-    godmode_mat[iy].u8[1]=best_color&0xf;
-    godmode_mat[iy].u8[2]=best_color&0xf;
-    godmode_mat[iy].u8[3]=best_color&0xf;
+    ix=iy&0xf;
+    ix2=iy>>4;
+//Swap the pixels as .u16[1] is the 2nd "dither" pixel
+    godmode_mat[ix<<4|ix2].u8[0]=best_color&0xf;
+    godmode_mat[ix<<4|ix2].u8[1]=best_color>>4;
+    godmode_mat[ix<<4|ix2].u8[2]=best_color>>4;
+    godmode_mat[ix<<4|ix2].u8[3]=best_color&0xf;
   }
 }
+//Light table: each 2-colour texture code, dimmed for 15 light levels.
+//Colour codes snap to the nearest 2-colour mix (keeps their hue; any finer
+//search drifts browns and greens towards grey).  Codes made only of greys
+//(BLACK/DKGRAY/LTGRAY/WHITE) use a 2x2 block of up to four greys instead:
+//13 grey steps rather than 6, so ceilings and floors keep their detail in
+//shadow instead of turning into flat grey.  Level 15 (full light) keeps
+//the texture's own pixels.
+Bool DoomIsGrey(I64 c)
+{
+  return c==BLACK||c==DKGRAY||c==LTGRAY||c==WHITE;
+}
+
 U0 InitLightTable() {
-  CBGR48 pal[16],dimmed,raw_color;
-  F64 best_dist,cur_dist;
+  CBGR48 pal[16];
+  static I64 grey[4]={BLACK,DKGRAY,LTGRAY,WHITE};
+  F64 best_dist,cur_dist,dr,dg,db,k,mr[256],mg[256],mb[256],
+        gr4[35],gg4[35],gb4[35];
+  I64 y,code,i,a,b,c,d,n=0,best,g4[35][4];
   GrPaletteGet(pal);
-  I64 y,x,ix,iy,best_color,solid_color;
-  for(y=0;y!=16;y++) {
-    for(x=0;x!=16;x++) {
-      for(ix=0;ix!=16;ix++) {
-        if(!y) {
-//just copy the pixels over
-	  light_mat[ix<<4|x][15].u16[0]=x|ix<<8;
-	  light_mat[ix<<4|x][15].u16[1]=x<<8|ix;
-        } else {
-	  best_dist=I16_MAX;
-	  best_color=0;
-//y goes up to 15,20 so not totally dark
-	  dimmed.r=ToF64(pal[x].r+pal[ix].r)/2.*(20.-y)/20;
-	  dimmed.g=ToF64(pal[x].g+pal[ix].g)/2.*(20.-y)/20;
-	  dimmed.b=ToF64(pal[x].b+pal[ix].b)/2.*(20.-y)/20;
-	  for(iy=0;iy!=16;iy++) {
-            solid_color=iy|iy<<4;
-	    raw_color.r=pal[iy].r;
-	    raw_color.g=pal[iy].g;
-	    raw_color.b=pal[iy].b;
-	    cur_dist=Sqrt(Sqr(dimmed.r-raw_color.r)+
-		  Sqr(dimmed.g-raw_color.g)+
-		  Sqr(dimmed.b-raw_color.b));
-	      if(cur_dist<best_dist) {
-	        best_dist=cur_dist;
-	        best_color=solid_color;
-	      }
-	  }
-	  light_mat[ix<<4|x][15-y].u8[0]=best_color&0xf;
-	  light_mat[ix<<4|x][15-y].u8[1]=best_color>>4;
-	  light_mat[ix<<4|x][15-y].u8[2]=best_color>>4;
-	  light_mat[ix<<4|x][15-y].u8[3]=best_color&0xf;
+  for(i=0;i!=256;i++) {
+    mr[i]=(ToF64(pal[i&0xf].r)+ToF64(pal[i>>4].r))/2.;
+    mg[i]=(ToF64(pal[i&0xf].g)+ToF64(pal[i>>4].g))/2.;
+    mb[i]=(ToF64(pal[i&0xf].b)+ToF64(pal[i>>4].b))/2.;
+  }
+//All 35 multisets of 4 greys, sorted dark to light (a<=b<=c<=d).
+  for(a=0;a!=4;a++)
+    for(b=a;b!=4;b++)
+      for(c=b;c!=4;c++)
+        for(d=c;d!=4;d++) {
+          g4[n][0]=grey[a];
+          g4[n][1]=grey[b];
+          g4[n][2]=grey[c];
+          g4[n][3]=grey[d];
+          gr4[n]=(ToF64(pal[grey[a]].r)+ToF64(pal[grey[b]].r)+
+                ToF64(pal[grey[c]].r)+ToF64(pal[grey[d]].r))/4.;
+          gg4[n]=(ToF64(pal[grey[a]].g)+ToF64(pal[grey[b]].g)+
+                ToF64(pal[grey[c]].g)+ToF64(pal[grey[d]].g))/4.;
+          gb4[n]=(ToF64(pal[grey[a]].b)+ToF64(pal[grey[b]].b)+
+                ToF64(pal[grey[c]].b)+ToF64(pal[grey[d]].b))/4.;
+          n++;
         }
+  for(code=0;code!=0x100;code++) {
+//Full light: copy the texture's own two pixels.
+    light_mat[code][15].u16[0]=(code&0xf)|(code>>4)<<8;
+    light_mat[code][15].u16[1]=(code&0xf)<<8|code>>4;
+    for(y=1;y!=16;y++) {
+//y goes up to 15,20 so not totally dark
+      k=(20.-y)/20.;
+      dr=mr[code]*k;
+      dg=mg[code]*k;
+      db=mb[code]*k;
+      best_dist=1e100;
+      best=0;
+      if(DoomIsGrey(code&0xf)&&DoomIsGrey(code>>4)) {
+        for(i=0;i!=35;i++) {
+          cur_dist=Sqr(dr-gr4[i])+Sqr(dg-gg4[i])+Sqr(db-gb4[i]);
+          if(cur_dist<best_dist) {
+            best_dist=cur_dist;
+            best=i;
+          }
+        }
+//Darkest/2nd-darkest on one diagonal, the two lighter on the other.
+        light_mat[code][15-y].u8[0]=g4[best][0];
+        light_mat[code][15-y].u8[1]=g4[best][2];
+        light_mat[code][15-y].u8[2]=g4[best][3];
+        light_mat[code][15-y].u8[3]=g4[best][1];
+      } else {
+        for(i=0;i!=TRANSPARENT;i++) {
+          cur_dist=Sqr(dr-mr[i])+Sqr(dg-mg[i])+Sqr(db-mb[i]);
+          if(cur_dist<best_dist) {
+            best_dist=cur_dist;
+            best=i;
+          }
+        }
+//Swap the pixels as .u16[1] is the 2nd "dither" pixel
+        light_mat[code][15-y].u8[0]=best&0xf;
+        light_mat[code][15-y].u8[1]=best>>4;
+        light_mat[code][15-y].u8[2]=best>>4;
+        light_mat[code][15-y].u8[3]=best&0xf;
       }
     }
   }
