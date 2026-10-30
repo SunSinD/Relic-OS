@@ -19,7 +19,7 @@ That one command:
 4. In the guest, `HomeSys.HC` mounts the transfer disk (IDE 0:0 only), finds the marker, copies the new `*.HC` files to
    `::/Home/RelicOS` (and `TOOM/*.HC` to `::/Home/TOOM`), then starts the desktop.
 
-About 30 seconds after you run it, the desktop shows your latest code.
+About 25 seconds after you run it, the desktop shows your latest code.
 
 Edit, run `dev`, look at the VM window, repeat.
 
@@ -61,16 +61,19 @@ mouse, Ctrl+Alt to release it.
 
 ## Starting from scratch
 
-1. `tools\relic.ps1 newvm` creates an empty disk and the VMX. The transfer
-   disk stays disconnected during installation so the installer selects the system disk.
-2. Boot it with the ISO attached, press `I` at the RelicOS setup screen, answer
-   `Y` to "virtual machine?", press a key at the pause, and wait for installation.
-   Answer `Y` to reboot.
-3. Turn on the dev loop once: run `tools\relic.ps1 dev`, press S in the VM for
+1. Download `RelicOS-v0.4.0.iso` from the
+   [latest release](https://github.com/SunSinD/Relic-OS/releases/latest) into `build\`.
+2. `tools\relic.ps1 newvm` creates an empty disk and the VMX with that ISO
+   attached. The transfer disk stays disconnected during installation so the
+   installer selects the system disk.
+3. Boot it, press `I` at the RelicOS setup screen, answer `Y` to "virtual
+   machine?", press a key at the pause, and wait for installation. Answer `Y`
+   to reboot.
+4. Turn on the dev loop once: run `tools\relic.ps1 dev`, press S in the VM for
    the Relic Shell and type `ATAMount('G',BDT_ATA,0x1F0,0x3F4,0);` (Enter), then
-   `#include "G:/DevSetup.HC";` (Enter). Two separate lines: `#include` runs at
-   compile time, before the mount call on the same line.
-   (G: is the transfer disk). From then on, `tools\relic.ps1 dev`.
+   `#include "G:/DevSetup.HC";` (Enter). G: is the transfer disk. Use two
+   separate lines: `#include` runs at compile time, before the mount call on
+   the same line. From then on, just run `tools\relic.ps1 dev`.
 
 The dev sync only runs on installs that have `::/Home/RelicDev.TXT` (made by
 `DevSetup.HC`). A normal install never probes the disks at boot.

@@ -15,11 +15,9 @@ Boot code
 Hardware or emulator
 ```
 
-## Early Design Questions
+## Current Answers
 
-- What CPU architecture is supported first?
-- What emulator is the first target?
-- What build system should be used?
-- How much TempleOS compatibility is required?
-- What parts of HolyC remain central to the system?
-- What should the first bootable milestone include?
+- Target: x86-64, BIOS boot, in a VM (VMware first, QEMU tested).
+- Build: `tools\relic.ps1 iso` runs `src/relic/Build.HC` inside the VM.
+- Relic OS stays TempleOS-compatible: stock apps and games still run.
+- Everything is HolyC; only host tools are PowerShell and Python.

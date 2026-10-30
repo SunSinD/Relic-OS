@@ -50,15 +50,8 @@ Task for this session:
 <describe what you want next, e.g. "Files browser that can navigate folders and open files in the Editor">
 ```
 
-## Last session (2026-10-30, v0.4.0 release)
+## Status
 
-- Fixed the desktop crash, pink DOOM, invisible popups; verified Shell, Games, DOOM, Flap Bat, all dock apps in VMware.
-- Built the one-command dev loop and hands-free ISO build.
-- Rebuilt the ISO and verified a fresh install boots without the CD and without the dev-sync flag.
-- Repaired the installed dev VM boot script; dev sync works with the CD disconnected.
-- New VM installation leaves the transfer disk detached so the installer chooses the system disk.
-- Host regression checks: python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py".
-- DOOM: colour restored (2-colour dithering + saturation boost), front-buffer presenter, 30 fps moving with the SVGA driver and 4 vCPUs.
-- Fixed the Titanium crash (corrupt sprite in stock TempleOS), a DOOM level-start crash (screen melt overrun) and DOOM mouse look.
-- Released v0.4.0 on GitHub with the ISO; tested install + boot in VMware and QEMU.
-- Known issues are listed in `roadmap/README.md`.
+v0.4.0 is released. What is done, known issues and what is next:
+`roadmap/README.md`. Host checks:
+`python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py"`.

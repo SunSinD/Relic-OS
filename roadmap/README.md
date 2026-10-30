@@ -20,7 +20,7 @@
 
 ## Phase 3: Polish & Refinement (In Progress)
 
-### Shipped (0.4.0, verified in VMware 2026-10-29)
+### Shipped (0.4.0, released 2026-10-30)
 - [x] Desktop boots again (removed `extern` re-declarations that broke every call)
 - [x] Shell opens, runs HolyC, `exit`/Esc returns to the desktop without freezing
 - [x] DOOM: real colors instead of the pink screen (unsigned math bug in `DitherPalette`)
@@ -59,7 +59,7 @@
 - [ ] Hotkeys overview and subsections in Help (God / hotkey docs)
 - [ ] Nod to LoseThos / SparrowOS (Terry's earlier OS names) in Help or the boot splash
 - [ ] Try JetBrains Mono-style 8x8 font for the terminal
-- [ ] Add TempleCraft to the Games menu (`TempleCraft.ISO.C` is in the project folder, not the repo yet)
+- [ ] Add TempleCraft to the Games menu
 
 ## Phase 4: System Integration
 
@@ -74,8 +74,8 @@
 
 - [x] Automated ISO build pipeline (`Build.HC` + `tools\relic.ps1 iso`)
 - [ ] Smoke test script in `tests/` (boot, screenshot, compare)
-- [ ] User documentation (install in VMware/QEMU, first boot, Games/TOOM)
-- [ ] Publish first downloadable Relic OS image (GitHub Releases)
+- [x] User documentation (README: download, VM settings, keys)
+- [x] Publish first downloadable Relic OS image ([v0.4.0](https://github.com/SunSinD/Relic-OS/releases/tag/v0.4.0))
 
 ## Development references
 

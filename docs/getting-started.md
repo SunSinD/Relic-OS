@@ -8,7 +8,6 @@ one command (`tools\relic.ps1 dev`) syncs `src/relic/` into the VM and boots it.
 - Add source notes to `research/`.
 - Build a source inventory for the upstream code.
 - Document one subsystem in plain language.
-- Write down the emulator and build commands once they are known.
 - Keep `src/`, `tests/`, and `tools/` clean as real code appears.
 
 ## Suggested Study Order

@@ -50,7 +50,7 @@ who made it all possible.
 3. Boot it. Press `C` to try the live desktop, or `I` to install to the disk
    (answer `Y` to "virtual machine?", then `Y` to reboot).
 
-Works in VMware Workstation, VirtualBox and QEMU. QEMU one-liner (live CD only):
+Tested in VMware Workstation and QEMU. QEMU one-liner (live CD only):
 
 ```sh
 qemu-system-x86_64 -m 2G -smp 4 -cdrom RelicOS-v0.4.0.iso -boot d

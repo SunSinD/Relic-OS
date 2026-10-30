@@ -1,4 +1,4 @@
-// BuildRelease.HC
+// Build.HC
 // Automatically installs RelicOS to the system and generates a bootable ISO.
 
 // The transfer disk can land on any hard-drive letter depending on how the
@@ -598,6 +598,9 @@ else {
 }
 
 "\n$FG,CYAN$========================$FG$\n";
-"  $FG,LTGREEN$Done. ISO chunks ready.$FG$\n";
+if (relic_iso_ok)
+  "  $FG,LTGREEN$Done. ISO chunks ready.$FG$\n";
+else
+  "  $FG,LTRED$Build failed, see the messages above.$FG$\n";
 "  $FG,LTGRAY$Shut down the VM.$FG$\n";
 "$FG,CYAN$========================$FG$\n";
