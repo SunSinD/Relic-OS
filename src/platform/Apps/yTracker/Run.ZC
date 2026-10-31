@@ -1,0 +1,20 @@
+// Single-pass compiler: include order is dependency order.
+
+Cd(__DIR__);;
+
+#include "TrDef"
+#include "TrSmp"
+#include "TrMix"
+#include "TrMod"
+#include "TrXm"
+#include "TrS3m"
+#include "TrIt"
+#include "TrFtm"
+#include "TrFile"
+#include "TrUI"
+#include "yTracker"
+#include "TrTest"
+
+yTracker;
+
+"\nType $$LTBLUE$$TrTest;$$FG$$ to run the engine self-check.\n";

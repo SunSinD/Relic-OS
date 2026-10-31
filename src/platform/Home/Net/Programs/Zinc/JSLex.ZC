@@ -1,0 +1,439 @@
+// Zinc JS lexer, included from JS.ZC via #include "Zinc/JSLex". Depends on
+// CJsInterp/CJsTok, JT_*/JP_*, JsAlloc, JsStrDup, JsIdentCh, JsErr in JS.ZC.
+
+#define JS_REGEX_BACK	4096 // '(' lookback cap for the ')' case below
+
+Bool JsLexRegexPos(CJsInterp *ji, I64 n)
+{ // a '/' is a regex after nothing, after most puncts, or after these keywords; ')' depends on the group: an if/while/for/with head is followed by a statement
+	CJsTok *pt;
+	I64		k, dep;
+
+	if (!n)
+		return TRUE;
+	pt = &ji->toks[n - 1];
+	if (pt->type == JT_PUNCT)
+	{
+		if (pt->punct == ']' || pt->punct == JP_INC || pt->punct == JP_DEC)
+			return FALSE;
+		if (pt->punct == ')')
+		{
+			dep = 1;
+			k	= n - 1;
+			while (k > 0 && dep > 0 && n - k < JS_REGEX_BACK)
+			{
+				k--;
+				if (ji->toks[k].type == JT_PUNCT)
+				{
+					if (ji->toks[k].punct == ')' || ji->toks[k].punct == ']' ||
+						ji->toks[k].punct == '}')
+						dep++;
+					else if (ji->toks[k].punct == '(' ||
+							 ji->toks[k].punct == '[' ||
+							 ji->toks[k].punct == '{')
+						dep--;
+				}
+			}
+			if (dep || !k)
+				return FALSE;
+			pt = &ji->toks[k - 1];
+			return pt->type == JT_IDENT &&
+				   (!StrCompare(pt->str, "if")   || !StrCompare(pt->str, "while") ||
+					!StrCompare(pt->str, "for")  || !StrCompare(pt->str, "with"));
+		}
+		return TRUE;
+	}
+	if (pt->type == JT_IDENT)
+		return !StrCompare(pt->str, "return") || !StrCompare(pt->str, "typeof") ||
+			   !StrCompare(pt->str, "case")   || !StrCompare(pt->str, "delete") ||
+			   !StrCompare(pt->str, "void")   || !StrCompare(pt->str, "in") ||
+			   !StrCompare(pt->str, "of")     || !StrCompare(pt->str, "instanceof") ||
+			   !StrCompare(pt->str, "new")    || !StrCompare(pt->str, "else") ||
+			   !StrCompare(pt->str, "do")     || !StrCompare(pt->str, "throw") ||
+			   !StrCompare(pt->str, "yield")  || !StrCompare(pt->str, "await") ||
+			   !StrCompare(pt->str, "default");
+
+	return FALSE;
+}
+
+#define JS_REGEX_SCAN	8192	// longest '/.../' scanned before it is division
+#define JS_REGEX_PAT	1020	// stored pattern chars (pat[] is 1024); rest dropped
+
+I64 JsLexRegex(CJsInterp *ji, U8 *p, CJsTok *t)
+{ // scan /pattern/flags at p (p[0] == '/'). Fills t: JT_REGEX, str = pattern, num = flag bits g1 i2 m4 s8 u16 y32. Returns chars consumed, 0 = not a one-line regex. A pattern past JS_REGEX_PAT is consumed whole and stored truncated
+	U8	 pat[1024];
+	I64	 i = 1, len, fl = 0;
+	Bool inclass = FALSE, closed = FALSE;
+
+	while (p[i] && p[i] != '\n' && i < JS_REGEX_SCAN)
+	{
+		if (p[i] == '\\' && p[i + 1])
+			i += 2;
+		else if (p[i] == '[')
+		{
+			inclass = TRUE;
+			i++;
+		}
+		else if (p[i] == ']')
+		{
+			inclass = FALSE;
+			i++;
+		}
+		else if (p[i] == '/' && !inclass)
+		{
+			closed = TRUE;
+			break;
+		}
+		else
+			i++;
+	}
+	if (!closed || i < 2)
+		return 0;
+	len = i - 1;
+	if (len > JS_REGEX_PAT)
+		len = JS_REGEX_PAT;
+	MemCopy(pat, p + 1, len);
+	i++;
+	while ('a' <= p[i] <= 'z')
+	{
+		if (p[i] == 'g')
+			fl |= 1;
+		else if (p[i] == 'i')
+			fl |= 2;
+		else if (p[i] == 'm')
+			fl |= 4;
+		else if (p[i] == 's')
+			fl |= 8;
+		else if (p[i] == 'u')
+			fl |= 16;
+		else if (p[i] == 'y')
+			fl |= 32;
+		i++;
+	}
+	pat[len] = 0;
+	t->type	= JT_REGEX;
+	t->str	= JsStrDup(ji, pat);
+	t->num	= fl;
+
+	return i;
+}
+
+Bool JsLex(CJsInterp *ji, U8 *src)
+{
+	U8	*p = src;
+	I64	 cap = StrLen(src) + 16, n = 0, punct, len, quote;
+	I64	 tok_off, n_before, iter = 0, cmt = 0;
+	U8	*cq;	// start of the comment currently being skipped
+	U8	 sbuf[1024];
+	CJsTok *t;
+
+	ji->src_text = src;
+	I64	 tpl_brace[8], tpl_sp = 0; // template-literal nesting state
+
+	while (*p)
+	{
+		if (*p == 0x60)
+			cap += 8;
+		p++;
+	}
+	p = src;
+
+	// token array is not arena-allocated: ~32 bytes per source char, freed by JsRun after parse. Token strings are JsStrDup'd into the arena. Zeroed alloc matters: the tail's type == 0 (JT_EOF) terminates parsing
+	ji->toks = CAlloc(cap * sizeof(CJsTok))(CJsTok *);
+
+	while (*p)
+	{
+		tok_off  = p - src;
+		n_before = n;
+		iter++;
+		if (!(iter & 4095))
+			Yield;
+		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			p++;
+		else if (p[0] == '/' && p[1] == '/')
+		{
+			cq = p;
+			while (*p && *p != '\n' && *p != '\r')
+				p++;
+			cmt += p - cq;
+		}
+		else if (p[0] == '/' && p[1] == '*')
+		{
+			cq = p;
+			p += 2;
+			while (*p && !(p[0] == '*' && p[1] == '/'))
+				p++;
+			if (*p)
+				p += 2;
+			cmt += p - cq;
+		}
+		else if (n >= cap - 1)
+		{
+			JsErr(ji, "too many tokens");
+			return FALSE;
+		}
+		else if ('0' <= *p <= '9' ||
+				 (*p == '.' && '0' <= p[1] <= '9'))
+		{ // the literal is copied to sbuf with '_' separators dropped; 0x/0b/0o all go to Str2I64, which reads the radix off the prefix
+			t = &ji->toks[n++];
+			t->type = JT_NUM;
+			len = 0;
+			if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X' || p[1] == 'b' ||
+								p[1] == 'B' || p[1] == 'o' || p[1] == 'O'))
+			{
+				sbuf[len++] = *p++;
+				sbuf[len++] = *p++;
+				while (ZHexNibble(*p) >= 0 || *p == '_')
+				{
+					if (*p != '_' && len < 250)
+						sbuf[len++] = *p;
+					p++;
+				}
+				sbuf[len] = 0;
+				t->num = Str2I64(sbuf, 10);
+			}
+			else
+			{
+				while (('0' <= *p <= '9') || *p == '_')
+				{
+					if (*p != '_' && len < 250)
+						sbuf[len++] = *p;
+					p++;
+				}
+				if (*p == '.')
+				{
+					sbuf[len++] = *p++;
+					while (('0' <= *p <= '9') || *p == '_')
+					{
+						if (*p != '_' && len < 250)
+							sbuf[len++] = *p;
+						p++;
+					}
+				}
+				if (*p == 'e' || *p == 'E')
+				{
+					sbuf[len++] = *p++;
+					if (*p == '+' || *p == '-')
+						sbuf[len++] = *p++;
+					while ('0' <= *p <= '9')
+					{
+						if (len < 250)
+							sbuf[len++] = *p;
+						p++;
+					}
+				}
+				sbuf[len] = 0;
+				t->num = JsStr2F64(sbuf); // NOT kernel Str2F64: not correctly rounded
+			}
+			if (*p == 'n' && !JsIdentCh(p[1], FALSE))
+				p++; // BigInt suffix: the value stays an F64
+		}
+		else if (*p == 0x60)
+		{ // template literal desugars to ( "" + "part" + ( expr ) ... ); the leading "" forces string concatenation
+			if (tpl_sp >= 8)
+			{
+				JsErr(ji, "templates nested too deep");
+				return FALSE;
+			}
+			tpl_brace[tpl_sp] = 0;
+			tpl_sp++;
+			t = &ji->toks[n++];
+			t->type = JT_PUNCT;
+			t->punct = '(';
+			t = &ji->toks[n++];
+			t->type = JT_STR;
+			t->str = JsStrDup(ji, "");
+			p++;
+			goto js_tpl_part;
+		}
+		else if (*p == '}' && tpl_sp && !tpl_brace[tpl_sp - 1])
+		{
+			t = &ji->toks[n++];
+			t->type = JT_PUNCT;
+			t->punct = ')';
+			p++;
+			goto js_tpl_part;
+		}
+		else if (*p == '/' && p[1] != '/' && p[1] != '*' &&
+				 JsLexRegexPos(ji, n) && (len = JsLexRegex(ji, p, &ji->toks[n])))
+		{
+			n++;
+			p += len;
+		}
+		else if (*p == '"' || *p == '\'')
+		{
+			quote = *p++;
+			len = 0;
+			while (*p && *p != quote && len < 1020)
+			{
+				if (*p == '\\' && p[1])
+				{
+					p++;
+					switch (*p)
+					{
+						case 'n':	sbuf[len++] = '\n';	break;
+						case 't':	sbuf[len++] = '\t';	break;
+						case 'r':	sbuf[len++] = '\r';	break;
+						case '0':	sbuf[len++] = '?';	break;
+						default:	sbuf[len++] = *p;	break;
+					}
+					p++;
+				}
+				else
+					sbuf[len++] = *p++;
+			}
+			while (*p && *p != quote)
+			{ // string longer than sbuf: consume to the real closing quote, discard the overflow
+				if (*p == '\\' && p[1])
+					p++;
+				p++;
+			}
+			if (*p)
+				p++;
+			sbuf[len] = 0;
+			t = &ji->toks[n++];
+			t->type = JT_STR;
+			t->str	= JsStrDup(ji, sbuf);
+		}
+		else if (JsIdentCh(*p, TRUE) || (*p == '#' && JsIdentCh(p[1], TRUE)))
+		{ // '#name' private members lex as ONE identifier
+			len = 0;
+			if (*p == '#')
+				sbuf[len++] = *p++;
+			while (JsIdentCh(*p, FALSE) && len < 120)
+				sbuf[len++] = *p++;
+			sbuf[len] = 0;
+			t = &ji->toks[n++];
+			t->type = JT_IDENT;
+			t->str	= JsStrDup(ji, sbuf);
+		}
+		else
+		{
+			punct = 0;
+			if (!StrNCompare(p, "...", 3))		{ punct = JP_SPREAD; p += 3; }
+			// `?.` is optional chaining only if not followed by a digit; `x?.5:y` is `x ? .5 : y`
+			else if (!StrNCompare(p, "?.", 2) && !('0' <= p[2] <= '9'))
+												{ punct = JP_OPTCHAIN; p += 2; }
+			// longest match first: "??=" before "??"
+			else if (!StrNCompare(p, "??=", 3))	{ punct = JP_NULEQ;	p += 3; }
+			else if (!StrNCompare(p, "??", 2))	{ punct = JP_NULLISH; p += 2; }
+			else if (!StrNCompare(p, "===", 3))	{ punct = JP_EQ3;	p += 3; }
+			else if (!StrNCompare(p, "!==", 3))	{ punct = JP_NE3;	p += 3; }
+			// `>>>=` before `>>>` (longest match). Mapped to JP_SHREQ: differs from a true unsigned shift only on negative operands
+			else if (!StrNCompare(p, ">>>=", 4)) { punct = JP_SHREQ; p += 4; }
+			else if (!StrNCompare(p, ">>>", 3))	{ punct = JP_SHR3;	p += 3; }
+			else if (!StrNCompare(p, "&&=", 3))	{ punct = JP_ANDEQ;	p += 3; }
+			else if (!StrNCompare(p, "||=", 3))	{ punct = JP_OREQ;	p += 3; }
+			else if (!StrNCompare(p, "**=", 3))	{ punct = JP_POWEQ;	p += 3; }
+			else if (!StrNCompare(p, "<<=", 3))	{ punct = JP_SHLEQ;	p += 3; }
+			else if (!StrNCompare(p, ">>=", 3))	{ punct = JP_SHREQ;	p += 3; }
+			else if (!StrNCompare(p, "**", 2))	{ punct = JP_POW;	p += 2; }
+			else if (!StrNCompare(p, "&=", 2))	{ punct = JP_BANDEQ; p += 2; }
+			else if (!StrNCompare(p, "|=", 2))	{ punct = JP_BOREQ;	p += 2; }
+			else if (!StrNCompare(p, "^=", 2))	{ punct = JP_BXOREQ; p += 2; }
+			else if (!StrNCompare(p, "<<", 2))	{ punct = JP_SHL;	p += 2; }
+			else if (!StrNCompare(p, ">>", 2))	{ punct = JP_SHR;	p += 2; }
+			else if (!StrNCompare(p, "==", 2))	{ punct = JP_EQ2;	p += 2; }
+			else if (!StrNCompare(p, "!=", 2))	{ punct = JP_NE;	p += 2; }
+			else if (!StrNCompare(p, "<=", 2))	{ punct = JP_LE;	p += 2; }
+			else if (!StrNCompare(p, ">=", 2))	{ punct = JP_GE;	p += 2; }
+			else if (!StrNCompare(p, "&&", 2))	{ punct = JP_AND;	p += 2; }
+			else if (!StrNCompare(p, "||", 2))	{ punct = JP_OR;	p += 2; }
+			else if (!StrNCompare(p, "++", 2))	{ punct = JP_INC;	p += 2; }
+			else if (!StrNCompare(p, "--", 2))	{ punct = JP_DEC;	p += 2; }
+			else if (!StrNCompare(p, "+=", 2))	{ punct = JP_ADDEQ;	p += 2; }
+			else if (!StrNCompare(p, "-=", 2))	{ punct = JP_SUBEQ;	p += 2; }
+			else if (!StrNCompare(p, "*=", 2))	{ punct = JP_MULEQ;	p += 2; }
+			else if (!StrNCompare(p, "/=", 2))	{ punct = JP_DIVEQ;	p += 2; }
+			else if (!StrNCompare(p, "%=", 2))	{ punct = JP_MODEQ;	p += 2; }
+			else if (!StrNCompare(p, "=>", 2))	{ punct = JP_ARROW;	p += 2; }
+			else
+				punct = *p++;
+			t = &ji->toks[n++];
+			t->type	 = JT_PUNCT;
+			t->punct = punct;
+			if (tpl_sp)
+			{
+				if (punct == '{')
+					tpl_brace[tpl_sp - 1]++;
+				else if (punct == '}')
+					tpl_brace[tpl_sp - 1]--;
+			}
+		}
+		goto js_lex_next;
+
+js_tpl_part:
+		len = 0;
+		while (*p && *p != 0x60 && !(*p == 0x24 && p[1] == '{') && len < 1020)
+		{
+			if (*p == '\\' && p[1])
+			{
+				p++;
+				if (*p == 'n')
+					sbuf[len++] = '\n';
+				else if (*p == 't')
+					sbuf[len++] = '\t';
+				else
+					sbuf[len++] = *p;
+				p++;
+			}
+			else
+				sbuf[len++] = *p++;
+		}
+		sbuf[len] = 0;
+		if (n >= cap - 8)
+		{
+			JsErr(ji, "too many tokens");
+			return FALSE;
+		}
+		if (len)
+		{
+			t = &ji->toks[n++];
+			t->type	 = JT_PUNCT;
+			t->punct = '+';
+			t = &ji->toks[n++];
+			t->type = JT_STR;
+			t->str = JsStrDup(ji, sbuf);
+		}
+		if (*p && *p != 0x60 && !(*p == 0x24 && p[1] == '{'))
+			goto js_tpl_part; // part longer than one sbuf chunk: keep scanning the SAME part, emitting more "+ chunk" tokens
+		if (*p == 0x60)
+		{
+			t = &ji->toks[n++];
+			t->type	 = JT_PUNCT;
+			t->punct = ')';
+			tpl_sp--;
+			p++;
+		}
+		else if (*p)
+		{ // interpolation begins (0x24 '{')
+			t = &ji->toks[n++];
+			t->type	 = JT_PUNCT;
+			t->punct = '+';
+			t = &ji->toks[n++];
+			t->type	 = JT_PUNCT;
+			t->punct = '(';
+			p += 2;
+		}
+		else
+		{
+			JsErr(ji, "unterminated template literal");
+			return FALSE;
+		}
+js_lex_next:;
+		while (n_before < n)
+		{
+			ji->toks[n_before].src = tok_off;
+			n_before++;
+		}
+	}
+
+	t = &ji->toks[n++];
+	t->type = JT_EOF;
+	t->src	= p - src;
+	ji->tok_count = n;
+	ji->lex_end	  = p - src; // bytes actually consumed
+	ji->lex_cmt	  = cmt; // of which comment
+	ji->pos = 0;
+
+	return TRUE;
+}

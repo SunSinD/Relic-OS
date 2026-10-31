@@ -1,0 +1,1124 @@
+/*	Zinc Layout v2: a box-model layout engine for ZincGX. Public Domain.
+
+	Two-pass over the DOM: MEASURE dry-runs a subtree into the display list at a
+	candidate width, records its extent and rolls the ops back; ARRANGE lays out
+	for real, emitting CGxOp records. Inline content is delegated to the v1
+	engine per subtree.
+
+	Included from ZincGX.ZC after v1 (needs gx, GxNode, GxText, GxOpAdd,
+	GxRunFlush, GxNewline, GxLineAlign, GxDefSpace, GxPenBg).
+	No literal dollar signs allowed in this file (DolDoc source rule). */
+
+public Bool zinc_layout2 = TRUE;
+I64  l2_meas_depth = 0; // JIT does not zero globals
+I64  l2_root_wrap  = 0;
+
+#define L2_FLEX_MAX		24
+#define L2_MEAS_MAX		4
+
+extern U0 L2Node(CZNode *node, CZStyle *inh);
+
+I64 L2HeightPx(I64 h)
+{ // decode a CZStyle height: >0 px (incl vh/calc); a percent height is -(3000+pct) and is not resolved into a forced box height, only into a containing-block reference (L2HeightPxCB)
+	if (h > 0)
+		return h;
+	return 0;
+}
+
+I64 L2HeightPxCB(I64 h)
+{ // like L2HeightPx but resolves a % against the ancestor chain
+	if (h > 0)
+		return h;
+	if (h <= -3000 && gx.anc_h > 0)
+		return gx.anc_h * (-h - 3000) / 100;
+	return 0;
+}
+
+public U0 Layout2(Bool on)
+{
+	zinc_layout2 = on;
+	gx.relayout = TRUE;
+}
+
+
+class CL2State
+{
+	I64 op_count, x, y, indent, wrap_w, line_h, line_start_op, line_align;
+};
+
+U0 L2StateSave(CL2State *s)
+{
+	s->op_count		 = gx.op_count;
+	s->x			 = gx.x;
+	s->y			 = gx.y;
+	s->indent		 = gx.indent;
+	s->wrap_w		 = gx.wrap_w;
+	s->line_h		 = gx.line_h;
+	s->line_start_op = gx.line_start_op;
+	s->line_align	 = gx.line_align;
+}
+
+U0 L2StateRestore(CL2State *s)
+{
+	I64 i;
+
+	for (i = s->op_count; i < gx.op_count; i++)
+	{
+		Free(gx.ops[i].text);
+		Free(gx.ops[i].img_url);
+		if (gx.ops[i].sc && gx.ops[i].type != GXO_IMG)
+			DCDel(gx.ops[i].sc); // scaled text run DC; GXO_IMG sc is cache-owned
+	}
+	gx.op_count		 = s->op_count;
+	gx.x			 = s->x;
+	gx.y			 = s->y;
+	gx.indent		 = s->indent;
+	gx.wrap_w		 = s->wrap_w;
+	gx.line_h		 = s->line_h;
+	gx.line_start_op = s->line_start_op;
+	gx.line_align	 = s->line_align;
+	gx.run_len		 = 0;
+}
+
+
+Bool L2Delegated(U8 *tag)
+{
+	return !StrCompare(tag, "ul") || !StrCompare(tag, "ol") ||
+		   !StrCompare(tag, "li") || !StrCompare(tag, "table") ||
+		   !StrCompare(tag, "tr") || !StrCompare(tag, "td") ||
+		   !StrCompare(tag, "th") || !StrCompare(tag, "pre") ||
+		   !StrCompare(tag, "dl") || !StrCompare(tag, "dt") ||
+		   !StrCompare(tag, "dd") || !StrCompare(tag, "select") ||
+		   !StrCompare(tag, "textarea") ||
+		   !StrCompare(tag, "img") || !StrCompare(tag, "svg") ||
+		   !StrCompare(tag, "input") || !StrCompare(tag, "button") ||
+		   !StrCompare(tag, "a") || !StrCompare(tag, "br") ||
+		   !StrCompare(tag, "hr") || !StrCompare(tag, "picture") ||
+		   !StrCompare(tag, "label") || !StrCompare(tag, "option") ||
+		   !StrCompare(tag, "canvas") || !StrCompare(tag, "video") ||
+		   !StrCompare(tag, "iframe");
+}
+
+Bool L2IsBody(U8 *tag)
+{
+	return !StrCompare(tag, "body") || !StrCompare(tag, "html") ||
+		   !StrCompare(tag, "#root");
+}
+
+Bool L2Handles(CZNode *node, CZStyle *author)
+{
+	if (!node || node->type != ZH_ELEM)
+		return FALSE;
+	if (L2Delegated(node->tag))
+		return FALSE;
+	if (author->display == ZCSS_DISP_FLEX)
+		return TRUE;
+	if (author->pos >= 1)
+		return TRUE;
+	if (author->display == ZCSS_DISP_BLOCK)
+		return TRUE;
+	if (author->display == ZCSS_DISP_INLINE)
+		return FALSE;
+	if (L2IsBody(node->tag))
+		return TRUE;
+	if (ZHtmlTagBlock(node->tag) || !StrCompare(node->tag, "center") ||
+		!StrCompare(node->tag, "main") || !StrCompare(node->tag, "aside") ||
+		!StrCompare(node->tag, "figure"))
+		return TRUE;
+	return FALSE;
+}
+
+
+U0 L2Measure(CZNode *node, CZStyle *inh, I64 avail, I64 *w_out, I64 *h_out)
+{ // lay node into a scratch window avail wide; report content w/h; roll back
+	CL2State sv;
+	I64		 i, x0, y0, maxx;
+
+	*w_out = 0;
+	*h_out = FONT_HEIGHT + GX_LINE_LEAD;
+	if (!node)
+		return;
+	if (avail < 24)
+		avail = 24;
+	if (l2_meas_depth >= L2_MEAS_MAX || gx.op_count >= GX_OPS_MAX - 64)
+	{
+		*w_out = avail / 2;
+		return;
+	}
+	l2_meas_depth++;
+	L2StateSave(&sv);
+
+	gx.x = GX_MARGIN + gx.indent;
+	gx.line_start_op = gx.op_count;
+	gx.line_align = 0;
+	x0 = gx.x;
+	y0 = gx.y;
+	gx.wrap_w = x0 + avail;
+
+	L2Node(node, inh);
+	GxRunFlush;
+
+	maxx = x0;
+	for (i = sv.op_count; i < gx.op_count; i++)
+		if (gx.ops[i].x + gx.ops[i].w > maxx)
+			maxx = gx.ops[i].x + gx.ops[i].w;
+	*w_out = maxx - x0;
+	*h_out = gx.y - y0;
+	if (gx.x > x0)
+		*h_out += gx.line_h;
+	if (*h_out < FONT_HEIGHT)
+		*h_out = FONT_HEIGHT;
+
+	L2StateRestore(&sv);
+	l2_meas_depth--;
+}
+
+
+U0 L2FlexRow(CZNode *node, CZStyle *style, CZStyle *author)
+{
+	CZNode	*items[L2_FLEX_MAX];
+	I64		 basis[L2_FLEX_MAX], grow[L2_FLEX_MAX], want[L2_FLEX_MAX];
+	CZStyle	 kid, ca;
+	CZNode	*child, *rest;
+	I64		 n, i, k, m, row_start, base, avail, gapv, total, extra, gsum;
+	I64		 mw, mh, bw, x, xoff, y0, ymax, save_indent, save_wrap, room, jgap;
+	I64		 g, kt, c, fixsum, frsum, freew, trackw[ZCSS_GRID_TRK];
+	I64		 cs, sp, lastcol, itw, itx, colx[ZCSS_GRID_TRK + 1];
+
+	MemCopy(&kid, style, sizeof(CZStyle));
+	ZStyleStripBox(&kid);
+
+	n = 0;
+	child = node->first_child;
+	while (child && n < L2_FLEX_MAX)
+	{
+		if (child->type == ZH_ELEM && !ZnTagSkipped(child->tag))
+		{
+			ZCssApply(child, &ca);
+			if (ca.display != ZCSS_DISP_NONE)
+			{
+				items[n] = child;
+				grow[n] = 0;
+				if (ca.grow > 0)
+					grow[n] = ca.grow;
+				n++;
+			}
+		}
+		child = child->next;
+	}
+	rest = child;
+	if (!n)
+		return;
+
+	base  = GX_MARGIN + gx.indent;
+	avail = gx.wrap_w - base;
+	if (avail < 60)
+		avail = 60;
+	gapv = author->gap;
+	if (gapv < 0)
+		gapv = 8;
+
+	g = author->grid_idx;
+	if (g >= 0 && g < zcss_grid_count && zcss_gtrk_n[g] > 0)
+	{ // fixed px tracks keep size, fr tracks share the rest; item i lands in column (i % track_count)
+		kt = zcss_gtrk_n[g];
+		fixsum = 0;
+		frsum = 0;
+		for (c = 0; c < kt; c++)
+		{
+			fixsum += zcss_gtrk_px[g][c];
+			frsum += zcss_gtrk_fr[g][c];
+		}
+		freew = avail - gapv * (kt - 1) - fixsum;
+		if (freew < 0)
+			freew = 0;
+		for (c = 0; c < kt; c++)
+		{
+			if (zcss_gtrk_fr[g][c] > 0 && frsum > 0)
+				trackw[c] = MaxI64(24, freew * zcss_gtrk_fr[g][c] / frsum);
+			else
+				trackw[c] = MaxI64(24, MinI64(zcss_gtrk_px[g][c], avail));
+		}
+		if (zcss_gacount[g] > 0)
+		{
+			colx[0] = base;
+			for (c = 0; c < kt; c++)
+				colx[c + 1] = colx[c] + trackw[c] + gapv;
+			save_indent = gx.indent;
+			save_wrap = gx.wrap_w;
+			y0 = gx.y;
+			ymax = y0;
+			lastcol = -1;
+			for (i = 0; i < n; i++)
+			{
+				ZCssApply(items[i], &ca);
+				cs = 0;
+				sp = 1;
+				if (ca.grid_area_idx >= 0)
+					for (m = 0; m < zcss_gacount[g]; m++)
+						if (!StrCompare(zcss_carea[ca.grid_area_idx],
+										zcss_ganame[g][m]))
+						{
+							cs = zcss_gacol[g][m];
+							sp = zcss_gaspan[g][m];
+							break;
+						}
+				if (cs >= kt)
+					cs = kt - 1;
+				if (cs + sp > kt)
+					sp = kt - cs;
+				if (sp < 1)
+					sp = 1;
+				if (i > 0 && (cs <= lastcol || sp >= kt))
+					y0 = ymax;
+				itx = colx[cs];
+				itw = colx[cs + sp] - colx[cs] - gapv;
+				if (itw < 24)
+					itw = 24;
+				gx.y = y0;
+				gx.indent = itx - GX_MARGIN;
+				gx.wrap_w = itx + itw;
+				gx.x = GX_MARGIN + gx.indent;
+				gx.line_start_op = gx.op_count;
+				L2Node(items[i], &kid);
+				GxRunFlush;
+				GxLineAlign;
+				if (gx.x > GX_MARGIN + gx.indent)
+					gx.y += gx.line_h;
+				ymax = MaxI64(ymax, gx.y);
+				lastcol = cs;
+			}
+			gx.indent = save_indent;
+			gx.wrap_w = save_wrap;
+			gx.y = ymax;
+			gx.x = GX_MARGIN + gx.indent;
+			gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+			while (rest)
+			{
+				L2Node(rest, &kid);
+				rest = rest->next;
+			}
+			return;
+		}
+		for (i = 0; i < n; i++)
+			basis[i] = trackw[i % kt];
+	}
+	else if (author->grid_cols > 1)
+	{
+		k = author->grid_cols;
+		if (k > n)
+			k = n;
+		mw = (avail - gapv * (k - 1)) / k;
+		if (mw < 24)
+			mw = 24;
+		for (i = 0; i < n; i++)
+			basis[i] = mw;
+	}
+	else
+		for (i = 0; i < n; i++)
+		{
+			ZCssApply(items[i], &ca);
+			bw = 0;
+			if (ca.width > 0)
+				bw = MinI64(ca.width, avail);
+			else if (ca.width < 0)
+				bw = avail * -ca.width / 100;
+			else
+			{
+				L2Measure(items[i], &kid, avail, &mw, &mh);
+				bw = MinI64(mw + 8, avail);
+			}
+			if (bw < 24)
+				bw = 24;
+			basis[i] = bw;
+		}
+
+	i = 0;
+	while (i < n)
+	{
+		row_start = i;
+		total = 0;
+		k = 0;
+		while (i < n)
+		{
+			bw = basis[i];
+			if (k)
+				bw += gapv;
+			if (k && total + bw > avail)
+				break;
+			total += bw;
+			k++;
+			i++;
+		}
+
+		extra = avail - total;
+		gsum = 0;
+		for (m = row_start; m < i; m++)
+			gsum += grow[m];
+		for (m = row_start; m < i; m++)
+			want[m] = basis[m];
+		if (extra > 0 && gsum > 0)
+		{
+			for (m = row_start; m < i; m++)
+				want[m] += extra * grow[m] / gsum;
+			extra = 0;
+		}
+		else if (extra < 0)
+		{
+			room = avail - gapv * (k - 1);
+			total -= gapv * (k - 1);
+			if (total > 0)
+				for (m = row_start; m < i; m++)
+					want[m] = MaxI64(24, basis[m] * room / total);
+			extra = 0;
+		}
+
+		xoff = 0;
+		jgap = 0;
+		if (extra > 0)
+		{
+			if (author->justify == 3 && k > 1)		// space-between
+				jgap = extra / (k - 1);
+			else if (author->justify == 4 && k > 0)	// space-around
+			{
+				jgap = extra / k;
+				xoff = jgap / 2;
+			}
+			else if (author->justify == 5)			// space-evenly
+			{
+				jgap = extra / (k + 1);
+				xoff = jgap;
+			}
+			else if (author->justify == 1 || (author->justify < 0 && author->align == 1))
+				xoff = extra / 2;
+			else if (author->justify == 2 || (author->justify < 0 && author->align == 2))
+				xoff = extra;
+		}
+
+		save_indent = gx.indent;
+		save_wrap	= gx.wrap_w;
+		x	 = base + xoff;
+		y0	 = gx.y;
+		ymax = y0;
+		for (m = row_start; m < i; m++)
+		{
+			gx.y	  = y0;
+			gx.indent = x - GX_MARGIN;
+			gx.wrap_w = x + want[m];
+			gx.x	  = GX_MARGIN + gx.indent;
+			gx.line_start_op = gx.op_count;
+			L2Node(items[m], &kid);
+			GxRunFlush;
+			GxLineAlign;
+			if (gx.x > GX_MARGIN + gx.indent)
+				gx.y += gx.line_h;
+			ymax = MaxI64(ymax, gx.y);
+			x += want[m] + gapv + jgap;
+		}
+		gx.indent = save_indent;
+		gx.wrap_w = save_wrap;
+		gx.y	  = ymax;
+		gx.x	  = GX_MARGIN + gx.indent;
+		gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+	}
+
+	while (rest)
+	{
+		L2Node(rest, &kid);
+		rest = rest->next;
+	}
+}
+
+U0 L2FlexCol(CZNode *node, CZStyle *style, CZStyle *author)
+{ // flex-direction:column; author->align 1 center, 2 end, else start/stretch
+	CZStyle	 kid, ca;
+	CZNode	*child;
+	I64		 base, avail, gapv, cw, mw, mh, xc, save_indent, save_wrap;
+	I64		 content_top, pad_top, want_h, eff_h;
+	Bool	 first;
+
+	MemCopy(&kid, style, sizeof(CZStyle));
+	ZStyleStripBox(&kid);
+	base  = GX_MARGIN + gx.indent;
+	avail = gx.wrap_w - base;
+	if (avail < 60)
+		avail = 60;
+	gapv = author->gap;
+	if (gapv < 0)
+		gapv = 0;
+
+	pad_top = 0;
+	eff_h = L2HeightPx(author->height);
+	if (author->align == 1 && eff_h > 0)
+	{
+		want_h = 0;
+		child  = node->first_child;
+		while (child)
+		{
+			if (child->type == ZH_ELEM && !ZnTagSkipped(child->tag))
+			{
+				ZCssApply(child, &ca);
+				if (ca.display != ZCSS_DISP_NONE)
+				{
+					L2Measure(child, &kid, avail, &mw, &mh);
+					want_h += mh + gapv;
+				}
+			}
+			child = child->next;
+		}
+		if (eff_h > want_h)
+			pad_top = (eff_h - want_h) / 2;
+	}
+	gx.y += pad_top;
+
+	save_indent = gx.indent;
+	save_wrap	= gx.wrap_w;
+	content_top = gx.y;
+	first = TRUE;
+	child = node->first_child;
+	while (child)
+	{
+		if (child->type == ZH_ELEM && !ZnTagSkipped(child->tag))
+		{
+			ZCssApply(child, &ca);
+			if (ca.display != ZCSS_DISP_NONE)
+			{
+				cw = 0;
+				if (ca.width > 0)
+					cw = MinI64(ca.width, avail);
+				else if (ca.width < 0)
+					cw = avail * -ca.width / 100;
+				else if (author->align == 1 || author->align == 2)
+				{
+					L2Measure(child, &kid, avail, &mw, &mh);
+					cw = MinI64(MaxI64(mw, 24), avail);
+				}
+				else
+					cw = avail;
+				xc = base;
+				if (author->align == 1)
+					xc = base + (avail - cw) / 2;
+				else if (author->align == 2)
+					xc = base + avail - cw;
+				if (xc < base)
+					xc = base;
+				if (!first)
+					gx.y += gapv;
+				gx.indent = xc - GX_MARGIN;
+				gx.wrap_w = xc + cw;
+				gx.x	  = GX_MARGIN + gx.indent;
+				gx.line_start_op = gx.op_count;
+				if (author->align != 1 && author->align != 2 &&
+					(!StrCompare(child->tag, "button") ||
+					 !StrCompare(child->tag, "input") ||
+					 !StrCompare(child->tag, "select") ||
+					 !StrCompare(child->tag, "textarea")))
+					gx.flex_stretch_w = cw;
+				L2Node(child, &kid);
+				gx.flex_stretch_w = 0;
+				GxRunFlush;
+				GxLineAlign;
+				if (gx.x > GX_MARGIN + gx.indent)
+					gx.y += gx.line_h;
+				first = FALSE;
+			}
+		}
+		child = child->next;
+	}
+	gx.indent = save_indent;
+	gx.wrap_w = save_wrap;
+	gx.x	  = GX_MARGIN + gx.indent;
+	if (content_top == gx.y)
+		gx.y += 1;
+}
+
+
+I64 L2OffPx(I64 off, I64 span)
+{ // decode a CZStyle position offset: >= 0 is px, -(2000+p) is p percent of the containing-block span (see the top/left/right parsers in CSS.ZC)
+	if (off <= -2000)
+		return span * (-off - 2000) / 100;
+
+	return off;
+}
+
+U0 L2Block(CZNode *node, CZStyle *style, CZStyle *author)
+{
+	CZStyle	 kid;
+	CZNode	*child;
+	CGxOp	*op;
+	I64		 mt_eff, mb_eff, ml_eff, mr_eff, pt_eff, pb_eff, pl_eff, pr_eff;
+	I64		 box_op, op0, avail, bw, center_add, save_wrap, save_wrap2;
+	I64		 box_y0, dx, dy, mw, mh, x0, saved_y, saved_indent, saved_wrapa;
+	I64		 save_cbx, save_cby, save_cbw, save_cbh, save_curbg;
+	I64		 eff_h, eff_h_cb, save_anch;
+	Bool	 boxed, is_body, is_abs, is_flex, is_flex_col, is_posn, spr_fixed;
+
+	is_body = L2IsBody(node->tag);
+	is_flex = author->display == ZCSS_DISP_FLEX && author->flex_col != 1;
+	is_flex_col = author->display == ZCSS_DISP_FLEX && author->flex_col == 1;
+	is_abs	= author->pos == 2 || author->pos == 3;
+	is_posn	= author->pos >= 1;
+	eff_h = L2HeightPx(author->height); // px/vh only: forces the box
+	eff_h_cb = L2HeightPxCB(author->height); // px OR %: reference height only
+	save_anch  = gx.anc_h;
+	if (eff_h_cb > 0)
+		gx.anc_h = eff_h_cb;
+	save_curbg = gx.cur_bg;
+	save_cbx = gx.cb_x;
+	save_cby = gx.cb_y;
+	save_cbw = gx.cb_w;
+	save_cbh = gx.cb_h;
+
+	GxRunFlush;
+	if (gx.x > GX_MARGIN + gx.indent)
+		GxNewline(0);
+	if ((author->clear_side & 1) && gx.y < GxFloatBottom(0))
+		gx.y = GxFloatBottom(0);
+	if ((author->clear_side & 2) && gx.y < GxFloatBottom(1))
+		gx.y = GxFloatBottom(1);
+
+	MemCopy(&kid, style, sizeof(CZStyle));
+	ZStyleStripBox(&kid);
+
+	if (is_body)
+	{
+		kid.bg = -1;
+		child = node->first_child;
+		while (child)
+		{
+			L2Node(child, &kid);
+			child = child->next;
+		}
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		return;
+	}
+
+	mt_eff = author->mt;
+	mb_eff = author->mb;
+	if (mt_eff < 0)
+		mt_eff = GxDefSpace(node->tag);
+	if (mb_eff < 0)
+		mb_eff = GxDefSpace(node->tag);
+	ml_eff = MaxI64(0, style->ml);
+	mr_eff = MaxI64(0, style->mr);
+	pl_eff = MaxI64(0, style->pl);
+	pr_eff = MaxI64(0, style->pr);
+	if (!StrCompare(node->tag, "blockquote") && style->ml < 0)
+		ml_eff = 24;
+	boxed = author->bg >= 0 || author->border >= 0 || author->bg_img >= 0 ||
+			author->grad >= 0 || author->sh_col >= 0;
+	spr_fixed = author->bg_img >= 0 && author->width > 0 && author->width <= 64 &&
+				author->height > 0 && author->height <= 64;
+	pt_eff = author->pt;
+	pb_eff = author->pb;
+	if (pt_eff < 0)
+	{
+		if (boxed)
+			pt_eff = 4;
+		else
+			pt_eff = 0;
+	}
+	if (pb_eff < 0)
+	{
+		if (boxed)
+			pb_eff = 4;
+		else
+			pb_eff = 0;
+	}
+
+	saved_y = 0;
+	saved_indent = 0;
+	saved_wrapa = 0;
+	if (is_abs)
+	{
+		saved_y		 = gx.y;
+		saved_indent = gx.indent;
+		saved_wrapa	 = gx.wrap_w;
+		avail = gx.cb_w;
+		if (avail < 60)
+			avail = 60;
+		bw = 0;
+		if (author->width > 0)
+			bw = MinI64(author->width, avail);
+		else if (author->width < 0)
+			bw = avail * -author->width / 100;
+		else
+		{
+			L2Measure(node, &kid, avail, &mw, &mh);
+			bw = MinI64(mw + pl_eff + pr_eff + 12, avail);
+		}
+		if (bw < 40)
+			bw = 40;
+		if (author->off_l > ZCSS_OFF_UNSET)
+			x0 = gx.cb_x + L2OffPx(author->off_l, gx.cb_w);
+		else if (author->off_r > ZCSS_OFF_UNSET)
+			x0 = gx.cb_x + gx.cb_w - L2OffPx(author->off_r, gx.cb_w) - bw;
+		else
+			x0 = gx.cb_x;
+		if (x0 < 0)
+			x0 = 0;
+		gx.indent = x0 - GX_MARGIN;
+		gx.wrap_w = x0 + bw;
+		if (author->off_t > ZCSS_OFF_UNSET)
+			gx.y = gx.cb_y + L2OffPx(author->off_t, gx.cb_h);
+		else
+			gx.y = saved_y;
+		gx.x = GX_MARGIN + gx.indent;
+	}
+	else
+	{
+		gx.y += mt_eff;
+		gx.indent += ml_eff;
+		save_wrap2 = gx.wrap_w;
+		if (mr_eff + pr_eff > 0 &&
+			gx.wrap_w - (mr_eff + pr_eff) > GX_MARGIN + gx.indent + 40)
+			gx.wrap_w -= mr_eff + pr_eff;
+		save_wrap = 0;
+		center_add = 0;
+		if (style->width)
+		{
+			avail = gx.wrap_w - (GX_MARGIN + gx.indent);
+			if (style->width > 0)
+				bw = MinI64(style->width, avail);
+			else
+				bw = avail * -style->width / 100;
+			if (bw >= 60 && bw < avail)
+			{
+				if (style->ml_auto == 1)
+					center_add = (avail - bw) / 2;
+				gx.indent += center_add;
+				if (!save_wrap)
+					save_wrap = gx.wrap_w;
+				gx.wrap_w = GX_MARGIN + gx.indent + bw;
+			}
+		}
+	}
+
+	op0 = gx.op_count;
+	box_op = -1;
+	box_y0 = gx.y;
+	if (boxed)
+	{
+		op = GxOpAdd(GXO_BOX, GX_MARGIN + gx.indent - 3, gx.y - 2,
+					 gx.wrap_w - (GX_MARGIN + gx.indent - 3), 8);
+		if (op)
+		{
+			box_op = gx.op_count - 1;
+			op->has_bg = author->bg >= 0;
+			op->fg = GxPenBg(author->bg, de_theme.win_bg);
+			op->ul = author->border >= 0;
+			op->bg = GxPenBg(author->border, de_theme.panel_edge);
+			op->grad = author->grad;
+			op->sh_col = author->sh_col;
+			op->sh_dx = author->sh_dx;
+			op->sh_dy = author->sh_dy;
+			op->sh_blur = author->sh_blur;
+			if (author->radius > 0)
+				op->wkind = author->radius; // wkind = corner radius for GXO_BOX
+			if (author->bg_img >= 0 && author->bg_img < zcss_bgimg_count)
+			{ // GxBgImgAttach resolves the URL post-layout and crops/scales via the cache
+				op->img_url = ZincResolveLink(zcss_bgimg[author->bg_img]);
+				op->bg_px  = author->bg_px;
+				op->bg_py  = author->bg_py;
+				op->bg_sw  = author->bg_sw;
+				op->bg_sh  = author->bg_sh;
+				op->bg_rep = author->bg_repeat;
+			}
+		}
+		gx.line_start_op = gx.op_count;
+		kid.bg = -1;
+		if (author->bg >= 0)
+			gx.cur_bg = author->bg;
+	}
+	if (spr_fixed && box_op >= 0)
+	{
+		gx.ops[box_op].x = GX_MARGIN + gx.indent;
+		gx.ops[box_op].y = box_y0;
+		gx.ops[box_op].w = author->width;
+		gx.ops[box_op].h = author->height;
+	}
+	gx.indent += pl_eff;
+	gx.y += pt_eff;
+	gx.x = GX_MARGIN + gx.indent;
+
+	if (is_posn)
+	{
+		gx.cb_x = GX_MARGIN + gx.indent;
+		gx.cb_y = gx.y;
+		gx.cb_w = gx.wrap_w - (GX_MARGIN + gx.indent);
+		if (gx.cb_w < 40)
+			gx.cb_w = 40;
+		// percent top offsets need the CB height, known up front only from an explicit CSS height; 0 = unknown, and top:N% degrades to the container top
+		gx.cb_h = MaxI64(0, eff_h_cb);
+	}
+
+	if (is_flex)
+		L2FlexRow(node, style, author);
+	else if (is_flex_col)
+		L2FlexCol(node, style, author);
+	else
+	{
+		child = node->first_child;
+		while (child)
+		{
+			L2Node(child, &kid);
+			child = child->next;
+		}
+	}
+
+	gx.anc_h  = save_anch;
+	gx.cur_bg = save_curbg;
+	gx.cb_x = save_cbx;
+	gx.cb_y = save_cby;
+	gx.cb_w = save_cbw;
+	gx.cb_h = save_cbh;
+
+	GxRunFlush;
+	if (gx.x > GX_MARGIN + gx.indent)
+		GxNewline(0);
+	gx.y += pb_eff;
+	if (eff_h > 0 && gx.y < box_y0 + eff_h)
+		gx.y = box_y0 + eff_h;
+	if (box_op >= 0 && !spr_fixed)
+	{
+		gx.ops[box_op].h = MaxI64(8, gx.y + 2 - gx.ops[box_op].y);
+		gx.line_start_op = gx.op_count;
+	}
+	else if (box_op >= 0)
+		gx.line_start_op = gx.op_count;
+
+	if (is_abs)
+	{
+		gx.indent = saved_indent;
+		gx.wrap_w = saved_wrapa;
+		gx.y	  = saved_y;
+		gx.x	  = GX_MARGIN + gx.indent;
+	}
+	else
+	{
+		gx.y += mb_eff;
+		if (save_wrap)
+		{
+			gx.wrap_w = save_wrap;
+			gx.indent -= center_add;
+		}
+		gx.wrap_w = save_wrap2;
+		gx.indent -= ml_eff + pl_eff;
+		gx.x = GX_MARGIN + gx.indent;
+
+		if (author->pos == 1)
+		{
+			dx = 0;
+			dy = 0;
+			if (author->off_l > ZCSS_OFF_UNSET)
+				dx = L2OffPx(author->off_l, gx.cb_w);
+			else if (author->off_r > ZCSS_OFF_UNSET)
+				dx = -L2OffPx(author->off_r, gx.cb_w);
+			if (author->off_t > ZCSS_OFF_UNSET)
+				dy = L2OffPx(author->off_t, gx.cb_h);
+			if (dx || dy)
+			{
+				for (bw = op0; bw < gx.op_count; bw++)
+				{
+					gx.ops[bw].x += dx;
+					gx.ops[bw].y += dy;
+				}
+			}
+		}
+	}
+
+	if (author->tf_set && gx.op_count > op0)
+	{
+		dx = author->tf_x;
+		dy = author->tf_y;
+		if (author->tf_xp)
+		{
+			if (box_op >= 0)
+				bw = gx.ops[box_op].w;
+			else
+				bw = gx.wrap_w - (GX_MARGIN + gx.indent);
+			dx = bw * author->tf_x / 100;
+		}
+		if (author->tf_yp)
+		{
+			if (box_op >= 0)
+				dy = gx.ops[box_op].h * author->tf_y / 100;
+			else
+				dy = 0;
+		}
+		if (dx || dy)
+		{
+			for (bw = op0; bw < gx.op_count; bw++)
+			{
+				gx.ops[bw].x += dx;
+				gx.ops[bw].y += dy;
+			}
+		}
+	}
+
+	if (author->ovf_hide == 1 && eff_h > 0)
+	{
+		dy = box_y0 + eff_h;
+		for (bw = op0; bw < gx.op_count; bw++)
+		{
+			if (gx.ops[bw].y >= dy)
+			{
+				gx.ops[bw].w = 0;
+				gx.ops[bw].h = 0;
+			}
+			else if (gx.ops[bw].y + gx.ops[bw].h > dy &&
+					 (gx.ops[bw].type == GXO_BOX || gx.ops[bw].type == GXO_RECT))
+				gx.ops[bw].h = dy - gx.ops[bw].y;
+		}
+		if (gx.y > dy)
+			gx.y = dy;
+		if (box_op >= 0 && gx.ops[box_op].y + gx.ops[box_op].h > dy)
+			gx.ops[box_op].h = MaxI64(8, dy - gx.ops[box_op].y);
+	}
+	if (author->zidx > 0)
+	{
+		for (bw = op0; bw < gx.op_count; bw++)
+			if (!gx.ops[bw].z)
+				gx.ops[bw].z = author->zidx;
+	}
+	if (author->pos == 3)
+	{
+		for (bw = op0; bw < gx.op_count; bw++)
+			gx.ops[bw].pinned = TRUE;
+	}
+}
+
+
+U0 L2Float(CZNode *node, CZStyle *style, CZStyle *author)
+{
+	CZStyle	 kid;
+	CZNode	*child;
+	CGxOp	*op;
+	I64		 fw, fx, avail, mw, mh, lx, rx, ftop, fbot, box_op;
+	I64		 save_x, save_y, save_ind, save_wrap;
+
+	GxRunFlush;
+	GxFloatRecompute(gx.y);
+	lx = GX_MARGIN + gx.indent;
+	if (gx_float_lx > lx)
+		lx = gx_float_lx;
+	rx = gx.wrap_w;
+	if (gx_float_rx < rx)
+		rx = gx_float_rx;
+	avail = rx - lx;
+	if (avail < 40)
+		avail = 40;
+
+	fw = 0;
+	if (author->width > 0)
+		fw = author->width;
+	else if (author->width < 0)
+		fw = avail * -author->width / 100;
+	else
+	{
+		L2Measure(node, style, avail, &mw, &mh);
+		fw = mw + 8;
+	}
+	if (fw > avail)
+		fw = avail;
+	if (fw < 24)
+		fw = 24;
+
+	if (author->float_side == 2)
+		fx = rx - fw;
+	else
+		fx = lx;
+
+	save_x	  = gx.x;
+	save_y	  = gx.y;
+	save_ind  = gx.indent;
+	save_wrap = gx.wrap_w;
+	ftop = gx.y;
+
+	gx.indent = fx - GX_MARGIN;
+	gx.wrap_w = fx + fw;
+	gx.x	  = fx;
+
+	box_op = -1;
+	if (author->bg >= 0 || author->border >= 0 || author->grad >= 0 ||
+		author->bg_img >= 0)
+	{
+		op = GxOpAdd(GXO_BOX, fx - 2, gx.y - 2, fw + 2, 8);
+		if (op)
+		{
+			box_op = gx.op_count - 1;
+			op->has_bg = author->bg >= 0;
+			op->fg = GxPenBg(author->bg, de_theme.win_bg);
+			op->ul = author->border >= 0;
+			op->bg = GxPenBg(author->border, de_theme.panel_edge);
+			op->grad = author->grad;
+			if (author->bg_img >= 0 && author->bg_img < zcss_bgimg_count)
+			{
+				op->img_url = ZincResolveLink(zcss_bgimg[author->bg_img]);
+				op->bg_px  = author->bg_px;
+				op->bg_py  = author->bg_py;
+				op->bg_sw  = author->bg_sw;
+				op->bg_sh  = author->bg_sh;
+				op->bg_rep = author->bg_repeat;
+			}
+		}
+	}
+
+	if (L2Delegated(node->tag))
+		GxNode(node, style);
+	else
+	{
+		MemCopy(&kid, style, sizeof(CZStyle));
+		ZStyleStripBox(&kid);
+		child = node->first_child;
+		while (child)
+		{
+			L2Node(child, &kid);
+			child = child->next;
+		}
+	}
+	GxRunFlush;
+	if (gx.x > GX_MARGIN + gx.indent)
+		GxNewline(0);
+	fbot = gx.y;
+	if (author->height > 0 && fbot < ftop + author->height)
+		fbot = ftop + author->height;
+	if (fbot <= ftop)
+		fbot = ftop + FONT_HEIGHT;
+	if (box_op >= 0)
+		gx.ops[box_op].h = MaxI64(8, fbot - gx.ops[box_op].y);
+
+	GxFloatAdd(author->float_side - 1, fx - 2, fx + fw, ftop, fbot);
+
+	gx.indent = save_ind;
+	gx.wrap_w = save_wrap;
+	gx.y	  = save_y;
+	gx.x	  = save_x;
+	GxFloatRecompute(gx.y);
+	if (gx.x <= GX_MARGIN + gx.indent && gx_float_lx > gx.x)
+		gx.x = gx_float_lx;
+}
+
+U0 L2SpriteInline(CZNode *node, CZStyle *author)
+{
+	CGxOp *op;
+	I64	   w = author->width, h = author->height;
+
+	GxRunFlush;
+	if (gx.x + w > gx.wrap_w && gx.x > GX_MARGIN + gx.indent)
+		GxNewline(0);
+	op = GxOpAdd(GXO_BOX, gx.x, gx.y, w, h);
+	if (op && author->bg_img >= 0 && author->bg_img < zcss_bgimg_count)
+	{
+		op->img_url = ZincResolveLink(zcss_bgimg[author->bg_img]);
+		op->bg_px  = author->bg_px;
+		op->bg_py  = author->bg_py;
+		op->bg_sw  = author->bg_sw;
+		op->bg_sh  = author->bg_sh;
+		op->bg_rep = author->bg_repeat;
+	}
+	gx.x += w + 2;
+}
+
+U0 L2Node(CZNode *node, CZStyle *inh)
+{
+	CZStyle style, author;
+	U8	   *gen;
+	I64		sv_x, sv_y, sv_ind, sv_wrap, ax, ay, aw;
+
+	if (!node || gx.op_count >= GX_OPS_MAX - 8)
+		return;
+	if (node->type == ZH_TEXT)
+	{
+		GxText(node->text, inh, GxScaleOf(inh), inh->pre == 1);
+		return;
+	}
+	if (ZnTagSkipped(node->tag))
+		return;
+
+	MemCopy(&style, inh, sizeof(CZStyle));
+	ZnUaStyle(node->tag, &style);
+	ZCssApply(node, &author);
+	if (author.display == ZCSS_DISP_NONE)
+		return;
+
+	gen = NULL;
+	if (zcss_has_gen)
+		gen = ZCssGenText(node, 5); // ZCssGenText 5 = ::before
+	if (gen)
+		GxText(gen, inh, GxScaleOf(inh), FALSE);
+
+	if (author.bg_img >= 0 && author.width > 0 && author.width <= 64 &&
+		author.height > 0 && author.height <= 64 && !node->first_child)
+	{
+		L2SpriteInline(node, &author);
+		return;
+	}
+
+	if (zinc_floats && l2_meas_depth == 0 &&
+		(author.float_side == 1 || author.float_side == 2))
+	{ // float:left/right, never during measure: L2Float's shrink-to-fit runs L2Measure -> L2Node on the SAME node, re-entering L2Float, and GxFloatAdd is not rolled back by the measure sandbox
+		ZStyleMerge(&style, &author);
+		style.display = -1;
+		L2Float(node, &style, &author);
+		return;
+	}
+
+	if (!L2Handles(node, &author))
+	{
+		if ((author.pos == 2 || author.pos == 3) && !L2IsBody(node->tag))
+		{
+			aw = gx.cb_w;
+			if (aw < 40)
+				aw = 40;
+			if (author.width > 0)
+				aw = MinI64(author.width, gx.cb_w);
+			else if (author.width < 0)
+				aw = gx.cb_w * -author.width / 100;
+			if (author.off_l > ZCSS_OFF_UNSET)
+				ax = gx.cb_x + L2OffPx(author.off_l, gx.cb_w);
+			else if (author.off_r > ZCSS_OFF_UNSET)
+				ax = gx.cb_x + gx.cb_w - L2OffPx(author.off_r, gx.cb_w) - aw;
+			else
+				ax = gx.cb_x;
+			if (author.off_t > ZCSS_OFF_UNSET)
+				ay = gx.cb_y + L2OffPx(author.off_t, gx.cb_h);
+			else
+				ay = gx.y;
+			if (ax < 0)
+				ax = 0;
+			sv_x = gx.x;
+			sv_y = gx.y;
+			sv_ind = gx.indent;
+			sv_wrap = gx.wrap_w;
+			gx.indent = ax - GX_MARGIN;
+			gx.wrap_w = ax + aw;
+			gx.x = GX_MARGIN + gx.indent;
+			gx.y = ay;
+			GxNode(node, inh);
+			gx.x = sv_x;
+			gx.y = sv_y;
+			gx.indent = sv_ind;
+			gx.wrap_w = sv_wrap;
+			return;
+		}
+		GxNode(node, inh);
+		gen = NULL;
+		if (zcss_has_gen)
+			gen = ZCssGenText(node, 6); // ZCssGenText 6 = ::after
+		if (gen)
+			GxText(gen, inh, GxScaleOf(inh), FALSE);
+		return;
+	}
+
+	ZStyleMerge(&style, &author);
+	style.display = -1;
+	L2Block(node, &style, &author);
+	gen = NULL;
+	if (zcss_has_gen)
+		gen = ZCssGenText(node, 6);
+	if (gen)
+		GxText(gen, inh, GxScaleOf(inh), FALSE);
+}

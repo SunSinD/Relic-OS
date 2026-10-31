@@ -1,0 +1,819 @@
+//WebP container and VP8L lossless decoder, ported from the libwebp v1.6.0
+//reference decoder. Tables live in GrWEBPTables.ZC, machine-extracted.
+//VP8L covers all 4 transforms, colour cache and pixel bundling; alpha < 128 ->
+//PIXF_TRANSPARENT. The lossy ALPH chunk is ignored.
+//
+//Lossy VP8 lives in ::/System/Media/Lib/VP8.ZC.
+
+#define WEBP_MAXDIM		4000
+
+class CWlBr
+{
+	U8	*buf;
+	I64	 len;			//Bytes.
+	I64	 pos;			//BITS.
+	Bool eos;
+};
+
+I64 WlBits(CWlBr *br, I64 n)
+{
+	I64 v = 0, i, byte_i;
+
+	for (i = 0; i < n; i++)
+	{
+		byte_i = br->pos >> 3;
+		if (byte_i >= br->len)
+		{
+			br->eos = TRUE;
+			return v;
+		}
+		if (br->buf[byte_i] & 1 << (br->pos & 7))
+			v |= 1 << i;
+		br->pos++;
+	}
+	return v;
+}
+
+/***** VP8L canonical Huffman (bit-by-bit decode; DEFLATE-style canonical) *****/
+
+#define WL_MAX_LEN	15
+
+class CWlHuff
+{
+	I64	 cnt[WL_MAX_LEN + 1];	//Codes per length.
+	I64	 first[WL_MAX_LEN + 1];	//First code of each length.
+	I64	 offs[WL_MAX_LEN + 1];	//Index into syms of first code per length.
+	U16	*syms;					//Symbols sorted by (len, symbol).
+	I64	 nsyms;
+	I64	 single;				//-1, or the sole symbol (0-bit code).
+};
+
+Bool WlHuffBuild(CWlHuff *h, I64 *lens, I64 n)
+{
+	I64 i, l, code, total = 0, last = -1;
+	I64 cur[WL_MAX_LEN + 1];
+
+	MemSet(h->cnt, 0, sizeof(I64) * (WL_MAX_LEN + 1));
+	for (i = 0; i < n; i++)
+	{
+		l = lens[i];
+		if (l < 0 || l > WL_MAX_LEN)
+			return FALSE;
+		if (l)
+		{
+			h->cnt[l]++;
+			total++;
+			last = i;
+		}
+	}
+	if (!total)
+		return FALSE;
+	if (total == 1)
+	{
+		h->single = last;
+		return TRUE;
+	}
+	h->single = -1;
+	code = 0;
+	i = 0;
+	for (l = 1; l <= WL_MAX_LEN; l++)
+	{
+		h->first[l] = code;
+		h->offs[l] = i;
+		code = (code + h->cnt[l]) << 1;
+		i += h->cnt[l];
+	}
+		//Symbols in canonical (length, symbol) order. cnt[] must stay intact for WlHuffRead.
+	if (!h->syms)
+		return FALSE;
+	MemSet(cur, 0, sizeof(cur));
+	for (i = 0; i < n; i++)
+	{
+		l = lens[i];
+		if (l)
+		{
+			h->syms[h->offs[l] + cur[l]] = i;
+			cur[l]++;
+		}
+	}
+	h->nsyms = total;
+	return TRUE;
+}
+
+I64 WlHuffRead(CWlBr *br, CWlHuff *h)
+{
+	I64 code = 0, l;
+
+	if (h->single >= 0)
+		return h->single;
+	for (l = 1; l <= WL_MAX_LEN; l++)
+	{
+		code = code << 1 | WlBits(br, 1);
+		if (h->cnt[l] && code - h->first[l] < h->cnt[l])
+			return h->syms[h->offs[l] + code - h->first[l]];
+	}
+	br->eos = TRUE;
+	return 0;
+}
+
+I64 WlCopyDist(CWlBr *br, I64 sym)
+{//Shared length/distance prefix decoding.
+	I64 extra, offset;
+
+	if (sym < 4)
+		return sym + 1;
+	extra = (sym - 2) >> 1;
+	offset = (2 + (sym & 1)) << extra;
+	return offset + WlBits(br, extra) + 1;
+}
+
+I64 WlPlaneDist(I64 xsize, I64 plane_code)
+{
+	I64 dist_code, yoffset, xoffset, dist;
+
+	if (plane_code > 120)
+		return plane_code - 120;
+	dist_code = webpl_code_to_plane[plane_code - 1];
+	yoffset = dist_code >> 4;
+	xoffset = 8 - (dist_code & 0xF);
+	dist = yoffset * xsize + xoffset;
+	if (dist < 1)
+		dist = 1;
+	return dist;
+}
+
+I64 WlAvg2(I64 a, I64 b)
+{//Parens required: in ZealC '>>', '*' and '&' bind tighter than '+'.
+	return (((a ^ b) & 0xFEFEFEFE) >> 1) + (a & b);
+}
+
+I64 WlClip255(I64 a)
+{
+	if (a < 0)
+		return 0;
+	if (a > 255)
+		return 255;
+	return a;
+}
+
+I64 WlAddSubFull(I64 c0, I64 c1, I64 c2)
+{
+	I64 a = WlClip255((c0 >> 24 & 0xFF) + (c1 >> 24 & 0xFF) - (c2 >> 24 & 0xFF));
+	I64 r = WlClip255((c0 >> 16 & 0xFF) + (c1 >> 16 & 0xFF) - (c2 >> 16 & 0xFF));
+	I64 g = WlClip255((c0 >> 8 & 0xFF) + (c1 >> 8 & 0xFF) - (c2 >> 8 & 0xFF));
+	I64 b = WlClip255((c0 & 0xFF) + (c1 & 0xFF) - (c2 & 0xFF));
+
+	return a << 24 | r << 16 | g << 8 | b;
+}
+
+I64 WlAddSubHalfC(I64 a, I64 b)
+{//Predictor 13, libwebp AddSubtractComponentHalf. Halves toward zero: a signed
+//power-of-two divide floors, and is off by one on negative odd differences.
+	I64 d = a - b;
+
+	if (d < 0)
+		return WlClip255(a - (-d >> 1));
+
+	return WlClip255(a + (d >> 1));
+}
+
+I64 WlAddSubHalf(I64 c0, I64 c1, I64 c2)
+{
+	I64 ave = WlAvg2(c0, c1);
+	I64 a = WlAddSubHalfC(ave >> 24 & 0xFF, c2 >> 24 & 0xFF);
+	I64 r = WlAddSubHalfC(ave >> 16 & 0xFF, c2 >> 16 & 0xFF);
+	I64 g = WlAddSubHalfC(ave >> 8 & 0xFF, c2 >> 8 & 0xFF);
+	I64 b = WlAddSubHalfC(ave & 0xFF, c2 & 0xFF);
+
+	return a << 24 | r << 16 | g << 8 | b;
+}
+
+I64 WlSub3(I64 a, I64 b, I64 c)
+{
+	I64 pb = b - c, pa = a - c;
+
+	return AbsI64(pb) - AbsI64(pa);
+}
+
+I64 WlSelect(I64 a, I64 b, I64 c)
+{
+	I64 d = WlSub3(a >> 24 & 0xFF, b >> 24 & 0xFF, c >> 24 & 0xFF) +
+			WlSub3(a >> 16 & 0xFF, b >> 16 & 0xFF, c >> 16 & 0xFF) +
+			WlSub3(a >> 8 & 0xFF, b >> 8 & 0xFF, c >> 8 & 0xFF) +
+			WlSub3(a & 0xFF, b & 0xFF, c & 0xFF);
+
+	if (d <= 0)
+		return a;
+	return b;
+}
+
+I64 WlPredict(I64 mode, I64 l, I64 t, I64 tl, I64 tr)
+{
+	switch (mode)
+	{
+		case 0:	 return 0xFF000000;
+		case 1:	 return l;
+		case 2:	 return t;
+		case 3:	 return tr;
+		case 4:	 return tl;
+		case 5:	 return WlAvg2(WlAvg2(l, tr), t);
+		case 6:	 return WlAvg2(l, tl);
+		case 7:	 return WlAvg2(l, t);
+		case 8:	 return WlAvg2(tl, t);
+		case 9:	 return WlAvg2(t, tr);
+		case 10: return WlAvg2(WlAvg2(l, tl), WlAvg2(t, tr));
+		case 11: return WlSelect(t, l, tl);
+		case 12: return WlAddSubFull(l, t, tl);
+		case 13: return WlAddSubHalf(l, t, tl);
+	}
+	return 0xFF000000;
+}
+
+I64 WlCTDelta(I64 m, I64 c)
+{//Both args are SIGNED bytes: (I8)m * (I8)c >> 5.
+	if (m & 0x80)
+		m -= 256;
+	if (c & 0x80)
+		c -= 256;
+	return (m * c) >> 5;
+}
+
+#define WLT_PREDICTOR	0
+#define WLT_COLOR		1
+#define WLT_SUB_GREEN	2
+#define WLT_INDEX		3
+
+class CWlTransform
+{
+	I64	 type;
+	I64	 bits;			//Tile size bits.
+	I64	 xsize;			//Image width when this transform was read.
+	U32	*data;			//Tile image / palette.
+	I64	 data_len;		//Palette size for WLT_INDEX.
+};
+
+U0 WlInversePredict(U32 *data, I64 w, I64 h, CWlTransform *t)
+{
+	I64 x, y, mode, l, tp, tl, tr, p, tiles_x = (w + (1 << t->bits) - 1) >> t->bits;
+	I64 a, r, g, b;
+
+	for (y = 0; y < h; y++)
+	{
+		for (x = 0; x < w; x++)
+		{
+			if (x == 0 && y == 0)
+				p = 0xFF000000;
+			else if (y == 0)
+				p = data[y * w + x - 1];			//Left.
+			else if (x == 0)
+				p = data[(y - 1) * w + x];			//Top.
+			else
+			{
+				mode = t->data[(y >> t->bits) * tiles_x + (x >> t->bits)] >> 8 & 0xFF;
+				l = data[y * w + x - 1];
+				tp = data[(y - 1) * w + x];
+				tl = data[(y - 1) * w + x - 1];
+				tr = data[(y - 1) * w + x + 1];		//x=w-1 wraps to row start: matches libwebp's contiguous read.
+				p = WlPredict(mode, l, tp, tl, tr);
+			}
+			//Per-channel add mod 256.
+			a = ((data[y * w + x] >> 24) + (p >> 24)) & 0xFF;
+			r = ((data[y * w + x] >> 16) + (p >> 16)) & 0xFF;
+			g = ((data[y * w + x] >> 8) + (p >> 8)) & 0xFF;
+			b = (data[y * w + x] + p) & 0xFF;
+			data[y * w + x] = a << 24 | r << 16 | g << 8 | b;
+		}
+		if (!(y & 63))
+			Yield;
+	}
+}
+
+U0 WlInverseColor(U32 *data, I64 w, I64 h, CWlTransform *t)
+{
+	I64 x, y, pix, m, g2r, g2b, r2b, g, r, b, tiles_x = (w + (1 << t->bits) - 1) >> t->bits;
+
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++)
+		{
+			m = t->data[(y >> t->bits) * tiles_x + (x >> t->bits)];
+			g2r = m & 0xFF;
+			g2b = m >> 8 & 0xFF;
+			r2b = m >> 16 & 0xFF;
+			pix = data[y * w + x];
+			g = pix >> 8 & 0xFF;
+			r = pix >> 16 & 0xFF;
+			b = pix & 0xFF;
+			r = (r + WlCTDelta(g2r, g)) & 0xFF;
+			b = (b + WlCTDelta(g2b, g)) & 0xFF;
+			b = (b + WlCTDelta(r2b, r)) & 0xFF;
+			data[y * w + x] = pix & 0xFF00FF00 | r << 16 | b;
+		}
+}
+
+U0 WlInverseSubGreen(U32 *data, I64 n)
+{
+	I64 i, pix, g, r, b;
+
+	for (i = 0; i < n; i++)
+	{
+		pix = data[i];
+		g = pix >> 8 & 0xFF;
+		r = ((pix >> 16) + g) & 0xFF;
+		b = (pix + g) & 0xFF;
+		data[i] = pix & 0xFF00FF00 | r << 16 | b;
+	}
+}
+
+U32 *WlInverseIndex(U32 *data, I64 w, I64 h, CWlTransform *t, I64 *out_w)
+{//Expand palette indices (possibly bit-packed) back to full width ARGB.
+	I64	 wb = 0, packed_w, x, y, bits_per, mask, count, pix, idx;
+	U32	*out;
+
+	if (t->data_len <= 2)
+		wb = 3;
+	else if (t->data_len <= 4)
+		wb = 2;
+	else if (t->data_len <= 16)
+		wb = 1;
+	bits_per = 8 >> wb;
+	packed_w = (t->xsize + (1 << wb) - 1) >> wb;
+	mask = (1 << bits_per) - 1;
+
+	out = MAlloc(t->xsize * h * sizeof(U32));
+	for (y = 0; y < h; y++)
+		for (x = 0; x < t->xsize; x++)
+		{
+			pix = data[y * packed_w + (x >> wb)];
+			count = x & ((1 << wb) - 1);
+			idx = pix >> 8 >> (count * bits_per) & mask;
+			if (idx < t->data_len)
+				out[y * t->xsize + x] = t->data[idx];
+			else
+				out[y * t->xsize + x] = 0;
+		}
+	Free(data);
+	*out_w = t->xsize;
+	return out;
+}
+
+#define WL_GREEN_SIZE	(256 + 24)
+
+Bool WlReadHuffCode(CWlBr *br, I64 alphabet, I64 *lens, CWlHuff *h)
+{//One Huffman code: simple (1-2 symbols) or code-length-coded.
+	I64	 i, n, sym, num_codes, max_symbol, length_nbits;
+	I64	 clc_lens[19];
+	I64	 prev = 8, code_len, extra, rep, use_prev;
+	CWlHuff	 clc;
+	U16	 clc_syms[19];
+
+	MemSet(lens, 0, alphabet * sizeof(I64));
+	if (WlBits(br, 1))
+	{//Simple code.
+		n = WlBits(br, 1) + 1;
+		if (WlBits(br, 1))
+			sym = WlBits(br, 8);
+		else
+			sym = WlBits(br, 1);
+		if (sym >= alphabet)
+			return FALSE;
+		lens[sym] = 1;
+		if (n == 2)
+		{
+			sym = WlBits(br, 8);
+			if (sym >= alphabet)
+				return FALSE;
+			lens[sym] = 1;
+		}
+	}
+	else
+	{
+		MemSet(clc_lens, 0, sizeof(clc_lens));
+		num_codes = WlBits(br, 4) + 4;
+		if (num_codes > 19)
+			return FALSE;
+		for (i = 0; i < num_codes; i++)
+			clc_lens[webpl_clc_order[i]] = WlBits(br, 3);
+		clc.syms = clc_syms;
+		if (!WlHuffBuild(&clc, clc_lens, 19))
+			return FALSE;
+
+		if (WlBits(br, 1))
+		{//Explicit max symbol.
+			length_nbits = 2 + 2 * WlBits(br, 3);
+			max_symbol = 2 + WlBits(br, length_nbits);
+			if (max_symbol > alphabet)
+				return FALSE;
+		}
+		else
+			max_symbol = alphabet;
+
+		i = 0;
+		while (i < alphabet)
+		{
+			if (max_symbol-- == 0)
+				break;
+			if (br->eos)
+				return FALSE;
+			code_len = WlHuffRead(br, &clc);
+			if (code_len < 16)
+			{
+				lens[i++] = code_len;
+				if (code_len)
+					prev = code_len;
+			}
+			else
+			{
+				use_prev = code_len == 16;
+				if (code_len == 16)
+				{
+					extra = 2;
+					rep = 3;
+				}
+				else if (code_len == 17)
+				{
+					extra = 3;
+					rep = 3;
+				}
+				else
+				{
+					extra = 7;
+					rep = 11;
+				}
+				rep += WlBits(br, extra);
+				if (i + rep > alphabet)
+					return FALSE;
+				while (rep--)
+				{
+					if (use_prev)
+						lens[i++] = prev;
+					else
+						lens[i++] = 0;
+				}
+			}
+		}
+	}
+	return WlHuffBuild(h, lens, alphabet);
+}
+
+U32 *WlDecodeImg(CWlBr *br, I64 w, I64 h, Bool is_level0, I64 *err)
+{//Decodes w*h ARGB pixels (no transforms). is_level0 allows meta-huffman.
+//err set nonzero on failure. Caller frees.
+	I64	 cache_bits = 0, cache_size = 0;
+	U32	*cache = NULL;
+	U32	*meta = NULL;
+	I64	 meta_bits = 0, meta_xs = 0, num_groups = 1;
+	CWlHuff	*huffs = NULL;			//5 per group.
+	U16	*sym_pool = NULL;
+	I64	*lens = NULL;
+	U32	*data = NULL;
+	I64	 i, g, n, sym, alpha_size, green_size;
+	I64	 x = 0, y = 0, pos, total = w * h;
+	I64	 red, blue, alpha, length, dist_sym, dist_code, dist, j, group = -1;
+	I64	 hash;
+	CWlHuff	*hg;
+
+	*err = 1;
+
+	//Grammar order: spatially_coded_image = color_cache_info meta_prefix data.
+	if (WlBits(br, 1))
+	{//Color cache.
+		cache_bits = WlBits(br, 4);
+		if (cache_bits < 1 || cache_bits > 11)
+			goto wl_img_fail;
+		cache_size = 1 << cache_bits;
+		cache = CAlloc(cache_size * sizeof(U32));
+	}
+
+	if (is_level0 && WlBits(br, 1))
+	{//Meta huffman image.
+		meta_bits = WlBits(br, 3) + 2;
+		meta_xs = (w + (1 << meta_bits) - 1) >> meta_bits;
+		meta = WlDecodeImg(br, meta_xs, (h + (1 << meta_bits) - 1) >> meta_bits,
+						   FALSE, &i);
+		if (i)
+			goto wl_img_fail;
+		n = meta_xs * ((h + (1 << meta_bits) - 1) >> meta_bits);
+		for (i = 0; i < n; i++)
+		{
+			g = meta[i] >> 8 & 0xFFFF;
+			if (g + 1 > num_groups)
+				num_groups = g + 1;
+		}
+	}
+
+	green_size = WL_GREEN_SIZE + cache_size;
+	huffs = CAlloc(num_groups * 5 * sizeof(CWlHuff));
+	//Symbol pool: green_size + 3*256 + 40 per group.
+	sym_pool = MAlloc(num_groups * (green_size + 3 * 256 + 40) * sizeof(U16));
+	lens = MAlloc(green_size * sizeof(I64));
+	pos = 0;
+	for (g = 0; g < num_groups; g++)
+	{
+		for (j = 0; j < 5; j++)
+		{
+			if (j == 0)
+				alpha_size = green_size;
+			else if (j == 4)
+				alpha_size = 40;
+			else
+				alpha_size = 256;
+			huffs[g * 5 + j].syms = sym_pool + pos;
+			pos += alpha_size;
+			if (!WlReadHuffCode(br, alpha_size, lens, &huffs[g * 5 + j]))
+				goto wl_img_fail;
+		}
+	}
+
+	data = MAlloc(total * sizeof(U32));
+	pos = 0;
+	while (pos < total)
+	{
+		if (br->eos)
+			goto wl_img_fail;
+		if (meta)
+			g = meta[(y >> meta_bits) * meta_xs + (x >> meta_bits)] >> 8 & 0xFFFF;
+		else
+			g = 0;
+		hg = &huffs[g * 5];
+		sym = WlHuffRead(br, &hg[0]);
+		if (sym < 256)
+		{//Literal.
+			red = WlHuffRead(br, &hg[1]);
+			blue = WlHuffRead(br, &hg[2]);
+			alpha = WlHuffRead(br, &hg[3]);
+			data[pos] = alpha << 24 | red << 16 | sym << 8 | blue;
+			if (cache)
+			{
+				hash = 0x1E35A7BD * data[pos] & 0xFFFFFFFF;
+				cache[hash >> (32 - cache_bits)] = data[pos];
+			}
+			pos++;
+			x++;
+			if (x >= w)
+			{
+				x = 0;
+				y++;
+			}
+		}
+		else if (sym < 256 + 24)
+		{//Backward reference.
+			length = WlCopyDist(br, sym - 256);
+			dist_sym = WlHuffRead(br, &hg[4]);
+			dist_code = WlCopyDist(br, dist_sym);
+			dist = WlPlaneDist(w, dist_code);
+			if (dist > pos || pos + length > total)
+				goto wl_img_fail;
+			for (j = 0; j < length; j++)
+			{
+				data[pos] = data[pos - dist];
+				if (cache)
+				{
+					hash = 0x1E35A7BD * data[pos] & 0xFFFFFFFF;
+					cache[hash >> (32 - cache_bits)] = data[pos];
+				}
+				pos++;
+				x++;
+				if (x >= w)
+				{
+					x = 0;
+					y++;
+				}
+			}
+		}
+		else
+		{//Color cache lookup.
+			if (!cache)
+				goto wl_img_fail;
+			i = sym - 256 - 24;
+			if (i >= cache_size)
+				goto wl_img_fail;
+			data[pos] = cache[i];
+			pos++;
+			x++;
+			if (x >= w)
+			{
+				x = 0;
+				y++;
+			}
+		}
+		if (!(pos & 0x3FFF))
+			Yield;
+	}
+	*err = 0;
+
+wl_img_fail:
+	Free(meta);
+	Free(cache);
+	Free(huffs);
+	Free(sym_pool);
+	Free(lens);
+	if (*err)
+	{
+		Free(data);
+		return NULL;
+	}
+	return data;
+}
+
+U32 *WEBPDecodeVP8L(U8 *buf, I64 size, I64 *out_w, I64 *out_h)
+{//VP8L payload -> ARGB pixels (a<128 handled by the caller). NULL on fail.
+	CWlBr	 br;
+	I64		 w, h, i, err, cur_w, n_t = 0, sub_w, sub_h;
+	CWlTransform t[4];
+	U32		*data, *pal;
+
+	if (size < 5 || buf[0] != 0x2F)
+		return NULL;
+	br.buf = buf + 1;
+	br.len = size - 1;
+	br.pos = 0;
+	br.eos = FALSE;
+
+	w = WlBits(&br, 14) + 1;
+	h = WlBits(&br, 14) + 1;
+	WlBits(&br, 1);		//Alpha hint.
+	if (WlBits(&br, 3))	//Version must be 0.
+		return NULL;
+	if (w > WEBP_MAXDIM || h > WEBP_MAXDIM)
+		return NULL;
+
+	cur_w = w;
+	while (WlBits(&br, 1))
+	{//Transforms, in stream order.
+		if (n_t >= 4)
+			return NULL;
+		t[n_t].type = WlBits(&br, 2);
+		t[n_t].xsize = cur_w;
+		t[n_t].data = NULL;
+		t[n_t].data_len = 0;
+		t[n_t].bits = 0;
+		if (t[n_t].type == WLT_PREDICTOR || t[n_t].type == WLT_COLOR)
+		{
+			t[n_t].bits = WlBits(&br, 3) + 2;
+			sub_w = (cur_w + (1 << t[n_t].bits) - 1) >> t[n_t].bits;
+			sub_h = (h + (1 << t[n_t].bits) - 1) >> t[n_t].bits;
+			t[n_t].data = WlDecodeImg(&br, sub_w, sub_h, FALSE, &err);
+			if (err)
+				goto wl_fail;
+		}
+		else if (t[n_t].type == WLT_INDEX)
+		{
+			t[n_t].data_len = WlBits(&br, 8) + 1;
+			pal = WlDecodeImg(&br, t[n_t].data_len, 1, FALSE, &err);
+			if (err)
+				goto wl_fail;
+			for (i = 1; i < t[n_t].data_len; i++)
+			{//Palette entries are byte-wise delta-summed.
+				pal[i] = (((pal[i] >> 24) + (pal[i - 1] >> 24)) & 0xFF) << 24 |
+						 (((pal[i] >> 16) + (pal[i - 1] >> 16)) & 0xFF) << 16 |
+						 (((pal[i] >> 8) + (pal[i - 1] >> 8)) & 0xFF) << 8 |
+						 (pal[i] + pal[i - 1]) & 0xFF;
+			}
+			t[n_t].data = pal;
+			//Pixel bundling shrinks the coded width.
+			if (t[n_t].data_len <= 2)
+				cur_w = (cur_w + 7) >> 3;
+			else if (t[n_t].data_len <= 4)
+				cur_w = (cur_w + 3) >> 2;
+			else if (t[n_t].data_len <= 16)
+				cur_w = (cur_w + 1) >> 1;
+		}
+		//WLT_SUB_GREEN carries no data.
+		n_t++;
+	}
+
+	data = WlDecodeImg(&br, cur_w, h, TRUE, &err);
+	if (err)
+		goto wl_fail;
+
+	//Inverse transforms, reverse stream order.
+	for (i = n_t - 1; i >= 0; i--)
+	{
+		switch (t[i].type)
+		{
+			case WLT_INDEX:
+				data = WlInverseIndex(data, cur_w, h, &t[i], &cur_w);
+				break;
+			case WLT_SUB_GREEN:
+				WlInverseSubGreen(data, cur_w * h);
+				break;
+			case WLT_COLOR:
+				WlInverseColor(data, cur_w, h, &t[i]);
+				break;
+			case WLT_PREDICTOR:
+				WlInversePredict(data, cur_w, h, &t[i]);
+				break;
+		}
+	}
+	for (i = 0; i < n_t; i++)
+		Free(t[i].data);
+	*out_w = w;
+	*out_h = h;
+	return data;
+
+wl_fail:
+	for (i = 0; i < n_t; i++)
+		Free(t[i].data);
+	return NULL;
+}
+
+U0 WEBPArgbIntoDC(CDC *dc, U32 *argb, I64 w, I64 h, Bool has_alpha)
+{//dc must be at least w by h.
+	I64	 x, y;
+	U32	*row, pix;
+
+	for (y = 0; y < h; y++)
+	{
+		row = dc->body + y * dc->width_internal;
+		for (x = 0; x < w; x++)
+		{
+			pix = argb[y * w + x];
+			if (has_alpha && pix >> 24 < 128)
+				row[x] = PIXF_TRANSPARENT;
+			else
+				row[x] = pix & 0x00FFFFFF;
+		}
+	}
+}
+
+CDC *WEBPArgbToDC(U32 *argb, I64 w, I64 h, Bool has_alpha, CTask *mem_task)
+{
+	CDC *dc = DCNew(w, h, mem_task);
+
+	if (!dc)
+		return NULL;
+	WEBPArgbIntoDC(dc, argb, w, h, has_alpha);
+
+	return dc;
+}
+
+#define WEBP_ANMF_HDR	16	//frame x/y/w/h/duration/flags, 3+3+3+3+3+1
+
+CDC *WEBPScanChunks(U8 *buf, I64 pos, I64 end, CTask *mem_task)
+{//Walk RIFF chunks in [pos, end) and decode the first image chunk found.
+//Recurses into ANMF, whose payload is a frame header followed by the same
+//chunk layout.
+	I64	 csize, w, h;
+	U32	*argb;
+	U8	 fourcc[5];
+	CDC	*dc;
+
+	while (pos + 8 <= end)
+	{
+		MemCopy(fourcc, buf + pos, 4);
+		fourcc[4] = 0;
+		csize = buf[pos + 4] | buf[pos + 5] << 8 | buf[pos + 6] << 16 | buf[pos + 7] << 24;
+		if (csize < 0 || pos + 8 + csize > end)
+			return NULL;
+		if (!StrCompare(fourcc, "VP8L"))
+		{
+			argb = WEBPDecodeVP8L(buf + pos + 8, csize, &w, &h);
+			if (!argb)
+				return NULL;
+			dc = WEBPArgbToDC(argb, w, h, TRUE, mem_task);
+			Free(argb);
+			return dc;
+		}
+		if (!StrCompare(fourcc, "VP8 "))
+		{
+			argb = Vp8DecodeKeyframe(buf + pos + 8, csize, &w, &h);
+			if (!argb)
+				return NULL;
+			dc = WEBPArgbToDC(argb, w, h, FALSE, mem_task);
+			Free(argb);
+			return dc;
+		}
+		if (!StrCompare(fourcc, "ANMF") && csize > WEBP_ANMF_HDR)
+		{//First frame only.
+			dc = WEBPScanChunks(buf, pos + 8 + WEBP_ANMF_HDR, pos + 8 + csize, mem_task);
+			if (dc)
+				return dc;
+		}
+		//VP8X / ALPH / EXIF / ICCP / ANIM: skip. (ALPH ignored: lossy alpha
+		//renders opaque.)
+		pos += 8 + csize + (csize & 1);
+	}
+
+	return NULL;
+}
+
+public CDC *WEBPReadBuf(U8 *buf, I64 size, CTask *mem_task=NULL)
+{//Decode a .webp in memory into a truecolor CDC. NULL on failure.
+	if (size < 20 || MemCompare(buf, "RIFF", 4) || MemCompare(buf + 8, "WEBP", 4))
+		return NULL;
+
+	return WEBPScanChunks(buf, 12, size, mem_task);
+}
+
+public CDC *WEBPRead(U8 *filename, CTask *mem_task=NULL)
+{
+	I64	 size;
+	U8	*buf = FileRead(filename, &size);
+	CDC	*dc;
+
+	if (!buf)
+		return NULL;
+	dc = WEBPReadBuf(buf, size, mem_task);
+	Free(buf);
+	return dc;
+}

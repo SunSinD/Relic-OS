@@ -1,0 +1,22 @@
+// launch entry point.
+//
+// two stages: RunLib.ZC builds the library, this file the app shell. one 40+
+// file compile unit faults at run time, so each ExeFile is a separate compile
+// that completes and releases before the next starts; its symbols stay live in
+// this task.
+//
+// ZealC is single-pass, so the include order in RunLib.ZC is load-bearing.
+
+Cd(__DIR__);;
+
+"UT99 build:\n";
+
+ExeFile("RunLib");
+ExeFile("RunLib2");
+
+"  .. UT99\n";
+#include "UT99"
+
+UT99;
+
+"\nType $$LTBLUE$$UTTest;$$FG$$ to run the data-layer self-check.\n";

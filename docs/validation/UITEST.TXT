@@ -1,0 +1,7 @@
+PASS calculator decimal addition
+PASS calculator zero divisor
+PASS calculator negative square root
+PASS calculator thousands separators
+PASS calculator overflow rejection
+PASS shell help available
+RESULT 6 passed, 0 failed

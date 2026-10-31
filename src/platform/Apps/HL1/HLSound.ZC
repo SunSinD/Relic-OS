@@ -1,0 +1,3730 @@
+// WAV loading and sound effects
+//
+// the AC97 driver mixes; this layer turns a PAK'd WAV into frames it takes.
+//
+// 188 of the 190 shareware sounds are 8-bit unsigned mono at 11025Hz, the other
+// two 16-bit at 22050Hz. decoding all of them up front costs ~47MB, so decode
+// is on first use into a bounded cache.
+
+#define HLSND_MAX_CACHE		256
+//stored at the native rate, ~4x smaller than resampling on load
+#define HLSND_CACHE_BUDGET	16777216	//16MB of decoded audio
+#define HLSND_RATE			48000
+#define HLSND_CLIP_DIST		1000.0
+
+//common/const.h.
+#define HLATTN_NONE			0.0
+#define HLATTN_NORM			0.8
+#define HLATTN_IDLE			2.0
+#define HLATTN_STATIC		1.25
+
+//common/const.h. Pitch is a percentage of the recorded rate
+#define HLPITCH_NORM		100
+#define HLPITCH_LOW			95
+#define HLPITCH_HIGH		120
+
+#define HLCHAN_AUTO			0
+#define HLCHAN_WEAPON		1
+#define HLCHAN_VOICE		2
+#define HLCHAN_ITEM			3
+#define HLCHAN_BODY			4
+#define HLCHAN_STREAM		5
+#define HLCHAN_STATIC		6
+#define HLCHAN_NETWORKVOICE_BASE	7	//7..500 reserved for network voice
+#define HLCHAN_NETWORKVOICE_END		500
+#define HLCHAN_BOT			501
+
+#define HLSND_MAX_REPORTS	64
+I64 hl_snd_reports	= 0;
+I64 hl_snd_silent	= 0;
+U8  hl_snd_line[160];
+
+Bool hl_snd_debug;
+F64  hl_snd_debug_next;
+
+class CHLSound
+{
+	U8	 name[64];
+	U32	*frames;		//stereo L16 | R16 << 16, at the file's own rate
+	I64	 count;
+	I64	 rate;
+
+	I64	 loop_start;
+};
+
+CHLSound	 hl_snd_cache[HLSND_MAX_CACHE];
+I64		 hl_snd_count	= 0;
+I64		 hl_snd_bytes	= 0;
+Bool	 hl_snd_enabled	= TRUE;
+
+F64		 hl_snd_master	= 0.7;
+
+F64		 hl_snd_suitvol	= 0.25;
+
+Bool	 hl_snd_room_off	= FALSE;
+
+I64		 hl_snd_played	= 0;
+I64		 hl_snd_dropped	= 0;
+
+F64		 hl_snd_listener[3];
+F64		 hl_snd_right[3];
+
+
+
+
+#define HLSND_DYNAMIC_CHANNELS	16
+
+class CHLSndChan
+{
+	I64	entnum;
+	I64	entchannel;
+	I64	voice;			//mixer handle, -1 when free
+	F64	origin[3];
+	F64	master_vol;		//0..1 before distance and pan
+	F64	dist_mult;
+	Bool fixed;
+
+	Bool loop;
+
+	U32	*pcm;
+	I64	pcm_count;
+	I64	pcm_rate;
+	F64	start_time;
+};
+
+CHLSndChan	hl_snd_chan[HLSND_DYNAMIC_CHANNELS];
+I64			hl_snd_viewent = 0;
+
+I64 hl_snd_kick_ambient = -1;
+
+Bool (*hl_snd_entorigin_hook)(I64 entnum, F64 *out) = NULL;
+
+I64			hl_snd_local_ent = 0;
+
+hl_snd_entorigin_hook = NULL;
+hl_snd_local_ent      = 0;
+
+U0 HLSndChannelsClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		hl_snd_chan[i].entnum     = 0;
+		hl_snd_chan[i].entchannel = 0;
+		hl_snd_chan[i].voice      = -1;
+		hl_snd_chan[i].master_vol = 0.0;
+		hl_snd_chan[i].dist_mult  = 0.0;
+		hl_snd_chan[i].fixed      = TRUE;
+		hl_snd_chan[i].loop       = FALSE;
+		hl_snd_chan[i].pcm        = NULL;
+		hl_snd_chan[i].pcm_count  = 0;
+		hl_snd_chan[i].pcm_rate   = 0;
+		hl_snd_chan[i].start_time = 0.0;
+		HLVecSet(hl_snd_chan[i].origin, 0.0, 0.0, 0.0);
+	}
+}
+
+//20ms, the SDK's mouth_t running average condensed to one window
+#define HLSND_MOUTH_WINDOW	0.020
+
+F64 HLSndVoiceAmplitude(I64 entnum)
+{
+	CHLSndChan	*ch;
+	I64			 i;
+	I64			 off;
+	I64			 n;
+	I64			 s;
+	I64			 sum = 0;
+	I64			 got = 0;
+
+	if (entnum == 0)
+		return 0.0;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		ch = &hl_snd_chan[i];
+
+		if (ch->entnum != entnum || ch->entchannel != HLCHAN_VOICE)
+			goto qsva_next;
+
+		if (ch->voice < 0 || !ch->pcm || ch->pcm_rate <= 0)
+			goto qsva_next;
+
+		if (!AudioSFXPlaying(ch->voice))
+			goto qsva_next;
+
+		off = ToI64((tS - ch->start_time) * ToF64(ch->pcm_rate));
+
+		if (off < 0)
+			off = 0;
+
+		n = ToI64(HLSND_MOUTH_WINDOW * ToF64(ch->pcm_rate));
+
+		while (n > 0 && off < ch->pcm_count)
+		{
+			s = ch->pcm[off] & 0xFFFF;
+
+			if (s >= 32768)
+				s -= 65536;
+
+			if (s < 0)
+				s = -s;
+
+			sum += s;
+			got++;
+			off++;
+			n--;
+		}
+
+		if (got > 0)
+			return ToF64(sum) / ToF64(got) / 32768.0;
+
+qsva_next:
+	}
+
+	return 0.0;
+}
+
+U0 HLSndSpatialize(CHLSndChan *ch, I64 *_l, I64 *_r)
+{
+	F64 dir[3];
+	F64 dist;
+	F64 dot;
+	F64 lscale;
+	F64 rscale;
+	F64 vol;
+
+	vol = ch->master_vol * hl_snd_master;
+
+	if ((ch->entnum == hl_snd_viewent && hl_snd_viewent != 0) ||
+		(ch->entnum == hl_snd_local_ent && hl_snd_local_ent != 0))
+	{
+		*_l = ToI64(vol * ToF64(AUDIO_VOL_UNITY));
+
+		if (*_l > AUDIO_VOL_UNITY)
+			*_l = AUDIO_VOL_UNITY;
+
+		*_r = *_l;
+		return;
+	}
+
+	HLVecSub(ch->origin, hl_snd_listener, dir);
+	dist = HLVecLength(dir);
+
+	if (dist > 0.0001)
+	{
+		dir[0] /= dist;
+		dir[1] /= dist;
+		dir[2] /= dist;
+	}
+
+	dist = dist * ch->dist_mult;
+	dot  = HLVecDot(hl_snd_right, dir);
+
+	rscale = 1.0 + dot;
+	lscale = 1.0 - dot;
+
+	*_l = ToI64(vol * (1.0 - dist) * lscale * ToF64(AUDIO_VOL_UNITY));
+	*_r = ToI64(vol * (1.0 - dist) * rscale * ToF64(AUDIO_VOL_UNITY));
+
+	if (*_l < 0)	*_l = 0;
+	if (*_r < 0)	*_r = 0;
+
+	if (*_l > AUDIO_VOL_UNITY)	*_l = AUDIO_VOL_UNITY;
+	if (*_r > AUDIO_VOL_UNITY)	*_r = AUDIO_VOL_UNITY;
+}
+
+F64 HLSndChanLifeLeft(CHLSndChan *ch)
+{
+	F64 len;
+
+	if (ch->voice < 0 || !AudioSFXPlaying(ch->voice))
+		return -1.0;
+
+	if (ch->pcm_rate <= 0 || ch->pcm_count <= 0)
+		return 0.0;
+
+	len = ToF64(ch->pcm_count) / ToF64(ch->pcm_rate);
+
+	return ch->start_time + len - tS;
+}
+
+I64 HLSndPickChannel(I64 entnum, I64 entchannel)
+{
+	CHLSndChan	*ch;
+	F64			 life;
+	F64			 life_left;
+	I64			 i;
+	I64			 first_to_die = -1;
+
+	if (entchannel != 0)
+	{
+		for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+		{
+			ch = &hl_snd_chan[i];
+
+			if (ch->entnum != entnum)
+				goto qsp_match_next;
+
+			//entchannel -1 is "any channel of this entity"
+			if (ch->entchannel == entchannel || entchannel == -1)
+			{
+				first_to_die = i;
+				break;
+			}
+
+qsp_match_next:
+		}
+	}
+
+	if (first_to_die < 0)
+	{
+		life_left = 1000000.0;
+
+		for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+		{
+			ch = &hl_snd_chan[i];
+
+			if (ch->entnum == hl_snd_viewent && entnum != hl_snd_viewent &&
+				AudioSFXPlaying(ch->voice))
+				goto qsp_next;
+
+			if (ch->loop && AudioSFXPlaying(ch->voice))
+				goto qsp_next;
+
+			life = HLSndChanLifeLeft(ch);
+
+			if (life < life_left)
+			{
+				life_left    = life;
+				first_to_die = i;
+			}
+
+qsp_next:
+		}
+	}
+
+	if (first_to_die < 0)
+	{
+		life_left = 1000000.0;
+
+		for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+		{
+			ch = &hl_snd_chan[i];
+
+			if (ch->entnum == hl_snd_viewent && entnum != hl_snd_viewent &&
+				AudioSFXPlaying(ch->voice))
+				goto qsp_steal_next;
+
+			if (!ch->loop || !AudioSFXPlaying(ch->voice))
+				goto qsp_steal_next;
+
+			life = HLSndChanLifeLeft(ch);
+
+			if (life < life_left)
+			{
+				life_left    = life;
+				first_to_die = i;
+			}
+
+qsp_steal_next:
+		}
+	}
+
+	if (first_to_die < 0)
+		return -1;
+
+	ch = &hl_snd_chan[first_to_die];
+
+	if (ch->entnum < 0)
+		hl_snd_kick_ambient = -ch->entnum - 1;
+
+	if (AudioSFXPlaying(ch->voice))
+		AudioSFXStop(ch->voice);
+
+	ch->voice = -1;
+	ch->loop  = FALSE;
+
+	return first_to_die;
+}
+
+
+I64 hl_snd_roomtype;
+
+U0 HLSndRoomtypeSet(I64 rt)
+{//the "room_type" cvar, dlls/world.cpp:489.
+	if (rt < 0 || rt > 28)
+		rt = 0;
+
+	if (rt == hl_snd_roomtype)
+		return;
+
+	hl_snd_roomtype = rt;
+	AudioDSPRoomSet(rt);
+}
+
+
+Bool hl_snd_mat_ready;
+Bool hl_snd_sent_ready;
+Bool hl_snd_dpv_ready;
+Bool hl_snd_spk_ready;
+Bool hl_snd_sq_ready;
+Bool hl_snd_amb_ready;
+
+Bool hl_snd_step_left;
+I64  hl_snd_step_skip;
+F64  hl_snd_talk_wait;
+
+U0 HLSndTablesReset()
+{
+	hl_snd_mat_ready  = FALSE;
+	hl_snd_sent_ready = FALSE;
+	hl_snd_dpv_ready  = FALSE;
+	hl_snd_spk_ready  = FALSE;
+	hl_snd_sq_ready   = FALSE;
+	hl_snd_amb_ready  = FALSE;
+
+	hl_snd_step_left  = FALSE;
+	hl_snd_step_skip  = 0;
+	hl_snd_talk_wait  = 0.0;
+
+	hl_snd_roomtype   = 0;
+	AudioDSPRoomSet(0);
+}
+
+
+U8 hl_snd_dbg_line[160];
+
+U0 HLSndVoiceReport()
+{
+	CHLSndChan	*ch;
+	I64			 i;
+	I64			 l;
+	I64			 r;
+	I64			 live   = 0;
+	I64			 sum_l  = 0;
+	I64			 sum_r  = 0;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		ch = &hl_snd_chan[i];
+
+		if (!AudioSFXPlaying(ch->voice))
+			goto qsvr_next;
+
+		live++;
+
+		HLSndSpatialize(ch, &l, &r);
+
+		sum_l += l;
+		sum_r += r;
+
+		StrPrint(hl_snd_dbg_line, "snd:  ch%d ent %d chan %d L %d R %d\n",
+			i, ch->entnum, ch->entchannel, l, r);
+		HLLog(hl_snd_dbg_line);
+
+qsvr_next:
+	}
+
+	StrPrint(hl_snd_dbg_line,
+		"snd: voices %d/%d chans %d/%d room %d sum %d/%d of %d\n",
+		AudioSFXVoicesActive(), AUDIO_MAX_SFX_VOICES, live,
+		HLSND_DYNAMIC_CHANNELS, hl_snd_roomtype, sum_l, sum_r,
+		AUDIO_VOL_UNITY);
+	HLLog(hl_snd_dbg_line);
+
+	StrPrint(hl_snd_dbg_line,
+		"snd: played %d dropped %d silent %d master %d/100\n",
+		hl_snd_played, hl_snd_dropped, hl_snd_silent,
+		ToI64(hl_snd_master * 100.0));
+	HLLog(hl_snd_dbg_line);
+}
+
+U0 HLSndDebug(Bool on)
+{
+	hl_snd_debug      = on;
+	hl_snd_debug_next = 0.0;
+}
+
+U0 HLSndUpdate()
+{
+	CHLSndChan *ch;
+	I64 i;
+	I64 l;
+	I64 r;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		ch = &hl_snd_chan[i];
+
+		if (!AudioSFXPlaying(ch->voice))
+		{
+			ch->voice = -1;
+			goto qsu_next;
+		}
+
+		if (ch->fixed == FALSE && hl_snd_entorigin_hook)
+			hl_snd_entorigin_hook(ch->entnum, ch->origin);
+
+		HLSndSpatialize(ch, &l, &r);
+		AudioSFXVoiceVolSet(ch->voice, l, r);
+
+qsu_next:
+	}
+
+	if (hl_snd_debug && tS >= hl_snd_debug_next)
+	{
+		hl_snd_debug_next = tS + 1.0;
+		HLSndVoiceReport;
+	}
+}
+
+
+#define HLNUM_AMBIENTS		4
+#define HLAMBIENT_WATER		0
+#define HLAMBIENT_SKY		1
+
+U8	*hl_ambient_sfx[HLNUM_AMBIENTS];
+F64	 hl_ambient_vol[HLNUM_AMBIENTS];
+I64	 hl_ambient_voice[HLNUM_AMBIENTS];
+F64	 hl_ambient_ends[HLNUM_AMBIENTS];
+F64	 hl_ambient_last = 0.0;
+
+U0 HLSndLeafAmbientInit()
+{
+	I64 i;
+
+	hl_ambient_sfx[HLAMBIENT_WATER] = "ambience/water1.wav";
+	hl_ambient_sfx[HLAMBIENT_SKY]   = "ambience/wind2.wav";
+	hl_ambient_sfx[2]              = NULL;
+	hl_ambient_sfx[3]              = NULL;
+
+	for (i = 0; i < HLNUM_AMBIENTS; i++)
+	{
+		hl_ambient_vol[i]   = 0.0;
+		hl_ambient_voice[i] = -1;
+		hl_ambient_ends[i]  = 0.0;
+	}
+
+	hl_ambient_last = 0.0;
+}
+
+U0 HLSndInit()
+{
+	I64 i;
+
+	hl_snd_master  = 0.7;
+	hl_snd_suitvol = 0.25;
+	hl_snd_room_off = FALSE;
+	hl_snd_roomtype = 0;
+	AudioDSPRoomOff(FALSE);
+	AudioDSPRoomSet(0);
+
+	hl_snd_enabled = TRUE;
+	hl_snd_reports = 0;
+	hl_snd_silent  = 0;
+	hl_snd_kick_ambient = -1;
+
+	hl_snd_debug      = FALSE;
+	hl_snd_debug_next = 0.0;
+
+	for (i = 0; i < HLSND_MAX_CACHE; i++)
+	{
+		hl_snd_cache[i].name[0] = 0;
+		hl_snd_cache[i].frames  = NULL;
+		hl_snd_cache[i].count   = 0;
+	}
+
+	hl_snd_count         = 0;
+	hl_snd_bytes         = 0;
+	hl_snd_played        = 0;
+	hl_snd_dropped       = 0;
+
+	HLVecSet(hl_snd_listener, 0.0, 0.0, 0.0);
+	HLVecSet(hl_snd_right, 0.0, 1.0, 0.0);
+	HLSndChannelsClear;
+	HLSndLeafAmbientInit;
+	HLSndTablesReset;
+}
+
+U0 HLSndFree()
+{
+	I64 i;
+
+	AudioSFXStopAll;
+
+	for (i = 0; i < HLSND_MAX_CACHE; i++)
+	{
+		if (hl_snd_cache[i].frames)
+		{
+			Free(hl_snd_cache[i].frames);
+			hl_snd_cache[i].frames = NULL;
+		}
+		hl_snd_cache[i].name[0] = 0;
+		hl_snd_cache[i].count   = 0;
+	}
+
+	hl_snd_count        = 0;
+	hl_snd_bytes        = 0;
+}
+
+I64 HLSndDecodeWav(U8 *raw, I64 size, U32 **_frames, I64 *_rate,
+	I64 *_loop = NULL)
+{
+	U8	*p;
+	U8	*end;
+	U8	*data     = NULL;
+	I64	 chunk;
+	I64	 channels = 1;
+	I64	 rate     = 11025;
+	I64	 bits     = 8;
+	I64	 dsize    = 0;
+	I64	 ncue;
+	I64	 loop     = 0;
+	I64	 in_count;
+	I64	 out_count;
+	I64	 i;
+	I64	 src;
+	I64	 l;
+	I64	 r;
+	U32	*out;
+
+	*_frames = NULL;
+
+	if (_loop)
+		*_loop = 0;
+
+	if (size < 44 || MemCompare(raw, "RIFF", 4) || MemCompare(raw + 8, "WAVE", 4))
+		return 0;
+
+	p   = raw + 12;
+	end = raw + size;
+
+	while (p + 8 <= end)
+	{
+		chunk = HLRdU32(p + 4);
+
+		if (chunk < 0 || p + 8 + chunk > end)
+			chunk = end - (p + 8);
+
+		if (!MemCompare(p, "fmt ", 4) && chunk >= 16)
+		{
+			channels = HLRdU16(p + 10);
+			rate     = HLRdU32(p + 12);
+			bits     = HLRdU16(p + 22);
+		}
+		else if (!MemCompare(p, "data", 4))
+		{
+			data  = p + 8;
+			dsize = chunk;
+		}
+		else if (!MemCompare(p, "cue ", 4) && chunk >= 28)
+		{
+			ncue = HLRdU32(p + 8);
+
+			if (ncue > 0)
+				loop = HLRdU32(p + 16);
+		}
+
+		p += 8 + chunk + (chunk & 1);
+	}
+
+	if (!data || channels < 1 || rate < 1 || dsize < 1)
+		return 0;
+	if (bits != 8 && bits != 16)
+		return 0;
+
+	if (bits == 8)
+		in_count = dsize / channels;
+	else
+		in_count = dsize / (channels * 2);
+
+	if (in_count < 1)
+		return 0;
+
+	out_count = in_count;
+	out       = MAlloc(out_count * sizeof(U32));
+
+	for (i = 0; i < out_count; i++)
+	{
+		src = i;
+
+		if (bits == 8)
+		{
+			//8-bit WAV is unsigned, 128 is silence
+			l = (data[src * channels] - 128) << 8;
+			if (channels > 1)
+				r = (data[src * channels + 1] - 128) << 8;
+			else
+				r = l;
+		}
+		else
+		{
+			l = HLRdI16(data + src * channels * 2);
+			if (channels > 1)
+				r = HLRdI16(data + (src * channels + 1) * 2);
+			else
+				r = l;
+		}
+
+		out[i] = (l & 0xFFFF) | (r << 16);
+	}
+
+	*_frames = out;
+
+	if (_rate)
+		*_rate = rate;
+
+	if (loop < 0 || loop >= out_count)
+		loop = 0;
+
+	if (_loop)
+		*_loop = loop;
+
+	return out_count;
+}
+
+CHLSound *HLSndLoad(U8 *name)
+{
+	CHLSound	*s;
+	U8		*raw;
+	U8		 path[128];
+	I64		 size   = 0;
+	I64		 count;
+	I64		 rate;
+	I64		 loop   = 0;
+	U32		*frames = NULL;
+	I64		 i;
+
+	for (i = 0; i < hl_snd_count; i++)
+	{
+		if (!StrICompare(hl_snd_cache[i].name, name))
+		{
+			if (!hl_snd_cache[i].frames)
+				return NULL;
+			return &hl_snd_cache[i];
+		}
+	}
+
+	if (hl_snd_count >= HLSND_MAX_CACHE || hl_snd_bytes >= HLSND_CACHE_BUDGET)
+	{
+		if (hl_snd_reports < HLSND_MAX_REPORTS)
+		{
+			hl_snd_reports++;
+			StrPrint(hl_snd_line,
+				"snd: CACHE FULL (%d entries, %d bytes) - %s not loaded\n",
+				hl_snd_count, hl_snd_bytes, name);
+			HLLog(hl_snd_line);
+		}
+		return NULL;
+	}
+
+	if (name[0] == '*')
+		StrPrint(path, "sound/%s", name + 1);
+	else
+		StrPrint(path, "sound/%s", name);
+
+	raw = HLFileLoad(path, &size);
+	rate = HLSND_RATE;
+	if (raw)
+	{
+		count = HLSndDecodeWav(raw, size, &frames, &rate, &loop);
+		Free(raw);
+	}
+	else
+		count = 0;
+
+	s = &hl_snd_cache[hl_snd_count];
+	HLStrCopy(s->name, name, 64);
+	s->frames     = frames;
+	s->count      = count;
+	s->rate       = rate;
+	s->loop_start = loop;
+	hl_snd_count++;
+
+	if (hl_snd_reports < HLSND_MAX_REPORTS)
+	{
+		hl_snd_reports++;
+
+		if (frames)
+			StrPrint(hl_snd_line, "snd: %s ok (%d frames)\n", name, count);
+		else
+			StrPrint(hl_snd_line, "snd: %s FAILED TO LOAD\n", name);
+
+		HLLog(hl_snd_line);
+	}
+
+	if (frames)
+	{
+		hl_snd_bytes += count * sizeof(U32);
+		return s;
+	}
+
+	return NULL;
+}
+
+U0 HLSndLeafAmbients(CHLMap *map, I64 leaf_num, F64 level, F64 fade, F64 now)
+{
+	CHLSound	*snd;
+	I64		 i;
+	I64		 vol;
+	F64		 want;
+	F64		 dt;
+
+	if (!hl_snd_enabled || !map)
+		return;
+
+	dt = now - hl_ambient_last;
+	hl_ambient_last = now;
+
+	if (dt < 0.0 || dt > 0.25)
+		dt = 0.0;
+
+	for (i = 0; i < HLNUM_AMBIENTS; i++)
+	{
+		if (!hl_ambient_sfx[i])
+			goto qla_next;
+
+		want = 0.0;
+
+		if (level > 0.0 && leaf_num > 0 && leaf_num < map->num_leafs)
+			want = level * ToF64(map->leafs[leaf_num].ambient[i]);
+
+		//below 8 is inaudible; cut, or a faint leaf leaves a permanent hum
+		if (want < 8.0)
+			want = 0.0;
+
+		if (hl_ambient_vol[i] < want)
+		{
+			hl_ambient_vol[i] += dt * fade;
+			if (hl_ambient_vol[i] > want)
+				hl_ambient_vol[i] = want;
+		}
+		else if (hl_ambient_vol[i] > want)
+		{
+			hl_ambient_vol[i] -= dt * fade;
+			if (hl_ambient_vol[i] < want)
+				hl_ambient_vol[i] = want;
+		}
+
+		vol = ToI64(hl_ambient_vol[i] / 255.0 * hl_snd_master *
+				ToF64(AUDIO_VOL_UNITY));
+
+		if (vol <= 0)
+		{
+			if (hl_ambient_voice[i] >= 0)
+			{
+				AudioSFXStop(hl_ambient_voice[i]);
+				hl_ambient_voice[i] = -1;
+			}
+			goto qla_next;
+		}
+
+		if (hl_ambient_voice[i] >= 0 && AudioSFXPlaying(hl_ambient_voice[i]))
+		{
+			AudioSFXVoiceVolSet(hl_ambient_voice[i], vol, vol);
+			goto qla_next;
+		}
+
+		snd = HLSndLoad(hl_ambient_sfx[i]);
+		if (!snd || !snd->frames || snd->count < 1)
+			goto qla_next;
+
+		hl_ambient_voice[i] = AudioSFXPlayRef(snd->frames + snd->loop_start,
+								snd->count - snd->loop_start,
+								snd->rate, vol, vol, TRUE);
+
+qla_next:
+	}
+}
+
+
+#define HLMUSIC_MAX_BYTES	(48 * 1024 * 1024)
+
+U32		*hl_music_frames	= NULL;
+I64		 hl_music_count	= 0;
+I64		 hl_music_rate	= HLSND_RATE;
+I64		 hl_music_track	= 0;
+Bool	 hl_music_playing = FALSE;
+I64		 hl_music_voice	= -1;		//track's voice, -1 when silent
+F64		 hl_music_ends	= 0.0;
+F64		 hl_music_volume	= 0.7;
+U8		 hl_music_status[64];
+
+U0 HLMusicFree()
+{
+	if (hl_music_voice >= 0)
+	{
+		AudioSFXStop(hl_music_voice);
+		hl_music_voice = -1;
+
+		Sleep(4);
+	}
+
+	if (hl_music_frames)
+		Free(hl_music_frames);
+
+	hl_music_frames  = NULL;
+	hl_music_count   = 0;
+	hl_music_playing = FALSE;
+	hl_music_track   = 0;
+}
+
+#define HLMUSIC_PEND_IDLE		0
+#define HLMUSIC_PEND_DECODING	1
+#define HLMUSIC_PEND_READY		2
+
+//MP3 frames per game tick. 8 frames = 9216 samples, ~0.2s of audio;
+#define HLMUSIC_SLICE_FRAMES	8
+
+U8		*hl_music_pend_raw;
+I64		 hl_music_pend_size;
+I64		 hl_music_pend_track;
+U8		 hl_music_pend_name[32];
+U32		*hl_music_pend_frames;
+I64		 hl_music_pend_count;
+I64		 hl_music_pend_cap;
+I64		 hl_music_pend_rate;
+I64		 hl_music_pend_state;
+
+Bool	 hl_music_mp3_on;
+
+Bool	 hl_music_pend_live;
+
+U0 HLMusicPendFree()
+{
+	if (hl_music_pend_raw)
+		Free(hl_music_pend_raw);
+	if (hl_music_pend_frames)
+		Free(hl_music_pend_frames);
+	hl_music_pend_raw    = NULL;
+	hl_music_pend_frames = NULL;
+	hl_music_pend_count  = 0;
+	hl_music_pend_cap    = 0;
+	hl_music_pend_live   = FALSE;
+	hl_music_pend_state  = HLMUSIC_PEND_IDLE;
+}
+
+U0 HLMusicDecodeSlice()
+{
+	U32	*dst;
+	I64 n, i, k, s, l, gr, produced = 0;
+
+	if (hl_music_pend_live)
+		dst = hl_music_frames;
+	else
+		dst = hl_music_pend_frames;
+
+	if (!dst)
+	{
+		if (hl_music_pend_raw)
+			Free(hl_music_pend_raw);
+		hl_music_pend_raw   = NULL;
+		hl_music_pend_live  = FALSE;
+		hl_music_pend_state = HLMUSIC_PEND_IDLE;
+		return;
+	}
+
+	while (produced < HLMUSIC_SLICE_FRAMES)
+	{
+		if (hl_music_pend_count + 1152 > hl_music_pend_cap)
+			break;
+
+		n = MP3StreamFrame();
+		if (n < 1)
+			break;
+
+		k = hl_music_pend_count;
+		for (gr = 0; gr < 2; gr++)
+			for (i = 0; i < 576; i++)
+			{
+				s = mp3_out[gr][i];
+				if (mp3_stream_channels == 2)
+					dst[k] = (s >> 16 & 0xFFFF) | ((s & 0xFFFF) << 16);
+				else
+				{
+					l = s & 0xFFFF;
+					dst[k] = l | (l << 16);
+				}
+				k++;
+			}
+		hl_music_pend_count = k;
+		produced++;
+	}
+
+	if (produced < HLMUSIC_SLICE_FRAMES)
+	{
+		Free(hl_music_pend_raw);
+		hl_music_pend_raw   = NULL;
+		hl_music_pend_state = HLMUSIC_PEND_READY;
+	}
+}
+
+U8 *HLMusicTrackName(I64 track)
+{
+	if (track == 2)		return "Half-Life01";
+	if (track == 3)		return "Prospero01";
+	if (track == 4)		return "Half-Life12";
+	if (track == 5)		return "Half-Life07";
+	if (track == 6)		return "Half-Life10";
+	if (track == 7)		return "Suspense01";
+	if (track == 8)		return "Suspense03";
+	if (track == 9)		return "Half-Life09";
+	if (track == 10)	return "Half-Life02";
+	if (track == 11)	return "Half-Life13";
+	if (track == 12)	return "Half-Life04";
+	if (track == 13)	return "Half-Life06";
+	if (track == 14)	return "Prospero02";
+	if (track == 15)	return "Half-Life03";
+	if (track == 16)	return "Half-Life08";
+	if (track == 17)	return "Prospero04";
+	if (track == 18)	return "Half-Life05";
+	if (track == 19)	return "Prospero05";
+	if (track == 20)	return "Suspense05";
+	if (track == 21)	return "Suspense07";
+	if (track == 22)	return "Half-Life11";
+	if (track == 23)	return "Half-Life14";
+	if (track == 24)	return "Prospero03";
+	if (track == 25)	return "Half-Life16";
+	if (track == 26)	return "Suspense02";
+	if (track == 27)	return "Half-Life15";
+	if (track == 28)	return "Half-Life17";
+
+	return NULL;
+}
+
+Bool HLMusicLoad(I64 track)
+{
+	U8	 path[96];
+	U8	*name;
+	U8	*raw;
+	I64	 size  = 0;
+	I64	 rate  = HLSND_RATE;
+	U32	*frames = NULL;
+	I64	 count;
+	I64	 est;
+
+	HLMusicFree;
+
+	raw  = NULL;
+	name = HLMusicTrackName(track);
+
+	if (name)
+	{
+		StrPrint(path, "%s/valve/media/%s.wav", hl_game_root, name);
+
+		if (FileFind(path))
+			raw = FileRead(path, &size);
+	}
+
+	if (!raw)
+	{
+		StrPrint(path, "%s/valve/music", hl_game_root);
+
+		if (FileFind(path))
+		{
+			StrPrint(path, "%s/valve/music/track%02d.wav", hl_game_root, track);
+
+			if (FileFind(path))
+				raw = FileRead(path, &size);
+		}
+	}
+
+	if (!raw && name && hl_music_mp3_on)
+	{
+		StrPrint(path, "%s/valve/media/%s.mp3", hl_game_root, name);
+
+		if (FileFind(path))
+			raw = FileRead(path, &size);
+
+		if (raw)
+		{
+			HLMusicPendFree;
+
+			MP3StreamInit(raw, size);
+			if (MP3StreamFrame() < 1)
+			{
+				Free(raw);
+				StrPrint(hl_music_status, "%s.mp3 undecodable", name);
+				return FALSE;
+			}
+
+			est = (size * 8 / MaxI64(1, mp3_bitrates[mp3_h_bitrate_index]) + 8)
+				* mp3_stream_rate;
+			if (est > HLMUSIC_MAX_BYTES / sizeof(U32))
+				est = HLMUSIC_MAX_BYTES / sizeof(U32);
+
+			hl_music_pend_raw    = raw;
+			hl_music_pend_size   = size;
+			hl_music_pend_track  = track;
+			hl_music_pend_rate   = mp3_stream_rate;
+			hl_music_pend_cap    = est;
+			hl_music_pend_count  = 0;
+			hl_music_pend_frames = MAlloc(est * sizeof(U32));
+			MemSet(hl_music_pend_frames, 0, est * sizeof(U32));
+			HLStrCopy(hl_music_pend_name, name, 32);
+
+			MP3StreamInit(raw, size);
+
+			hl_music_pend_state = HLMUSIC_PEND_DECODING;
+
+			StrPrint(hl_music_status, "decoding %s.mp3", name);
+
+			StrPrint(path, "music: stream start %s %d bytes %dHz ch%d\n",
+				name, size, mp3_stream_rate, mp3_stream_channels);
+			HLLog(path);
+			HLLogFlush;
+
+			return FALSE;
+		}
+	}
+
+	if (!raw)
+	{
+		if (name)
+			StrPrint(hl_music_status, "no %s wav or mp3", name);
+		else
+			StrPrint(hl_music_status, "no track%02d.wav", track);
+
+		return FALSE;
+	}
+
+	count = HLSndDecodeWav(raw, size, &frames, &rate);
+	Free(raw);
+
+	if (count < 1 || !frames)
+	{
+		StrPrint(hl_music_status, "track%02d.wav undecodable", track);
+		return FALSE;
+	}
+
+	hl_music_frames = frames;
+	hl_music_count  = count;
+	hl_music_rate   = rate;
+	hl_music_track  = track;
+
+	StrPrint(hl_music_status, "track%02d %dHz %ds", track, rate,
+		count / rate);
+
+	return TRUE;
+}
+
+U0 HLMusicReset()
+{
+	hl_music_voice   = -1;
+	hl_music_playing = FALSE;
+	hl_music_ends    = 0.0;
+
+	hl_music_pend_raw    = NULL;
+	hl_music_pend_frames = NULL;
+	hl_music_pend_count  = 0;
+	hl_music_pend_cap    = 0;
+	hl_music_pend_live   = FALSE;
+	hl_music_pend_state  = HLMUSIC_PEND_IDLE;
+	hl_music_mp3_on      = TRUE;
+}
+
+U0 HLMusicStart(F64 now)
+{
+	U8 buf[96];
+
+	if (!hl_music_frames || hl_music_count < 1 || !hl_snd_enabled)
+		return;
+
+	if (hl_music_voice >= 0)
+		AudioSFXStop(hl_music_voice);
+
+	hl_music_voice = AudioSFXPlayRef(hl_music_frames, hl_music_count, hl_music_rate,
+		ToI64(hl_music_volume * hl_snd_master * ToF64(AUDIO_VOL_UNITY)),
+		ToI64(hl_music_volume * hl_snd_master * ToF64(AUDIO_VOL_UNITY)));
+
+	StrPrint(buf, "music: voice %d musicvol %d master %d\n", hl_music_voice,
+		ToI64(hl_music_volume * 100.0), ToI64(hl_snd_master * 100.0));
+	HLLog(buf);
+	HLLogFlush;
+
+	hl_music_ends    = now + ToF64(hl_music_count) / ToF64(hl_music_rate);
+	hl_music_playing = TRUE;
+}
+
+Bool HLMusicPlay(I64 track, F64 now)
+{
+	if (track < 2)
+	{
+		HLMusicFree;
+		return FALSE;
+	}
+
+	if (hl_music_playing && hl_music_track == track)
+		return TRUE;
+
+	if (!HLMusicLoad(track))
+		return FALSE;
+
+	HLMusicStart(now);
+
+	return TRUE;
+}
+
+U0 HLMusicUpdate(F64 now)
+{
+	U8 buf[96];
+
+	if (hl_music_pend_state == HLMUSIC_PEND_DECODING)
+	{
+		HLMusicDecodeSlice;
+
+		if (!hl_music_pend_live &&
+			hl_music_pend_state == HLMUSIC_PEND_DECODING &&
+			hl_music_pend_count >= 2 * hl_music_pend_rate)
+		{
+			HLMusicFree;
+
+			hl_music_frames = hl_music_pend_frames;
+			hl_music_count  = hl_music_pend_cap;
+			hl_music_rate   = hl_music_pend_rate;
+			hl_music_track  = hl_music_pend_track;
+
+			hl_music_pend_frames = NULL;
+			hl_music_pend_live   = TRUE;
+
+			StrPrint(hl_music_status, "%s (decoding)", hl_music_pend_name);
+
+			HLMusicStart(now);
+			return;
+		}
+	}
+
+	if (hl_music_pend_state == HLMUSIC_PEND_READY)
+	{
+		if (hl_music_pend_live)
+		{
+			hl_music_count = hl_music_pend_count;
+			AudioSFXSetCount(hl_music_voice, hl_music_pend_count);
+
+			hl_music_pend_live  = FALSE;
+			hl_music_pend_state = HLMUSIC_PEND_IDLE;
+
+			StrPrint(hl_music_status, "%s %dHz %ds", hl_music_pend_name,
+				hl_music_rate, hl_music_count / MaxI64(1, hl_music_rate));
+
+			StrPrint(buf, "music: complete %d frames %dHz\n",
+				hl_music_count, hl_music_rate);
+			HLLog(buf);
+			HLLogFlush;
+			return;
+		}
+
+		//short track: the whole stream decoded before the 2s threshold
+		HLMusicFree;
+
+		hl_music_frames = hl_music_pend_frames;
+		hl_music_count  = hl_music_pend_count;
+		hl_music_rate   = hl_music_pend_rate;
+		hl_music_track  = hl_music_pend_track;
+
+		hl_music_pend_frames = NULL;
+		hl_music_pend_state  = HLMUSIC_PEND_IDLE;
+
+		StrPrint(hl_music_status, "%s %dHz %ds", hl_music_pend_name,
+			hl_music_rate, hl_music_count / MaxI64(1, hl_music_rate));
+
+		StrPrint(buf, "music: adopted %d frames %dHz\n",
+			hl_music_count, hl_music_rate);
+		HLLog(buf);
+		HLLogFlush;
+
+		HLMusicStart(now);
+		return;
+	}
+
+	if (!hl_music_playing || !hl_music_frames)
+		return;
+
+	if (hl_music_voice >= 0 && AudioSFXPlaying(hl_music_voice))
+		return;
+
+	HLMusicFree;
+
+	HLLog("music: track finished\n");
+	HLLogFlush;
+}
+
+U0 HLSndReclaimOrphanVoices()
+{
+	Bool	kept[AUDIO_MAX_SFX_VOICES];
+	I64		i;
+	I64		slot;
+	I64		handle;
+
+	for (i = 0; i < AUDIO_MAX_SFX_VOICES; i++)
+		kept[i] = FALSE;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		handle = hl_snd_chan[i].voice;
+
+		if (handle < 0)
+			goto qsrov_ch;
+
+		slot = handle & ((1 << AUDIO_VOICE_SHIFT) - 1);
+
+		if (slot >= 0 && slot < AUDIO_MAX_SFX_VOICES)
+			kept[slot] = TRUE;
+
+qsrov_ch:
+	}
+
+	for (i = 0; i < HLNUM_AMBIENTS; i++)
+	{
+		handle = hl_ambient_voice[i];
+
+		if (handle < 0)
+			goto qsrov_amb;
+
+		slot = handle & ((1 << AUDIO_VOICE_SHIFT) - 1);
+
+		if (slot >= 0 && slot < AUDIO_MAX_SFX_VOICES)
+			kept[slot] = TRUE;
+
+qsrov_amb:
+	}
+
+	if (hl_music_voice >= 0)
+	{
+		slot = hl_music_voice & ((1 << AUDIO_VOICE_SHIFT) - 1);
+
+		if (slot >= 0 && slot < AUDIO_MAX_SFX_VOICES)
+			kept[slot] = TRUE;
+	}
+
+	for (i = 0; i < AUDIO_MAX_SFX_VOICES; i++)
+	{
+		if (!audio.voice[i].active || kept[i])
+			goto qsrov_next;
+
+		handle = i | (audio.voice[i].serial << AUDIO_VOICE_SHIFT);
+		AudioSFXStop(handle);
+
+qsrov_next:
+	}
+}
+
+U0 HLSndPlayAt(U8 *name, F64 *origin, F64 volume, F64 attenuation,
+	I64 entnum = 0, I64 entchannel = 0, I64 pitch = HLPITCH_NORM,
+	Bool loop = FALSE)
+{
+	CHLSound		*s;
+	CHLSndChan	*ch;
+	I64			 chan;
+	I64			 vol_l;
+	I64			 vol_r;
+	F64			 gain;
+	I64			 stream;
+	I64			 rate;
+	I64			 first;
+	I64			 count;
+
+	if (!hl_snd_enabled || !name || !name[0])
+		return;
+
+	s = HLSndLoad(name);
+
+	if (!s || !s->frames || s->count < 1)
+		return;
+
+	gain = volume;
+	if (gain > 1.0)
+		gain = 1.0;
+	if (gain < 0.0)
+		gain = 0.0;
+
+	if (pitch < 1)
+		pitch = 1;
+	if (pitch > 255)
+		pitch = 255;
+
+	rate = s->rate * pitch / HLPITCH_NORM;
+	if (rate < 1)
+		rate = 1;
+
+	first = 0;
+	count = s->count;
+
+	if (loop && s->loop_start > 0 && s->loop_start < s->count)
+	{
+		first = s->loop_start;
+		count = s->count - s->loop_start;
+	}
+
+	chan = HLSndPickChannel(entnum, entchannel);
+	if (chan < 0)
+	{
+		hl_snd_dropped++;
+		return;
+	}
+
+	ch = &hl_snd_chan[chan];
+	ch->entnum     = entnum;
+	ch->entchannel = entchannel;
+	ch->master_vol = gain;
+	ch->loop       = loop;
+
+	if (entnum == 0)
+		ch->fixed = TRUE;
+	else
+		ch->fixed = FALSE;
+
+	//attenuation 0 gives dist_mult 0 and never fades, which pickups require
+	ch->dist_mult = attenuation / HLSND_CLIP_DIST;
+
+	if (origin)
+		HLVecCopy(origin, ch->origin);
+	else
+	{
+		HLVecCopy(hl_snd_listener, ch->origin);
+		ch->dist_mult = 0.0;
+		ch->fixed     = TRUE;
+	}
+
+	HLSndSpatialize(ch, &vol_l, &vol_r);
+
+	if (vol_l <= 0 && vol_r <= 0)
+	{
+		hl_snd_silent++;
+		ch->voice = -1;
+		return;
+	}
+
+	stream = AudioSFXPlayRef(s->frames + first, count, rate, vol_l, vol_r,
+				loop);
+
+	if (stream < 0)
+	{
+		HLSndReclaimOrphanVoices;
+		stream = AudioSFXPlayRef(s->frames + first, count, rate, vol_l, vol_r,
+					loop);
+	}
+
+	ch->voice = stream;
+
+	//kept for HLSndVoiceAmplitude, which drives bone controller 4
+	ch->pcm        = s->frames + first;
+	ch->pcm_count  = count;
+	ch->pcm_rate   = rate;
+	ch->start_time = tS;
+
+	if (stream < 0)
+	{
+		hl_snd_dropped++;
+
+		if (hl_snd_reports < HLSND_MAX_REPORTS)
+		{
+			hl_snd_reports++;
+			StrPrint(hl_snd_line, "snd: %s DROPPED (no free voice)\n", name);
+			HLLog(hl_snd_line);
+		}
+	}
+	else
+		hl_snd_played++;
+}
+
+
+#define HLSND_GEIGER_STEP	0.016666666666
+
+F64 hl_snd_geiger_accum;
+
+U0 HLSndGeigerTick(F64 range, F64 dt)
+{
+	U8	name[32];
+	I64	quant;
+	I64	pct;
+	I64	span;			//geiger.cpp's "i": how many samples the row draws from
+	I64	j;
+	F64	vol;
+
+	if (dt <= 0.0)
+		return;
+
+	hl_snd_geiger_accum += dt;
+
+	if (hl_snd_geiger_accum < HLSND_GEIGER_STEP)
+		return;
+
+	hl_snd_geiger_accum = 0.0;
+
+	if (range < 0.0)
+		range = 0.0;
+	if (range > 1000.0)
+		range = 1000.0;
+
+	quant = ToI64(range * 0.25) * 4;
+
+	//"m_iGeigerRange < 1000 && m_iGeigerRange > 0", geiger.cpp:71
+	if (quant <= 0 || quant >= 1000)
+		return;
+
+	//the top row is pct 0 - in range, never clicks
+	if (quant > 800)
+		return;
+
+	if (quant > 600)
+	{
+		pct  = 2;
+		vol  = 0.4;
+		span = 2;
+	}
+	else if (quant > 500)
+	{
+		pct  = 4;
+		vol  = 0.5;
+		span = 2;
+	}
+	else if (quant > 400)
+	{
+		pct  = 8;
+		vol  = 0.6;
+		span = 3;
+	}
+	else if (quant > 300)
+	{
+		pct  = 8;
+		vol  = 0.7;
+		span = 3;
+	}
+	else if (quant > 200)
+	{
+		pct  = 28;
+		vol  = 0.78;
+		span = 3;
+	}
+	else if (quant > 150)
+	{
+		pct  = 40;
+		vol  = 0.80;
+		span = 3;
+	}
+	else if (quant > 100)
+	{
+		pct  = 60;
+		vol  = 0.85;
+		span = 3;
+	}
+	else if (quant > 75)
+	{
+		pct  = 80;
+		vol  = 0.9;
+		span = 3;
+	}
+	else if (quant > 50)
+	{
+		pct  = 90;
+		vol  = 0.95;
+		span = 2;
+	}
+	else
+	{
+		pct  = 95;
+		vol  = 1.0;
+		span = 2;
+	}
+
+	//"flvol = (flvol * (rand() & 127) / 255) + 0.25", geiger.cpp:160.
+	vol = vol * ToF64(HLPartRandI(128)) / 255.0 + 0.25;
+
+	//two independent rolls out of 128, either one fires
+	if (HLPartRandI(128) >= pct && HLPartRandI(128) >= pct)
+		return;
+
+	//"j = rand() & 1; if (i > 2) j += rand() & 1"
+	j = HLPartRandI(2);
+
+	if (span > 2)
+		j += HLPartRandI(2);
+
+	StrPrint(name, "player/geiger%d.wav", j + 1);
+
+	HLSndPlayAt(name, NULL, vol, 0.0, 0, HLCHAN_AUTO);
+}
+
+hl_snd_geiger_accum = 0.0;
+hl_hud_geiger_hook  = &HLSndGeigerTick;
+
+
+//plats.cpp:1150 sends the train's pitch as flpitch/10 in 6 bits
+#define HLSND_LOOP_PITCH_STEP	10
+
+I64 HLSndLoopPitchQuant(I64 pitch)
+{
+	if (pitch < 1)
+		pitch = 1;
+	if (pitch > 255)
+		pitch = 255;
+
+	pitch = pitch / HLSND_LOOP_PITCH_STEP * HLSND_LOOP_PITCH_STEP;
+
+	if (pitch < HLSND_LOOP_PITCH_STEP)
+		pitch = HLSND_LOOP_PITCH_STEP;
+
+	return pitch;
+}
+
+U0 HLSndLoopStop(I64 handle)
+{
+	if (handle >= 0)
+		AudioSFXStop(handle);
+}
+
+I64 HLSndLoopHold(I64 handle, I64 held_pitch, U8 *name, F64 *origin,
+	F64 volume, F64 attenuation, I64 pitch = HLPITCH_NORM)
+{
+	CHLSound	*s;
+	CHLSndChan	 ch;
+	F64			 gain;
+	I64			 vol_l;
+	I64			 vol_r;
+	I64			 want;
+	I64			 rate;
+	I64			 first;
+	I64			 count;
+
+	if (!hl_snd_enabled || !name || !name[0] || !origin)
+	{
+		HLSndLoopStop(handle);
+		return -1;
+	}
+
+	gain = volume;
+	if (gain > 1.0)
+		gain = 1.0;
+	if (gain < 0.0)
+		gain = 0.0;
+
+	ch.entnum     = 0;
+	ch.entchannel = HLCHAN_STATIC;
+	ch.voice      = -1;
+	ch.master_vol = gain;
+	ch.dist_mult  = attenuation / HLSND_CLIP_DIST;
+	ch.fixed      = TRUE;
+	ch.loop       = TRUE;
+	ch.pcm        = NULL;
+	ch.pcm_count  = 0;
+	ch.pcm_rate   = 0;
+	ch.start_time = 0.0;
+	HLVecCopy(origin, ch.origin);
+
+	HLSndSpatialize(&ch, &vol_l, &vol_r);
+
+	if (vol_l <= 0 && vol_r <= 0)
+	{
+		HLSndLoopStop(handle);
+		return -1;
+	}
+
+	want = HLSndLoopPitchQuant(pitch);
+
+	if (handle >= 0 && want == held_pitch && AudioSFXPlaying(handle))
+	{
+		AudioSFXVoiceVolSet(handle, vol_l, vol_r);
+		return handle;
+	}
+
+	s = HLSndLoad(name);
+
+	if (!s || !s->frames || s->count < 1)
+	{
+		HLSndLoopStop(handle);
+		return -1;
+	}
+
+	HLSndLoopStop(handle);
+
+	rate = s->rate * want / HLPITCH_NORM;
+	if (rate < 1)
+		rate = 1;
+
+	first = 0;
+	count = s->count;
+
+	if (s->loop_start > 0 && s->loop_start < s->count)
+	{
+		first = s->loop_start;
+		count = s->count - s->loop_start;
+	}
+
+	return AudioSFXPlayRef(s->frames + first, count, rate, vol_l, vol_r, TRUE);
+}
+
+
+//dlls/bmodels.cpp:536-537
+#define HLFAN_PITCH_MIN		30
+#define HLFAN_PITCH_MAX		100
+
+I64 HLSndFanPitch(F64 fpct)
+{
+	I64 pitch;
+
+	if (fpct < 0.0)
+		fpct = 0.0;
+	if (fpct > 1.0)
+		fpct = 1.0;
+
+	pitch = ToI64(HLFAN_PITCH_MIN +
+		(HLFAN_PITCH_MAX - HLFAN_PITCH_MIN) * fpct);
+
+	return pitch;
+}
+
+U0 HLSndFanStop(I64 *handle, I64 *held_pitch)
+{//SND_STOP at the end of SpinDown, dlls/bmodels.cpp:632
+	if (!handle)
+		return;
+
+	HLSndLoopStop(*handle);
+	*handle = -1;
+
+	if (held_pitch)
+		*held_pitch = 0;
+}
+
+U0 HLSndFanLoop(I64 *handle, I64 *held_pitch, U8 *name, F64 *origin,
+	F64 volume, F64 attenuation, F64 cur_speed, F64 target_speed)
+{
+	F64	fpct;
+	F64	vol;
+	I64	pitch;
+	I64	got;
+
+	if (!handle || !held_pitch)
+		return;
+
+	if (target_speed <= 0.0)
+	{
+		HLSndFanStop(handle, held_pitch);
+		return;
+	}
+
+	fpct = cur_speed / target_speed;
+
+	if (fpct < 0.0)
+		fpct = 0.0;
+	if (fpct > 1.0)
+		fpct = 1.0;
+
+	vol = volume * fpct;
+
+	if (vol <= 0.0)
+	{
+		HLSndFanStop(handle, held_pitch);
+		return;
+	}
+
+	pitch = HLSndFanPitch(fpct);
+
+	got = HLSndLoopHold(*handle, *held_pitch, name, origin, vol,
+			attenuation, pitch);
+	*handle = got;
+
+	got = HLSndLoopPitchQuant(pitch);
+	*held_pitch = got;
+}
+
+
+#define HLSND_MAX_AMBIENT	64
+#define HLSND_AMBIENT_VOICES	12
+
+
+class CHLDpvPreset
+{
+	I64	pitchrun;
+	I64	pitchstart;
+	I64	spinup;
+	I64	spindown;
+	I64	volrun;
+	I64	volstart;
+	I64	fadein;
+	I64	fadeout;
+	I64	lfotype;
+	I64	lforate;
+	I64	lfomodpitch;
+	I64	lfomodvol;
+	I64	cspinup;
+};
+
+#define HLSND_DPV_PRESETS	27
+
+//lfotype. dlls/sound.cpp LFO_SQUARE 1, LFO_TRIANGLE 2, LFO_RANDOM 3
+#define HLLFO_SQUARE		1
+#define HLLFO_TRIANGLE		2
+#define HLLFO_RANDOM		3
+
+CHLDpvPreset	hl_snd_dpv[HLSND_DPV_PRESETS];
+
+class CHLAmbient
+{
+	F64	 origin[3];
+	U8	 name[64];
+	F64	 volume;
+	F64	 attenuation;
+	F64	 next_time;
+	F64	 duration;
+
+	Bool active;
+	Bool looping;
+
+	Bool fading;
+
+	Bool dyn;
+	I64	 preset;
+	I64	 pitchrun;
+	I64	 pitchstart;
+	I64	 spinup;
+	I64	 spindown;
+	I64	 volrun;
+	I64	 volstart;
+	I64	 fadein;
+	I64	 fadeout;
+	I64	 lfotype;
+	I64	 lforate;
+	I64	 lfomodpitch;
+	I64	 lfomodvol;
+	I64	 cspinup;
+	I64	 cspincount;
+
+	I64	 pitch;
+	I64	 send_pitch;
+	I64	 vol;
+	I64	 pitchfrac;
+	I64	 volfrac;
+	I64	 spinupsav;
+	I64	 spindownsav;
+	I64	 fadeinsav;
+	I64	 fadeoutsav;
+	I64	 lfofrac;
+	I64	 lfomult;
+	F64	 ramp_next;		//RampThink runs at 5hz
+};
+
+CHLAmbient	hl_ambient[HLSND_MAX_AMBIENT];
+I64			hl_ambient_count = 0;
+
+U0 HLSndDpvRow(I64 n, I64 pitchrun, I64 pitchstart, I64 spinup, I64 spindown,
+	I64 volrun, I64 volstart, I64 fadein, I64 fadeout, I64 lfotype, I64 lforate,
+	I64 lfomodpitch, I64 lfomodvol, I64 cspinup)
+{
+	CHLDpvPreset *d;
+
+	if (n < 1 || n > HLSND_DPV_PRESETS)
+		return;
+
+	d = &hl_snd_dpv[n - 1];
+
+	d->pitchrun    = pitchrun;
+	d->pitchstart  = pitchstart;
+	d->spinup      = spinup;
+	d->spindown    = spindown;
+	d->volrun      = volrun;
+	d->volstart    = volstart;
+	d->fadein      = fadein;
+	d->fadeout     = fadeout;
+	d->lfotype     = lfotype;
+	d->lforate     = lforate;
+	d->lfomodpitch = lfomodpitch;
+	d->lfomodvol   = lfomodvol;
+	d->cspinup     = cspinup;
+}
+
+U0 HLSndDpvInit()
+{//rgdpvpreset, dlls/sound.cpp.
+	if (hl_snd_dpv_ready)
+		return;
+
+	hl_snd_dpv_ready = TRUE;
+
+	HLSndDpvRow(1,	255,  75, 95, 95, 10, 1, 50, 95, 0,   0,   0,   0, 0);
+	HLSndDpvRow(2,	255,  85, 70, 88, 10, 1, 20, 88, 0,   0,   0,   0, 0);
+	HLSndDpvRow(3,	255, 100, 50, 75, 10, 1, 10, 75, 0,   0,   0,   0, 0);
+	HLSndDpvRow(4,	100, 100,  0,  0, 10, 1, 90, 90, 0,   0,   0,   0, 0);
+	HLSndDpvRow(5,	100, 100,  0,  0, 10, 1, 80, 80, 0,   0,   0,   0, 0);
+	HLSndDpvRow(6,	100, 100,  0,  0, 10, 1, 50, 70, 0,   0,   0,   0, 0);
+	HLSndDpvRow(7,	100, 100,  0,  0,  5, 1, 40, 50, 1,  50,   0,  10, 0);
+	HLSndDpvRow(8,	100, 100,  0,  0,  5, 1, 40, 50, 1, 150,   0,  10, 0);
+	HLSndDpvRow(9,	100, 100,  0,  0,  5, 1, 40, 50, 1, 750,   0,  10, 0);
+	HLSndDpvRow(10,	128, 100, 50, 75, 10, 1, 30, 40, 2,   8,  20,   0, 0);
+	HLSndDpvRow(11,	128, 100, 50, 75, 10, 1, 30, 40, 2,  25,  20,   0, 0);
+	HLSndDpvRow(12,	128, 100, 50, 75, 10, 1, 30, 40, 2,  70,  20,   0, 0);
+	HLSndDpvRow(13,	 50,  50,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(14,	 70,  70,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(15,	 90,  90,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(16,	120, 120,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(17,	180, 180,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(18,	255, 255,  0,  0, 10, 1, 20, 50, 0,   0,   0,   0, 0);
+	HLSndDpvRow(19,	200,  75, 90, 90, 10, 1, 50, 90, 2, 100,  20,   0, 0);
+	HLSndDpvRow(20,	255,  75, 97, 90, 10, 1, 50, 90, 1,  40,  50,   0, 0);
+	HLSndDpvRow(21,	100, 100,  0,  0, 10, 1, 30, 50, 3,  15,  20,   0, 0);
+	HLSndDpvRow(22,	160, 160,  0,  0, 10, 1, 50, 50, 3, 500,  25,   0, 0);
+	HLSndDpvRow(23,	255,  75, 88,  0, 10, 1, 40,  0, 0,   0,   0,   0, 5);
+	HLSndDpvRow(24,	200,  20, 95, 70, 10, 1, 70, 70, 3,  20,  50,   0, 0);
+	HLSndDpvRow(25,	180, 100, 50, 60, 10, 1, 40, 60, 2,  90, 100, 100, 0);
+	HLSndDpvRow(26,	 60,  60,  0,  0, 10, 1, 40, 70, 3,  80,  20,  50, 0);
+	HLSndDpvRow(27,	128,  90, 10, 10, 10, 1, 20, 40, 1,   5,  10,  20, 0);
+}
+
+U0 HLSndAmbientChanStop(I64 slot)
+{
+	I64 i;
+	I64 entnum;
+
+	if (slot < 0 || slot >= HLSND_MAX_AMBIENT)
+		return;
+
+	entnum = -(slot + 1);
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		if (hl_snd_chan[i].entnum != entnum || hl_snd_chan[i].entchannel != 1)
+			goto qacs_next;
+
+		if (hl_snd_chan[i].voice >= 0)
+			AudioSFXStop(hl_snd_chan[i].voice);
+
+		hl_snd_chan[i].voice      = -1;
+		hl_snd_chan[i].entnum     = 0;
+		hl_snd_chan[i].entchannel = 0;
+		hl_snd_chan[i].master_vol = 0.0;
+		hl_snd_chan[i].fixed      = TRUE;
+		hl_snd_chan[i].loop       = FALSE;
+		hl_snd_chan[i].pcm        = NULL;
+		hl_snd_chan[i].pcm_count  = 0;
+		return;
+
+qacs_next:
+	}
+}
+
+U0 HLSndAmbientClear()
+{
+	I64 i;
+	I64 j;
+
+	if (!hl_snd_amb_ready)
+	{
+		hl_snd_amb_ready = TRUE;
+		hl_ambient_count = 0;
+		return;
+	}
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		//ambient sources take entnums below zero and channel 1
+		if (hl_snd_chan[i].entnum >= 0 || hl_snd_chan[i].entchannel != 1)
+			goto qsac_next;
+
+		if (hl_snd_chan[i].voice >= 0)
+			AudioSFXStop(hl_snd_chan[i].voice);
+
+		hl_snd_chan[i].voice      = -1;
+		hl_snd_chan[i].entnum     = 0;
+		hl_snd_chan[i].entchannel = 0;
+		hl_snd_chan[i].master_vol = 0.0;
+		hl_snd_chan[i].loop       = FALSE;
+
+qsac_next:
+	}
+
+	for (j = 0; j < HLNUM_AMBIENTS; j++)
+	{
+		if (hl_ambient_voice[j] >= 0)
+			AudioSFXStop(hl_ambient_voice[j]);
+
+		hl_ambient_voice[j] = -1;
+		hl_ambient_vol[j]   = 0.0;
+		hl_ambient_ends[j]  = 0.0;
+	}
+
+	hl_ambient_last = 0.0;
+
+	for (j = 0; j < hl_ambient_count; j++)
+		hl_ambient[j].active = FALSE;
+
+	hl_ambient_count = 0;
+}
+
+U0 HLSndAmbientAdd(F64 *origin, U8 *name, F64 volume, F64 attenuation)
+{
+	CHLAmbient	*a;
+	CHLSound		*snd;
+
+	if (!hl_snd_amb_ready)
+		HLSndAmbientClear;
+
+	if (hl_ambient_count >= HLSND_MAX_AMBIENT || !name || !name[0])
+		return;
+
+	snd = HLSndLoad(name);
+	if (!snd || snd->count < 1)
+		return;
+
+	a = &hl_ambient[hl_ambient_count];
+
+	HLVecCopy(origin, a->origin);
+	HLStrCopy(a->name, name, 64);
+	a->volume      = volume;
+	a->attenuation = attenuation;
+	a->next_time   = 0.0;
+	a->duration    = ToF64(snd->count) / ToF64(snd->rate);
+
+	if (a->duration < 0.25)
+		a->duration = 0.25;
+
+	a->active      = TRUE;
+	a->looping     = TRUE;
+	a->fading      = FALSE;
+	a->dyn         = FALSE;
+	a->pitch       = HLPITCH_NORM;
+	a->send_pitch  = HLPITCH_NORM;
+	a->vol         = 100;
+	a->preset      = 0;
+	a->pitchrun    = HLPITCH_NORM;
+	a->pitchstart  = HLPITCH_NORM;
+	a->spinup      = 0;
+	a->spindown    = 0;
+	a->volrun      = 100;
+	a->volstart    = 0;
+	a->fadein      = 0;
+	a->fadeout     = 0;
+	a->lfotype     = 0;
+	a->lforate     = 0;
+	a->lfomodpitch = 0;
+	a->lfomodvol   = 0;
+	a->cspinup     = 0;
+	a->cspincount  = 1;
+	a->pitchfrac   = 0;
+	a->volfrac     = 0;
+	a->spinupsav   = 0;
+	a->spindownsav = 0;
+	a->fadeinsav   = 0;
+	a->fadeoutsav  = 0;
+	a->lfofrac     = 0;
+	a->lfomult     = 0;
+	a->ramp_next   = 0.0;
+
+	hl_ambient_count++;
+}
+
+I64 HLSndAmbientAddEx(F64 *origin, U8 *name, F64 attenuation, I64 preset,
+	I64 health, I64 pitch, I64 pitchstart, I64 spinup, I64 spindown,
+	I64 volstart, I64 fadein, I64 fadeout, I64 lfotype, I64 lforate,
+	I64 lfomodpitch, I64 lfomodvol, I64 cspinup, Bool start_silent,
+	Bool looping)
+{
+	CHLAmbient	*a;
+	I64		 slot;
+	I64		 pitchinc;
+	F64		 vol0;
+
+	HLSndDpvInit;
+
+	HLSndAmbientAdd(origin, name, 1.0, attenuation);
+
+	slot = hl_ambient_count - 1;
+	if (slot < 0)
+		return -1;
+
+	a = &hl_ambient[slot];
+
+	a->dyn     = TRUE;
+	a->looping = looping;
+	a->preset  = preset;
+
+	if (pitch > 255)		pitch = 255;
+	if (pitch < 0)			pitch = 0;
+	if (pitchstart > 255)	pitchstart = 255;
+	if (pitchstart < 0)		pitchstart = 0;
+
+	if (spinup > 100)		spinup = 100;
+	if (spinup < 0)			spinup = 0;
+	if (spinup > 0)			spinup = (101 - spinup) * 64;
+
+	if (spindown > 100)		spindown = 100;
+	if (spindown < 0)		spindown = 0;
+	if (spindown > 0)		spindown = (101 - spindown) * 64;
+
+	if (volstart > 10)		volstart = 10;
+	if (volstart < 0)		volstart = 0;
+	volstart = volstart * 10;
+
+	if (fadein > 100)		fadein = 100;
+	if (fadein < 0)			fadein = 0;
+	if (fadein > 0)			fadein = (101 - fadein) * 64;
+
+	if (fadeout > 100)		fadeout = 100;
+	if (fadeout < 0)		fadeout = 0;
+	if (fadeout > 0)		fadeout = (101 - fadeout) * 64;
+
+	if (lfotype > 4)		lfotype = HLLFO_TRIANGLE;
+	if (lfotype < 0)		lfotype = 0;
+
+	if (lforate > 1000)		lforate = 1000;
+	if (lforate < 0)		lforate = 0;
+	lforate = lforate * 256;
+
+	if (lfomodpitch > 100)	lfomodpitch = 100;
+	if (lfomodpitch < 0)	lfomodpitch = 0;
+	if (lfomodvol > 100)	lfomodvol = 100;
+	if (lfomodvol < 0)		lfomodvol = 0;
+	if (cspinup > 100)		cspinup = 100;
+	if (cspinup < 0)		cspinup = 0;
+
+	a->pitchrun    = pitch;
+	a->pitchstart  = pitchstart;
+	a->spinup      = spinup;
+	a->spinupsav   = spinup;
+	a->spindown    = spindown;
+	a->spindownsav = spindown;
+	a->volstart    = volstart;
+	a->fadein      = fadein;
+	a->fadeinsav   = fadein;
+	a->fadeout     = fadeout;
+	a->fadeoutsav  = fadeout;
+	a->lfotype     = lfotype;
+	a->lforate     = lforate;
+	a->lfomodpitch = lfomodpitch;
+	a->lfomodvol   = lfomodvol;
+	a->cspinup     = cspinup;
+
+
+	a->volrun = health * 10;
+	if (a->volrun > 100)	a->volrun = 100;
+	if (a->volrun < 0)		a->volrun = 0;
+
+	if (a->preset != 0 && a->preset <= HLSND_DPV_PRESETS)
+	{
+		a->pitchrun    = hl_snd_dpv[a->preset - 1].pitchrun;
+		a->pitchstart  = hl_snd_dpv[a->preset - 1].pitchstart;
+		a->spinup      = hl_snd_dpv[a->preset - 1].spinup;
+		a->spindown    = hl_snd_dpv[a->preset - 1].spindown;
+		a->volrun      = hl_snd_dpv[a->preset - 1].volrun;
+		a->volstart    = hl_snd_dpv[a->preset - 1].volstart;
+		a->fadein      = hl_snd_dpv[a->preset - 1].fadein;
+		a->fadeout     = hl_snd_dpv[a->preset - 1].fadeout;
+		a->lfotype     = hl_snd_dpv[a->preset - 1].lfotype;
+		a->lforate     = hl_snd_dpv[a->preset - 1].lforate;
+		a->lfomodpitch = hl_snd_dpv[a->preset - 1].lfomodpitch;
+		a->lfomodvol   = hl_snd_dpv[a->preset - 1].lfomodvol;
+		a->cspinup     = hl_snd_dpv[a->preset - 1].cspinup;
+
+		if (a->spindown > 0)
+			a->spindown = (101 - a->spindown) * 64;
+		if (a->spinup > 0)
+			a->spinup = (101 - a->spinup) * 64;
+
+		a->volstart = a->volstart * 10;
+		a->volrun   = a->volrun * 10;
+
+		if (a->fadein > 0)
+			a->fadein = (101 - a->fadein) * 64;
+		if (a->fadeout > 0)
+			a->fadeout = (101 - a->fadeout) * 64;
+
+		a->lforate = a->lforate * 256;
+
+		a->fadeinsav   = a->fadein;
+		a->fadeoutsav  = a->fadeout;
+		a->spinupsav   = a->spinup;
+		a->spindownsav = a->spindown;
+	}
+
+	a->fadein  = a->fadeinsav;
+	a->fadeout = 0;
+
+	if (a->fadein)
+		a->vol = a->volstart;
+	else
+		a->vol = a->volrun;
+
+	a->spinup   = a->spinupsav;
+	a->spindown = 0;
+
+	if (a->spinup)
+		a->pitch = a->pitchstart;
+	else
+		a->pitch = a->pitchrun;
+
+	if (a->pitch == 0)
+		a->pitch = HLPITCH_NORM;
+
+	a->pitchfrac = a->pitch << 8;
+	a->volfrac   = a->vol << 8;
+
+	a->lfofrac = 0;
+	if (a->lforate < 0)
+		a->lforate = -a->lforate;
+
+	a->cspincount = 1;
+
+	if (a->cspinup)
+	{
+		pitchinc = (255 - a->pitchstart) / a->cspinup;
+
+		a->pitchrun = a->pitchstart + pitchinc;
+		if (a->pitchrun > 255)
+			a->pitchrun = 255;
+	}
+
+	if ((a->spinupsav || a->spindownsav || (a->lfotype && a->lfomodpitch)) &&
+		a->pitch == HLPITCH_NORM)
+		a->pitch = HLPITCH_NORM + 1;
+
+	a->send_pitch = a->pitch;
+
+	vol0 = ToF64(a->vol) * 0.01;
+	if (vol0 > 1.0)
+		vol0 = 1.0;
+
+	a->volume = vol0;
+
+	a->active = looping && !start_silent;
+	a->fading = FALSE;
+
+	return slot;
+}
+
+U0 HLSndAmbientRamp(F64 now)
+{
+	CHLAmbient	*a;
+	I64		 i;
+	I64		 pitch;
+	I64		 vol;
+	I64		 pos;
+
+	for (i = 0; i < hl_ambient_count; i++)
+	{
+		a = &hl_ambient[i];
+
+		if (!a->dyn || !a->active)
+			goto qar_next;
+
+		if (!a->spinup && !a->spindown && !a->fadein && !a->fadeout &&
+			!a->lfotype)
+			goto qar_next;
+
+		if (now < a->ramp_next)
+			goto qar_next;
+
+		a->ramp_next = now + 0.2;
+
+		pitch = a->pitch;
+		vol   = a->vol;
+
+		if (a->spinup || a->spindown)
+		{
+			if (a->spinup > 0)
+				a->pitchfrac += a->spinup;
+			else if (a->spindown > 0)
+				a->pitchfrac -= a->spindown;
+
+			pitch = a->pitchfrac >> 8;
+
+			if (pitch > a->pitchrun)
+			{
+				pitch = a->pitchrun;
+				a->spinup = 0;
+			}
+
+			if (pitch < a->pitchstart)
+			{
+				a->pitch  = a->pitchstart;
+				a->spindown = 0;
+				a->active = FALSE;
+				a->fading = FALSE;
+				HLSndAmbientChanStop(i);
+				goto qar_next;
+			}
+
+			if (pitch > 255)	pitch = 255;
+			if (pitch < 1)		pitch = 1;
+
+			a->pitch = pitch;
+		}
+
+		if (a->fadein || a->fadeout)
+		{
+			if (a->fadein > 0)
+				a->volfrac += a->fadein;
+			else if (a->fadeout > 0)
+				a->volfrac -= a->fadeout;
+
+			vol = a->volfrac >> 8;
+
+			if (vol > a->volrun)
+			{
+				vol = a->volrun;
+				a->fadein = 0;
+			}
+
+			if (vol < a->volstart)
+			{
+				a->vol     = a->volstart;
+				a->fadeout = 0;
+				a->active  = FALSE;
+				a->fading  = FALSE;
+				HLSndAmbientChanStop(i);
+				goto qar_next;
+			}
+
+			if (vol > 100)	vol = 100;
+			if (vol < 1)	vol = 1;
+
+			a->vol = vol;
+		}
+
+		if (a->lfotype)
+		{
+			//lfofrac/255 is a triangle from 0 to 255 and back
+			if (a->lfofrac > 0x6FFFFFFF)
+				a->lfofrac = 0;
+
+			a->lfofrac += a->lforate;
+			pos = a->lfofrac >> 8;
+
+			if (a->lfofrac < 0)
+			{
+				a->lfofrac = 0;
+				if (a->lforate < 0)
+					a->lforate = -a->lforate;
+				pos = 0;
+			}
+			else if (pos > 255)
+			{
+				pos        = 255;
+				a->lfofrac = 255 << 8;
+				if (a->lforate > 0)
+					a->lforate = -a->lforate;
+			}
+
+			if (a->lfotype == HLLFO_SQUARE)
+			{
+				if (pos < 128)
+					a->lfomult = 255;
+				else
+					a->lfomult = 0;
+			}
+			else if (a->lfotype == HLLFO_RANDOM)
+			{
+				if (pos == 255)
+					a->lfomult = HLPartRandI(256);
+			}
+			else
+				a->lfomult = pos;
+
+			if (a->lfomodpitch)
+			{
+				pitch += (a->lfomult - 128) * a->lfomodpitch / 100;
+
+				if (pitch > 255)	pitch = 255;
+				if (pitch < 1)		pitch = 1;
+			}
+
+			if (a->lfomodvol)
+			{
+				vol += (a->lfomult - 128) * a->lfomodvol / 100;
+
+				if (vol > 100)	vol = 100;
+				if (vol < 0)	vol = 0;
+			}
+		}
+
+		if (pitch == HLPITCH_NORM)
+			pitch = HLPITCH_NORM + 1;
+
+		a->send_pitch = pitch;
+		a->volume     = ToF64(vol) * 0.01;
+
+qar_next:
+	}
+}
+
+U0 HLSndAmbientToggle(I64 slot, Bool on, F64 now)
+{
+	CHLAmbient	*a;
+	I64			 pitchinc;
+
+	if (slot < 0 || slot >= hl_ambient_count)
+		return;
+
+	a = &hl_ambient[slot];
+
+	if (!on)
+	{
+		if (a->cspinup)
+		{
+			if (a->cspincount <= a->cspinup)
+			{
+				a->cspincount++;
+
+				pitchinc = (255 - a->pitchstart) / a->cspinup;
+
+				a->spinup   = a->spinupsav;
+				a->spindown = 0;
+
+				a->pitchrun = a->pitchstart + pitchinc * a->cspincount;
+				if (a->pitchrun > 255)
+					a->pitchrun = 255;
+
+				a->ramp_next = now;
+			}
+
+			return;
+		}
+
+		if (a->spindownsav || a->fadeoutsav)
+		{
+			a->spindown = a->spindownsav;
+			a->spinup   = 0;
+
+			a->fadeout  = a->fadeoutsav;
+			a->fadein   = 0;
+
+			a->fading    = TRUE;
+			a->ramp_next = now;
+			return;
+		}
+
+		a->active = FALSE;
+		a->fading = FALSE;
+		HLSndAmbientChanStop(slot);
+		return;
+	}
+
+	a->fading = FALSE;
+
+	a->fadein  = a->fadeinsav;
+	a->fadeout = 0;
+
+	if (a->fadein)
+		a->vol = a->volstart;
+	else
+		a->vol = a->volrun;
+
+	a->spinup   = a->spinupsav;
+	a->spindown = 0;
+
+	if (a->spinup)
+		a->pitch = a->pitchstart;
+	else
+		a->pitch = a->pitchrun;
+
+	if (a->pitch == 0)
+		a->pitch = HLPITCH_NORM;
+
+	a->send_pitch = a->pitch;
+	a->pitchfrac = a->pitch << 8;
+	a->volfrac   = a->vol << 8;
+	a->ramp_next = now;
+	a->next_time = 0.0;
+
+	if (a->dyn)
+		a->volume = ToF64(a->vol) * 0.01;
+
+	a->lfofrac = 0;
+	if (a->lforate < 0)
+		a->lforate = -a->lforate;
+
+	a->cspincount = 1;
+
+	if (a->cspinup)
+	{
+		a->pitchrun = a->pitchstart + (255 - a->pitchstart) / a->cspinup;
+
+		if (a->pitchrun > 255)
+			a->pitchrun = 255;
+	}
+
+	a->active = a->looping;
+
+	if (!a->looping)
+		a->next_time = 0.0;
+}
+
+U0 HLSndAmbientSetPitch(I64 slot, F64 fraction)
+{
+	if (slot < 0 || slot >= hl_ambient_count)
+		return;
+
+	if (fraction > 1.0)
+		fraction = 1.0;
+	if (fraction < 0.0)
+		fraction = 0.01;
+
+	hl_ambient[slot].pitch     = ToI64(fraction * 255.0);
+	hl_ambient[slot].pitchfrac = hl_ambient[slot].pitch << 8;
+
+	if (hl_ambient[slot].pitch < 1)
+		hl_ambient[slot].pitch = 1;
+
+	hl_ambient[slot].send_pitch = hl_ambient[slot].pitch;
+}
+
+I64 HLSndAmbientFind(U8 *name, F64 *origin)
+{
+	I64 i;
+
+	for (i = 0; i < hl_ambient_count; i++)
+	{
+		if (StrICompare(hl_ambient[i].name, name))
+			goto qsaf_next;
+
+		if (hl_ambient[i].origin[0] != origin[0] ||
+			hl_ambient[i].origin[1] != origin[1] ||
+			hl_ambient[i].origin[2] != origin[2])
+			goto qsaf_next;
+
+		return i;
+
+qsaf_next:
+	}
+
+	return -1;
+}
+
+Bool HLSndAmbientActive(I64 slot)
+{
+	if (slot < 0 || slot >= hl_ambient_count)
+		return FALSE;
+
+	return hl_ambient[slot].active && !hl_ambient[slot].fading;
+}
+
+I64 HLSndAmbientPitch(I64 slot)
+{
+	if (slot < 0 || slot >= hl_ambient_count)
+		return HLPITCH_NORM;
+
+	return hl_ambient[slot].send_pitch;
+}
+
+U0 HLSndAmbientRemove(U8 *name, F64 *origin)
+{
+	I64 i = HLSndAmbientFind(name, origin);
+	I64 last;
+
+	if (i < 0)
+		return;
+
+	last = hl_ambient_count - 1;
+
+	if (i != last)
+		MemCopy(&hl_ambient[i], &hl_ambient[last], sizeof(CHLAmbient));
+
+	hl_ambient_count = last;
+}
+
+U0 HLSndAmbientUpdate(F64 time)
+{
+	CHLAmbient	*a;
+	CHLSound	*snd;
+	F64			 d[3];
+	F64			 dist;
+	F64			 gain;
+	F64			 best_gain;
+	I64			 best;
+	I64			 voices;
+	I64			 i;
+	Bool		 used[HLSND_MAX_AMBIENT];
+	Bool		 has_cue;
+	Bool		 needs_reissue;
+
+	if (hl_snd_kick_ambient >= 0 && hl_snd_kick_ambient < hl_ambient_count)
+	{
+		hl_ambient[hl_snd_kick_ambient].next_time = 0.0;
+		hl_snd_kick_ambient = -1;
+	}
+
+	HLSndAmbientRamp(time);
+
+	for (i = 0; i < hl_ambient_count; i++)
+		used[i] = FALSE;
+
+	for (voices = 0; voices < HLSND_AMBIENT_VOICES; voices++)
+	{
+		best      = -1;
+		best_gain = 0.0;
+
+		for (i = 0; i < hl_ambient_count; i++)
+		{
+			a = &hl_ambient[i];
+
+			if (used[i] || !a->active || time < a->next_time)
+				goto qa_next;
+
+			gain = a->volume;
+
+			if (a->attenuation > 0.0)
+			{
+				HLVecSub(a->origin, hl_snd_listener, d);
+				dist = HLVecLength(d);
+				gain = gain * (1.0 - dist * a->attenuation / HLSND_CLIP_DIST);
+			}
+
+			if (gain > best_gain)
+			{
+				best_gain = gain;
+				best      = i;
+			}
+
+qa_next:
+		}
+
+		if (best < 0)
+			return;
+
+		a = &hl_ambient[best];
+		used[best] = TRUE;
+
+		snd = HLSndLoad(a->name);
+		has_cue = FALSE;
+		if (snd && snd->loop_start > 0 && snd->loop_start < snd->count)
+			has_cue = TRUE;
+
+		if (a->looping && has_cue)
+		{
+			HLSndPlayAt(a->name, a->origin, a->volume, a->attenuation,
+				-(best + 1), 1, a->send_pitch, TRUE);
+
+			needs_reissue = FALSE;
+			if (a->dyn)
+			{
+				if (a->spinup || a->spindown || a->fadein || a->fadeout)
+					needs_reissue = TRUE;
+				else if (a->lfotype && (a->lfomodpitch || a->lfomodvol))
+					needs_reissue = TRUE;
+			}
+
+			if (needs_reissue)
+				a->next_time = time + a->duration;
+			else
+				a->next_time = time + 1.0e30;
+		}
+		else
+		{
+			HLSndPlayAt(a->name, a->origin, a->volume, a->attenuation,
+				-(best + 1), 1, a->send_pitch, FALSE);
+
+			if (!a->looping)
+				a->active = FALSE;
+			else
+				a->next_time = time + 1.0e30;
+		}
+	}
+}
+
+U0 HLSndListener(F64 *origin, F64 *right = NULL)
+{
+	HLVecCopy(origin, hl_snd_listener);
+
+	if (right)
+		HLVecCopy(right, hl_snd_right);
+}
+
+U0 HLSndStop(I64 entnum, I64 entchannel)
+{
+	I64 i;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		if (hl_snd_chan[i].entnum == entnum &&
+			hl_snd_chan[i].entchannel == entchannel)
+		{
+			if (hl_snd_chan[i].voice >= 0)
+				AudioSFXStop(hl_snd_chan[i].voice);
+
+			hl_snd_chan[i].voice      = -1;
+			hl_snd_chan[i].entnum     = 0;
+			hl_snd_chan[i].entchannel = 0;
+			hl_snd_chan[i].master_vol = 0.0;
+
+			hl_snd_chan[i].fixed      = TRUE;
+			hl_snd_chan[i].loop       = FALSE;
+			hl_snd_chan[i].pcm        = NULL;
+			hl_snd_chan[i].pcm_count  = 0;
+			return;
+		}
+	}
+}
+
+U0 HLMusicApplyVolume()
+{
+	I64 vol;
+
+	if (hl_music_voice < 0 || !AudioSFXPlaying(hl_music_voice))
+		return;
+
+	vol = ToI64(hl_music_volume * hl_snd_master * ToF64(AUDIO_VOL_UNITY));
+	AudioSFXVoiceVolSet(hl_music_voice, vol, vol);
+}
+
+
+U0 HLSndVolumeSet(F64 v)
+{
+	if (v < 0.0)	v = 0.0;
+	if (v > 1.0)	v = 1.0;
+
+	hl_snd_master = v;
+
+	HLMusicApplyVolume;
+}
+
+U0 HLSndSuitVolumeSet(F64 v)
+{
+	if (v < 0.0)	v = 0.0;
+	if (v > 1.0)	v = 1.0;
+
+	hl_snd_suitvol = v;
+}
+
+U0 HLSndMusicVolumeSet(F64 v)
+{
+	if (v < 0.0)	v = 0.0;
+	if (v > 1.0)	v = 1.0;
+
+	hl_music_volume = v;
+
+	HLMusicApplyVolume;
+}
+
+U0 HLSndRoomOffSet(Bool off)
+{
+	hl_snd_room_off = off;
+	AudioDSPRoomOff(off);
+}
+
+
+#define HLSND_MAX_MATERIALS	512
+#define HLSND_MATNAME		12
+
+//pm_materials.h
+#define HLTEX_CONCRETE		'C'
+#define HLTEX_METAL			'M'
+#define HLTEX_DIRT			'D'
+#define HLTEX_VENT			'V'
+#define HLTEX_GRATE			'G'
+#define HLTEX_TILE			'T'
+#define HLTEX_SLOSH			'S'
+#define HLTEX_WOOD			'W'
+#define HLTEX_COMPUTER		'P'
+#define HLTEX_GLASS			'Y'
+#define HLTEX_FLESH			'F'
+#define HLTEX_SNOW			'N'
+
+class CHLMaterial
+{
+	U8	name[16];
+	U8	type;
+};
+
+CHLMaterial	hl_snd_mat[HLSND_MAX_MATERIALS];
+I64			hl_snd_mat_count;
+
+Bool HLSndIsSpace(I64 c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+Bool HLSndIsAlpha(I64 c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+Bool HLSndIsDigit(I64 c)
+{
+	return c >= '0' && c <= '9';
+}
+
+U0 HLSndMaterialsInit()
+{
+	U8	*d;
+	U8	*line;
+	I64	 size = 0;
+	I64	 pos  = 0;
+	I64	 i;
+	I64	 j;
+	I64	 n;
+	U8	 buf[256];
+
+	if (hl_snd_mat_ready)
+		return;
+
+	hl_snd_mat_ready = TRUE;
+	hl_snd_mat_count = 0;
+
+	d = HLFileLoad("sound/materials.txt", &size);
+	if (!d)
+	{
+		HLLog("snd: sound/materials.txt missing - all steps concrete\n");
+		return;
+	}
+
+	while (pos < size && hl_snd_mat_count < HLSND_MAX_MATERIALS)
+	{
+		n = 0;
+
+		while (pos < size && d[pos] != '\n')
+		{
+			if (n < 255)
+			{
+				buf[n] = d[pos];
+				n++;
+			}
+			pos++;
+		}
+
+		buf[n] = 0;
+		pos++;
+
+		i = 0;
+		while (buf[i] && HLSndIsSpace(buf[i]))
+			i++;
+
+		if (!buf[i] || !HLSndIsAlpha(buf[i]))
+			goto qsmi_next;
+
+		line = &buf[i];
+		i++;
+
+		while (buf[i] && HLSndIsSpace(buf[i]))
+			i++;
+
+		if (!buf[i])
+			goto qsmi_next;
+
+		j = i;
+		while (buf[j] && !HLSndIsSpace(buf[j]))
+			j++;
+
+		buf[j] = 0;
+
+		hl_snd_mat[hl_snd_mat_count].type = ToUpper(line[0]);
+		HLStrCopy(hl_snd_mat[hl_snd_mat_count].name, &buf[i], 16);
+		hl_snd_mat_count++;
+
+qsmi_next:
+	}
+
+	Free(d);
+
+	StrPrint(hl_snd_line, "snd: %d tagged textures\n", hl_snd_mat_count);
+	HLLog(hl_snd_line);
+}
+
+I64 HLSndMaterialFor(U8 *name)
+{
+	I64 i;
+
+	HLSndMaterialsInit;
+
+	if (!name || !name[0])
+		return HLTEX_CONCRETE;
+
+	for (i = 0; i < hl_snd_mat_count; i++)
+	{
+		if (!StrNICompare(name, hl_snd_mat[i].name, HLSND_MATNAME))
+			return hl_snd_mat[i].type;
+	}
+
+	return HLTEX_CONCRETE;
+}
+
+I64 HLSndSurfAtPoint(CHLMap *map, I64 node_num, F64 *start, F64 *end)
+{
+	CHLNode		*n;
+	CHLPlane		*pl;
+	CHLFace		*f;
+	CHLTexInfo	*ti;
+	F64			 mid[3];
+	F64			 front;
+	F64			 back;
+	F64			 frac;
+	F64			 ds;
+	F64			 dt;
+	I64			 i;
+	I64			 side;
+	I64			 other;
+	I64			 r;
+
+	if (node_num < 0 || node_num >= map->num_nodes)
+		return -1;
+
+	n  = &map->nodes[node_num];
+
+	if (n->plane_num < 0 || n->plane_num >= map->num_planes)
+		return -1;
+
+	pl = &map->planes[n->plane_num];
+
+	front = HLVecDot(start, pl->normal) - pl->dist;
+	back  = HLVecDot(end, pl->normal) - pl->dist;
+
+	if (front < 0.0)
+		side = 1;
+	else
+		side = 0;
+
+	if (back < 0.0)
+		other = 1;
+	else
+		other = 0;
+
+	if (side == other)
+		return HLSndSurfAtPoint(map, n->children[side], start, end);
+
+	if (front == back)
+		return -1;
+
+	frac = front / (front - back);
+
+	mid[0] = start[0] + frac * (end[0] - start[0]);
+	mid[1] = start[1] + frac * (end[1] - start[1]);
+	mid[2] = start[2] + frac * (end[2] - start[2]);
+
+	r = HLSndSurfAtPoint(map, n->children[side], start, mid);
+	if (r >= 0)
+		return r;
+
+	for (i = 0; i < n->num_faces; i++)
+	{
+		f = &map->faces[n->first_face + i];
+
+		if (f->tex_info < 0 || f->tex_info >= map->num_texinfo)
+			goto qssp_next;
+
+		ti = &map->texinfo[f->tex_info];
+
+		if (ti->flags & HLTEX_SPECIAL)
+			goto qssp_next;
+
+		ds = mid[0] * ti->vecs[0] + mid[1] * ti->vecs[1] +
+			 mid[2] * ti->vecs[2] + ti->vecs[3];
+		dt = mid[0] * ti->vecs[4] + mid[1] * ti->vecs[5] +
+			 mid[2] * ti->vecs[6] + ti->vecs[7];
+
+		if (ds < f->mins_s || dt < f->mins_t)
+			goto qssp_next;
+
+		ds -= f->mins_s;
+		dt -= f->mins_t;
+
+		if (ds > ToF64(f->extent_s) || dt > ToF64(f->extent_t))
+			goto qssp_next;
+
+		return n->first_face + i;
+
+qssp_next:
+	}
+
+	return HLSndSurfAtPoint(map, n->children[1 - side], mid, end);
+}
+
+U8 *HLSndTextureUnder(CHLMap *map, F64 *origin)
+{
+	CHLFace		*f;
+	CHLTexInfo	*ti;
+	F64			 start[3];
+	F64			 end[3];
+	I64			 face;
+
+	if (!HLMapValid(map, "HLSndTextureUnder"))
+		return NULL;
+
+	if (!map->nodes || !map->faces || !map->textures || map->num_models < 1)
+		return NULL;
+
+	HLVecCopy(origin, start);
+	HLVecCopy(origin, end);
+
+	end[2] -= 64.0;
+
+	face = HLSndSurfAtPoint(map, map->models[0].head_node[0], start, end);
+	if (face < 0 || face >= map->num_faces)
+		return NULL;
+
+	f  = &map->faces[face];
+	ti = &map->texinfo[f->tex_info];
+
+	if (ti->miptex < 0 || ti->miptex >= map->num_textures)
+		return NULL;
+
+	return map->textures[ti->miptex].name;
+}
+
+I64 HLSndMaterialAt(CHLMap *map, F64 *origin)
+{
+	U8 *name = HLSndTextureUnder(map, origin);
+
+	if (!name)
+		return HLTEX_CONCRETE;
+
+	if (name[0] == '-' || name[0] == '+')
+		name += 2;
+
+	if (name[0] == '{' || name[0] == '!' || name[0] == '~' || name[0] == ' ')
+		name++;
+
+	return HLSndMaterialFor(name);
+}
+
+
+#define HLSTEP_CONCRETE		0
+#define HLSTEP_METAL		1
+#define HLSTEP_DIRT			2
+#define HLSTEP_VENT			3
+#define HLSTEP_GRATE		4
+#define HLSTEP_TILE			5
+#define HLSTEP_SLOSH		6
+#define HLSTEP_WADE			7
+#define HLSTEP_LADDER		8
+
+I64 HLSndStepForMaterial(I64 mat)
+{
+	if (mat == HLTEX_METAL)		return HLSTEP_METAL;
+	if (mat == HLTEX_DIRT)		return HLSTEP_DIRT;
+	if (mat == HLTEX_VENT)		return HLSTEP_VENT;
+	if (mat == HLTEX_GRATE)		return HLSTEP_GRATE;
+	if (mat == HLTEX_TILE)		return HLSTEP_TILE;
+	if (mat == HLTEX_SLOSH)		return HLSTEP_SLOSH;
+
+	return HLSTEP_CONCRETE;
+}
+
+U8 *HLSndStepPrefix(I64 step)
+{
+	if (step == HLSTEP_METAL)	return "pl_metal";
+	if (step == HLSTEP_DIRT)	return "pl_dirt";
+	if (step == HLSTEP_VENT)	return "pl_duct";
+	if (step == HLSTEP_GRATE)	return "pl_grate";
+	if (step == HLSTEP_TILE)	return "pl_tile";
+	if (step == HLSTEP_SLOSH)	return "pl_slosh";
+	if (step == HLSTEP_WADE)	return "pl_wade";
+	if (step == HLSTEP_LADDER)	return "pl_ladder";
+
+	return "pl_step";
+}
+
+U0 HLSndPlayStepSound(I64 step, F64 fvol, F64 *origin, I64 entnum = 0)
+{
+	U8	*prefix;
+	U8	 name[64];
+	I64	 irand;
+	I64	 num;
+
+	hl_snd_step_left = !hl_snd_step_left;
+
+	if (step == HLSTEP_WADE)
+	{
+		if (hl_snd_step_skip == 0)
+		{
+			hl_snd_step_skip++;
+			return;
+		}
+
+		hl_snd_step_skip++;
+
+		if (hl_snd_step_skip == 4)
+			hl_snd_step_skip = 0;
+	}
+
+	irand = HLPartRandI(2);
+
+	//0,1 right foot, 2,3 left
+	if (hl_snd_step_left)
+		irand += 2;
+
+	if (step == HLSTEP_TILE && !HLPartRandI(5))
+		irand = 4;
+
+	prefix = HLSndStepPrefix(step);
+
+	if (step == HLSTEP_WADE)
+		num = irand + 1;
+	else if (irand == 0)
+		num = 1;
+	else if (irand == 1)
+		num = 3;
+	else if (irand == 2)
+		num = 2;
+	else if (irand == 3)
+		num = 4;
+	else
+		num = 5;
+
+	StrPrint(name, "player/%s%d.wav", prefix, num);
+
+	HLSndPlayAt(name, origin, fvol, HLATTN_NORM, entnum, HLCHAN_BODY);
+}
+
+
+U0 HLSndPlayerUse(Bool usable, F64 *origin, I64 entnum = 0)
+{//CBasePlayer::PlayerUse, dlls/player.cpp:1667 and :1686.
+	if (usable)
+		HLSndPlayAt("common/wpn_select.wav", origin, 0.4, HLATTN_NORM,
+			entnum, HLCHAN_ITEM);
+	else
+		HLSndPlayAt("common/wpn_denyselect.wav", origin, 0.4, HLATTN_NORM,
+			entnum, HLCHAN_ITEM);
+}
+
+U0 HLSndJumpStep(CHLMap *map, F64 *origin, I64 entnum = 0)
+{//PM_Jump, pm_shared.c:2568.
+	HLSndPlayStepSound(HLSndStepForMaterial(HLSndMaterialAt(map, origin)),
+		1.0, origin, entnum);
+}
+
+U0 HLSndLandStep(CHLMap *map, F64 *origin, F64 fvol, I64 entnum = 0)
+{//PM_CheckFalling, pm_shared.c:2732.
+	if (fvol <= 0.0)
+		return;
+
+	HLSndPlayStepSound(HLSndStepForMaterial(HLSndMaterialAt(map, origin)),
+		fvol, origin, entnum);
+}
+
+
+//CVOXFILESENTENCEMAX is 2048; the shipped file holds around a thousand
+#define HLSND_MAX_SENTENCES	1400
+#define HLSND_SENTNAME		16
+#define HLSND_MAX_SENTGROUPS	200
+#define HLSND_LRU_MAX		32
+#define HLSND_LRU_EMPTY		0xFF
+
+U8	hl_snd_sentname[HLSND_MAX_SENTENCES * HLSND_SENTNAME];
+I64	hl_snd_sent_count;
+
+class CHLSentGroup
+{
+	U8	name[HLSND_SENTNAME];
+	I64	count;
+	U8	lru[HLSND_LRU_MAX];
+};
+
+CHLSentGroup	hl_snd_sentg[HLSND_MAX_SENTGROUPS];
+I64				hl_snd_sentg_count;
+
+U0 HLSndLRUInit(U8 *lru, I64 count)
+{
+	I64 i;
+	I64 j;
+	I64 k;
+	U8	temp;
+
+	if (count > HLSND_LRU_MAX)
+		count = HLSND_LRU_MAX;
+
+	for (i = 0; i < count; i++)
+		lru[i] = i;
+
+	for (i = 0; i < count * 4; i++)
+	{
+		j = HLPartRandI(count);
+		k = HLPartRandI(count);
+
+		temp   = lru[j];
+		lru[j] = lru[k];
+		lru[k] = temp;
+	}
+}
+
+U0 HLSndSentencesInit()
+{
+	CHLSentGroup	*g;
+	U8			*d;
+	I64			 size = 0;
+	I64			 pos  = 0;
+	I64			 i;
+	I64			 j;
+	I64			 n;
+	U8			 buf[512];
+	U8			 group[HLSND_SENTNAME];
+
+	if (hl_snd_sent_ready)
+		return;
+
+	hl_snd_sent_ready  = TRUE;
+	hl_snd_sent_count  = 0;
+	hl_snd_sentg_count = 0;
+	group[0]           = 0;
+
+	d = HLFileLoad("sound/sentences.txt", &size);
+	if (!d)
+	{
+		HLLog("snd: sound/sentences.txt missing - no sentence groups\n");
+		return;
+	}
+
+	while (pos < size && hl_snd_sent_count < HLSND_MAX_SENTENCES)
+	{
+		n = 0;
+
+		while (pos < size && d[pos] != '\n')
+		{
+			if (n < 511)
+			{
+				buf[n] = d[pos];
+				n++;
+			}
+			pos++;
+		}
+
+		buf[n] = 0;
+		pos++;
+
+		i = 0;
+		while (buf[i] && buf[i] == ' ')
+			i++;
+
+		if (!buf[i] || buf[i] == '/' || !HLSndIsAlpha(buf[i]))
+			goto qssi_next;
+
+		j = i;
+		while (buf[j] && buf[j] != ' ')
+			j++;
+
+		if (!buf[j])
+			goto qssi_next;
+
+		buf[j] = 0;
+
+		HLStrCopy(&hl_snd_sentname[hl_snd_sent_count * HLSND_SENTNAME],
+			&buf[i], HLSND_SENTNAME);
+		hl_snd_sent_count++;
+
+		j--;
+		if (j <= i)
+			goto qssi_next;
+
+		if (!HLSndIsDigit(buf[j]))
+			goto qssi_next;
+
+		while (j > i && HLSndIsDigit(buf[j]))
+			j--;
+
+		if (j <= i)
+			goto qssi_next;
+
+		buf[j + 1] = 0;
+
+		if (StrCompare(group, &buf[i]))
+		{
+			if (hl_snd_sentg_count >= HLSND_MAX_SENTGROUPS)
+			{
+				HLLog("snd: too many sentence groups\n");
+				break;
+			}
+
+			g = &hl_snd_sentg[hl_snd_sentg_count];
+			HLStrCopy(g->name, &buf[i], HLSND_SENTNAME);
+			g->count = 1;
+			hl_snd_sentg_count++;
+
+			HLStrCopy(group, &buf[i], HLSND_SENTNAME);
+		}
+		else if (hl_snd_sentg_count > 0)
+			hl_snd_sentg[hl_snd_sentg_count - 1].count++;
+
+qssi_next:
+	}
+
+	Free(d);
+
+	for (i = 0; i < hl_snd_sentg_count; i++)
+		HLSndLRUInit(hl_snd_sentg[i].lru, hl_snd_sentg[i].count);
+
+	StrPrint(hl_snd_line, "snd: %d sentences in %d groups\n",
+		hl_snd_sent_count, hl_snd_sentg_count);
+	HLLog(hl_snd_line);
+}
+
+I64 HLSndSentenceLookup(U8 *sample)
+{
+	I64 i;
+
+	HLSndSentencesInit;
+
+	if (!sample || sample[0] != '!')
+		return -1;
+
+	for (i = 0; i < hl_snd_sent_count; i++)
+	{
+		if (!StrICompare(&hl_snd_sentname[i * HLSND_SENTNAME], sample + 1))
+			return i;
+	}
+
+	return -1;
+}
+
+I64 HLSndSentenceGroupIndex(U8 *groupname)
+{
+	I64 i;
+
+	HLSndSentencesInit;
+
+	if (!groupname || !groupname[0])
+		return -1;
+
+	if (groupname[0] == '!')
+		groupname++;
+
+	for (i = 0; i < hl_snd_sentg_count; i++)
+	{
+		if (!StrCompare(hl_snd_sentg[i].name, groupname))
+			return i;
+	}
+
+	return -1;
+}
+
+I64 HLSndSentencePick(I64 grp, U8 *out)
+{
+ //"!NAMEn". Returns its ordinal within the group, or -1
+	CHLSentGroup	*g;
+	I64			 i;
+	I64			 ipick;
+	I64			 count;
+	Bool		 found = FALSE;
+
+	if (grp < 0 || grp >= hl_snd_sentg_count)
+		return -1;
+
+	g     = &hl_snd_sentg[grp];
+	count = g->count;
+
+	if (count < 1)
+		return -1;
+
+	if (count > HLSND_LRU_MAX)
+		count = HLSND_LRU_MAX;
+
+	ipick = -1;
+
+	for (i = 0; i < count; i++)
+	{
+		if (g->lru[i] != HLSND_LRU_EMPTY)
+		{
+			ipick    = g->lru[i];
+			g->lru[i] = HLSND_LRU_EMPTY;
+			found    = TRUE;
+			break;
+		}
+	}
+
+	if (!found)
+	{
+		HLSndLRUInit(g->lru, count);
+
+		for (i = 0; i < count; i++)
+		{
+			if (g->lru[i] != HLSND_LRU_EMPTY)
+			{
+				ipick     = g->lru[i];
+				g->lru[i] = HLSND_LRU_EMPTY;
+				found     = TRUE;
+				break;
+			}
+		}
+	}
+
+	if (!found)
+		return -1;
+
+	StrPrint(out, "!%s%d", g->name, ipick);
+
+	return ipick;
+}
+
+
+#define HLSND_MAX_SENTQ		8
+
+class CHLSentReq
+{
+	U8	name[48];
+	F64	origin[3];
+	F64	volume;
+	F64	attenuation;
+	I64	pitch;
+	I64	entnum;
+
+	I64	entchannel;
+};
+
+CHLSentReq	hl_snd_sentq[HLSND_MAX_SENTQ];
+I64			hl_snd_sentq_head;
+I64			hl_snd_sentq_tail;
+
+U0 HLSndSentQueueEnsure()
+{
+	if (hl_snd_sq_ready)
+		return;
+
+	hl_snd_sq_ready   = TRUE;
+	hl_snd_sentq_head = 0;
+	hl_snd_sentq_tail = 0;
+}
+
+U0 HLSndSentQueueClear()
+{
+	HLSndSentQueueEnsure;
+
+	hl_snd_sentq_head = 0;
+	hl_snd_sentq_tail = 0;
+}
+
+U0 HLSndSentenceQueue(U8 *name, F64 *origin, F64 volume, F64 attenuation,
+	I64 pitch = HLPITCH_NORM, I64 entnum = 0,
+	I64 entchannel = HLCHAN_VOICE)
+{
+	CHLSentReq	*q;
+	I64			 next;
+
+	HLSndSentQueueEnsure;
+
+	if (!name || name[0] != '!')
+		return;
+
+	next = (hl_snd_sentq_tail + 1) % HLSND_MAX_SENTQ;
+
+	if (next == hl_snd_sentq_head)
+		return;
+
+	q = &hl_snd_sentq[hl_snd_sentq_tail];
+
+	HLStrCopy(q->name, name, 48);
+	q->volume      = volume;
+	q->attenuation = attenuation;
+	q->pitch       = pitch;
+	q->entnum      = entnum;
+	q->entchannel  = entchannel;
+
+	if (origin)
+		HLVecCopy(origin, q->origin);
+	else
+		HLVecCopy(hl_snd_listener, q->origin);
+
+	hl_snd_sentq_tail = next;
+}
+
+Bool HLSndSentenceNext(CHLSentReq *out)
+{
+	HLSndSentQueueEnsure;
+
+	if (hl_snd_sentq_head == hl_snd_sentq_tail)
+		return FALSE;
+
+	MemCopy(out, &hl_snd_sentq[hl_snd_sentq_head], sizeof(CHLSentReq));
+
+	hl_snd_sentq_head = (hl_snd_sentq_head + 1) % HLSND_MAX_SENTQ;
+
+	return TRUE;
+}
+
+I64 HLSndSentencePlayRndSz(U8 *groupname, F64 *origin, F64 volume,
+	F64 attenuation, I64 pitch = HLPITCH_NORM, I64 entnum = 0,
+	I64 entchannel = HLCHAN_VOICE)
+{
+	I64	grp;
+	I64	ipick;
+	U8	name[48];
+
+	grp = HLSndSentenceGroupIndex(groupname);
+	if (grp < 0)
+	{
+		if (hl_snd_reports < HLSND_MAX_REPORTS)
+		{
+			hl_snd_reports++;
+			StrPrint(hl_snd_line, "snd: no such sentence group %s\n",
+				groupname);
+			HLLog(hl_snd_line);
+		}
+		return -1;
+	}
+
+	name[0] = 0;
+	ipick   = HLSndSentencePick(grp, name);
+
+	if (ipick >= 0 && name[0])
+		HLSndSentenceQueue(name, origin, volume, attenuation, pitch, entnum,
+			entchannel);
+
+	return ipick;
+}
+
+U0 HLSndEmitDyn(U8 *sample, F64 *origin, F64 volume, F64 attenuation,
+	I64 entnum = 0, I64 entchannel = 0, I64 pitch = HLPITCH_NORM)
+{
+	if (!sample || !sample[0])
+		return;
+
+	if (sample[0] == '!')
+	{
+		if (HLSndSentenceLookup(sample) >= 0)
+			HLSndSentenceQueue(sample, origin, volume, attenuation, pitch,
+				entnum, entchannel);
+		return;
+	}
+
+	HLSndPlayAt(sample, origin, volume, attenuation, entnum, entchannel,
+		pitch);
+}
+
+
+#define HLSND_MAX_SPEAKERS	16
+
+//ANNOUNCE_MINUTES_MIN 0.25, ANNOUNCE_MINUTES_MAX 2.25
+#define HLSND_ANNOUNCE_MIN	15.0
+#define HLSND_ANNOUNCE_MAX	135.0
+
+class CHLSpeaker
+{
+	F64	 origin[3];
+	U8	 message[64];
+	I64	 preset;
+	F64	 health;
+	F64	 next;			//pev->nextthink, 0 when no announcement is pending
+	I64	 entnum;
+	Bool active;
+};
+
+CHLSpeaker	hl_snd_spk[HLSND_MAX_SPEAKERS];
+I64			hl_snd_spk_count;
+
+F64 HLSndRandF(F64 lo, F64 hi)
+{
+	return lo + (hi - lo) * (HLPartRand(0.5) + 0.5);
+}
+
+U0 HLSndSpeakerClear()
+{
+	hl_snd_spk_ready = TRUE;
+	hl_snd_spk_count = 0;
+}
+
+U8 *HLSndSpeakerPreset(I64 preset)
+{
+	if (preset == 1)	return "C1A0_";
+	if (preset == 2)	return "C1A1_";
+	if (preset == 3)	return "C1A2_";
+	if (preset == 4)	return "C1A3_";
+	if (preset == 5)	return "C1A4_";
+	if (preset == 6)	return "C2A1_";
+	if (preset == 7)	return "C2A2_";
+	if (preset == 8)	return "C2A3_";
+	if (preset == 9)	return "C2A4_";
+	if (preset == 10)	return "C2A5_";
+	if (preset == 11)	return "C3A1_";
+	if (preset == 12)	return "C3A2_";
+
+	return NULL;
+}
+
+I64 HLSndSpeakerAdd(F64 *origin, U8 *message, I64 preset, F64 health,
+	Bool start_silent, F64 now, I64 entnum = 0)
+{//CSpeaker::Spawn plus Precache. Returns the slot, or -1
+	CHLSpeaker *s;
+
+	if (!hl_snd_spk_ready)
+		HLSndSpeakerClear;
+
+	if (hl_snd_spk_count >= HLSND_MAX_SPEAKERS)
+		return -1;
+
+	if (!preset && (!message || !message[0]))
+		return -1;
+
+	s = &hl_snd_spk[hl_snd_spk_count];
+
+	HLVecCopy(origin, s->origin);
+
+	if (message)
+		HLStrCopy(s->message, message, 64);
+	else
+		s->message[0] = 0;
+
+	s->preset = preset;
+	s->health = health;
+	s->entnum = entnum;
+	s->active = TRUE;
+
+	if (start_silent)
+		s->next = 0.0;
+	else
+		s->next = now + HLSndRandF(5.0, 15.0);
+
+	hl_snd_spk_count++;
+
+	return hl_snd_spk_count - 1;
+}
+
+U0 HLSndSpeakerToggle(I64 slot, F64 now)
+{
+	if (!hl_snd_spk_ready || slot < 0 || slot >= hl_snd_spk_count)
+		return;
+
+	if (hl_snd_spk[slot].next > 0.0)
+		hl_snd_spk[slot].next = 0.0;
+	else
+		hl_snd_spk[slot].next = now + 0.1;
+}
+
+I64 HLSndSpeakerSlotFor(I64 entnum)
+{
+	I64 i;
+
+	if (!hl_snd_spk_ready)
+		return -1;
+
+	for (i = 0; i < hl_snd_spk_count; i++)
+	{
+		if (hl_snd_spk[i].active && hl_snd_spk[i].entnum == entnum)
+			return i;
+	}
+
+	return -1;
+}
+
+Bool HLSndSpeakerPending(I64 slot)
+{
+	if (!hl_snd_spk_ready || slot < 0 || slot >= hl_snd_spk_count)
+		return FALSE;
+
+	return ToBool(hl_snd_spk[slot].next > 0.0);
+}
+
+U0 HLSndSpeakerSetNext(I64 slot, F64 when)
+{//pev->nextthink on a speaker. 0 is silent
+	if (!hl_snd_spk_ready || slot < 0 || slot >= hl_snd_spk_count)
+		return;
+
+	hl_snd_spk[slot].next = when;
+}
+
+U0 HLSndSpeakerUpdate(F64 now)
+{
+	CHLSpeaker	*s;
+	U8			*msg;
+	I64			 i;
+	F64			 volume;
+
+	if (!hl_snd_spk_ready)
+	{
+		HLSndSpeakerClear;
+		return;
+	}
+
+	for (i = 0; i < hl_snd_spk_count; i++)
+	{
+		s = &hl_snd_spk[i];
+
+		if (!s->active || s->next <= 0.0 || now < s->next)
+			goto qssu_next;
+
+		if (now <= hl_snd_talk_wait)
+		{
+			s->next = hl_snd_talk_wait + HLSndRandF(5.0, 10.0);
+			goto qssu_next;
+		}
+
+		msg = HLSndSpeakerPreset(s->preset);
+		if (!msg)
+			msg = s->message;
+
+		if (!msg || !msg[0])
+			goto qssu_next;
+
+		volume = s->health * 0.1;
+
+		if (msg[0] == '!')
+		{
+			HLSndSentenceQueue(msg, s->origin, volume, 0.3, HLPITCH_NORM,
+				s->entnum);
+			s->next = 0.0;
+			goto qssu_next;
+		}
+
+		if (HLSndSentencePlayRndSz(msg, s->origin, volume, 0.3, HLPITCH_NORM,
+				s->entnum) < 0)
+		{
+			s->active = FALSE;
+			goto qssu_next;
+		}
+
+		s->next = now + HLSndRandF(HLSND_ANNOUNCE_MIN, HLSND_ANNOUNCE_MAX);
+
+		hl_snd_talk_wait = now + 5.0;
+
+qssu_next:
+	}
+}
+
+U0 HLSndTalkWaitSet(F64 until)
+{
+	if (until > hl_snd_talk_wait)
+		hl_snd_talk_wait = until;
+}
+
+
+U0 HLSndStopAll(Bool stop_music = TRUE)
+{
+	I64 i;
+	I64 keep_slot;
+	I64 slot;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		if (hl_snd_chan[i].voice >= 0)
+			AudioSFXStop(hl_snd_chan[i].voice);
+	}
+
+	HLSndChannelsClear;
+
+	for (i = 0; i < HLNUM_AMBIENTS; i++)
+	{
+		if (hl_ambient_voice[i] >= 0)
+			AudioSFXStop(hl_ambient_voice[i]);
+
+		hl_ambient_voice[i] = -1;
+		hl_ambient_vol[i]   = 0.0;
+		hl_ambient_ends[i]  = 0.0;
+	}
+
+	hl_ambient_last = 0.0;
+
+	HLSndAmbientClear;
+	AudioDSPRoomSet(0);
+	hl_snd_roomtype = 0;
+	HLSndSentQueueClear;
+	HLSndSpeakerClear;
+
+	if (stop_music)
+		HLMusicFree;
+	else
+	{
+		keep_slot = -1;
+
+		if (hl_music_voice >= 0)
+			keep_slot = hl_music_voice & ((1 << AUDIO_VOICE_SHIFT) - 1);
+
+		for (i = 0; i < AUDIO_MAX_SFX_VOICES; i++)
+		{
+			if (i == keep_slot)
+				goto qsna_next;
+
+			slot = i | (audio.voice[i].serial << AUDIO_VOICE_SHIFT);
+			AudioSFXStop(slot);
+
+qsna_next:
+		}
+	}
+
+	hl_snd_roomtype  = 0;
+	hl_snd_step_skip = 0;
+	hl_snd_talk_wait = 0.0;
+}

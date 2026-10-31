@@ -1,0 +1,345 @@
+//YKD Calculator on the YKD widget toolkit. Mirrors erythros Calculator.app.
+
+class CDECalcState
+{
+	F64		 acc;
+	U8		 entry[24];
+	I64		 entry_len;
+	U8		 op;		//0, '+', '-', '*', '/'
+	Bool	 fresh;		//Next digit starts a new entry.
+	Bool	 done;
+	CDEWidget *display;	//The number being entered, or the running total.
+	CDEWidget *op_lbl;	//Pending operation, so a typed operator is visible.
+	CDEWinCtx *ctx;		//For lighting the pad button a typed key matches.
+	F64		  flash_t;	//When that light went on. 0 = nothing lit.
+} de_calc;
+
+#define DE_CALC_FLASH	0.12	//seconds a keyboard-driven button stays lit
+#define DE_CALC_DIGITS	23		//chars that fit the display panel
+
+U0 DECalcDisplaySet(U8 *s)
+{
+	I64 len = StrLen(s);
+
+	if (len > DE_WIDGET_TEXT_LEN - 1)
+		len = DE_WIDGET_TEXT_LEN - 1;
+	MemCopy(de_calc.display->text, s, len);
+	de_calc.display->text[len] = 0;
+}
+
+U0 DECalcNumStr(F64 v, U8 *out)
+{
+	U8	buf[48];
+	I64 i;
+
+	StrPrint(buf, "%15.8f", v);
+	i = StrLen(buf) - 1;
+	while (i > 0 && buf[i] == '0')
+		buf[i--] = 0;
+	if (i > 0 && buf[i] == '.')
+		buf[i] = 0;
+	i = 0;
+	while (buf[i] == ' ')
+		i++;
+	if (StrLen(&buf[i]) > DE_CALC_DIGITS)
+		StrPrint(buf, "%.8g", v);	//too wide for the panel: exponent form
+	else
+		StrCopy(buf, &buf[i]);
+	buf[DE_CALC_DIGITS] = 0;
+	StrCopy(out, buf);
+}
+
+U0 DECalcShowNum(F64 v)
+{
+	U8 buf[48];
+
+	DECalcNumStr(v, buf);
+	DECalcDisplaySet(buf);
+}
+
+U0 DECalcShowOp()
+{
+	U8	num[48], buf[64];
+	I64	len;
+
+	if (!de_calc.op_lbl)
+		return;
+	if (de_calc.op)
+	{
+		DECalcNumStr(de_calc.acc, num);
+		StrPrint(buf, "%s %c", num, de_calc.op);
+	}
+	else
+		buf[0] = 0;
+	//wg->text is DE_WIDGET_TEXT_LEN; a wide accumulator would run past it.
+	len = StrLen(buf);
+	if (len > DE_WIDGET_TEXT_LEN - 1)
+		len = DE_WIDGET_TEXT_LEN - 1;
+	MemCopy(de_calc.op_lbl->text, buf, len);
+	de_calc.op_lbl->text[len] = 0;
+}
+
+F64 DECalcEntryVal()
+{
+	if (!de_calc.entry_len)
+		return de_calc.acc;
+	return Str2F64(de_calc.entry);
+}
+
+U0 DECalcApply()
+{
+	F64 v = DECalcEntryVal;
+
+	switch (de_calc.op)
+	{
+		case '+':	de_calc.acc += v;	break;
+		case '-':	de_calc.acc -= v;	break;
+		case '*':	de_calc.acc *= v;	break;
+		case '/':
+			if (v == 0)
+			{
+				DECalcDisplaySet("Divide by zero");
+				de_calc.acc = 0;
+				de_calc.op = 0;
+				de_calc.entry_len = 0;
+				de_calc.entry[0] = 0;
+				de_calc.fresh = TRUE;
+				DECalcShowOp;
+				return;
+			}
+			de_calc.acc /= v;
+			break;
+		default:
+			de_calc.acc = v;
+	}
+	de_calc.op = 0;
+	de_calc.entry_len = 0;
+	de_calc.entry[0] = 0;
+	de_calc.fresh = TRUE;
+	DECalcShowNum(de_calc.acc);
+	DECalcShowOp;
+}
+
+U0 DECalcDo(U8 k)
+{
+	U8 tmp[24];
+
+	if ('0' <= k <= '9' || k == '.')
+	{
+		if (de_calc.fresh)
+		{
+			de_calc.entry_len = 0;
+			de_calc.fresh = FALSE;
+		}
+		if (k == '.' && StrFirstOcc(de_calc.entry, "."))
+			return;
+		if (de_calc.entry_len < 22)
+		{
+			de_calc.entry[de_calc.entry_len++] = k;
+			de_calc.entry[de_calc.entry_len] = 0;
+			DECalcDisplaySet(de_calc.entry);
+		}
+	}
+	else switch (k)
+	{
+		case 'C':
+			de_calc.acc = 0;
+			de_calc.op = 0;
+			de_calc.entry_len = 0;
+			de_calc.entry[0] = 0;
+			de_calc.fresh = TRUE;
+			DECalcDisplaySet("0");
+			DECalcShowOp;
+			break;
+		case 'N': //Negate.
+			if (de_calc.entry_len)
+			{
+				if (de_calc.entry[0] == '-')
+				{
+					MemCopy(tmp, &de_calc.entry[1], de_calc.entry_len); //Incl. terminator.
+					MemCopy(de_calc.entry, tmp, de_calc.entry_len);
+					de_calc.entry_len--;
+				}
+				else if (de_calc.entry_len < 21)
+				{
+					tmp[0] = '-';
+					MemCopy(&tmp[1], de_calc.entry, de_calc.entry_len + 1);
+					MemCopy(de_calc.entry, tmp, de_calc.entry_len + 2);
+					de_calc.entry_len++;
+				}
+				DECalcDisplaySet(de_calc.entry);
+			}
+			else
+			{
+				de_calc.acc = -de_calc.acc;
+				DECalcShowNum(de_calc.acc);
+			}
+			break;
+		case '=':
+			if (de_calc.entry_len)
+				DECalcApply;
+			else
+			{
+				de_calc.op = 0;
+				de_calc.fresh = TRUE;
+				DECalcShowNum(de_calc.acc);
+				DECalcShowOp;
+			}
+			break;
+		case '+':
+		case '-':
+		case '*':
+		case '/':
+			if (de_calc.entry_len)
+				DECalcApply;
+			de_calc.op = k;
+			DECalcShowOp;
+			break;
+		case 'B': //Backspace.
+			if (de_calc.entry_len)
+			{
+				de_calc.entry_len--;
+				de_calc.entry[de_calc.entry_len] = 0;
+				if (de_calc.entry_len)
+					DECalcDisplaySet(de_calc.entry);
+				else
+					DECalcDisplaySet("0");
+			}
+			break;
+		case 'Q':
+			de_calc.done = TRUE;
+			break;
+	}
+}
+
+U0 DECalcFlash(U8 k)
+{
+	CDEWidget *wg;
+
+	if (!de_calc.ctx)
+		return;
+	wg = de_calc.ctx->head;
+	while (wg)
+	{
+		if (wg->type == DEWT_BUTTON && wg->user_data == k)
+			wg->pressed = TRUE;
+		wg = wg->next;
+	}
+	de_calc.flash_t = tS;
+}
+
+U0 DECalcKey(CDEWidget *wg)
+{//Pad button; the key lives in wg->user_data.
+	DECalcDo(wg->user_data);
+}
+
+U0 DECalcOnKey(CDEWinCtx *ctx, I64 ch, I64 sc)
+{//ctx->on_key. The numpad reports the same characters as the top row, so no
+//scan-code special casing is needed. <ESC> never arrives here: DEWinPoll takes
+//it as the window close.
+	U8 k = 0;
+
+	no_warn ctx;
+	no_warn sc;
+
+	if ('0' <= ch <= '9')
+		k = ch;
+	else
+		switch (ch)
+		{
+			case '.':
+			case ',':		//numpad separator on some layouts
+				k = '.';
+				break;
+			case '+':
+			case '-':
+			case '*':
+			case '/':
+				k = ch;
+				break;
+			case '=':
+			case '\n':		//Enter, main and numpad
+				k = '=';
+				break;
+			case 'c':
+			case 'C':
+				k = 'C';
+				break;
+			case 'n':
+			case 'N':
+				k = 'N';
+				break;
+			case CH_BACKSPACE:
+				k = 'B';
+				break;
+		}
+	if (k)
+	{
+		DECalcFlash(k);
+		DECalcDo(k);
+	}
+}
+
+CDEWidget *DECalcBttn(CDEWinCtx *ctx, I64 col, I64 row, U8 *text, U8 key)
+{
+	CDEWidget *wg = DEButton(ctx, 16 + col * 80, 104 + row * 52, 72, 44, text, &DECalcKey);
+
+	wg->user_data = key;
+	return wg;
+}
+
+public U0 DECalc()
+{
+	CDEWinCtx *ctx;
+	CDEWidget *wg;
+
+	MemSet(&de_calc, 0, sizeof(CDECalcState));
+	ctx = DEWinInit("Calculator", 352, 392);
+	ctx->on_key = &DECalcOnKey;
+	de_calc.ctx = ctx;
+
+	DEPanel(ctx, 16, 16, 312, 72);
+	de_calc.op_lbl  = DELabel(ctx, 28, 30, "");
+	de_calc.display = DELabel(ctx, 28, 56, "0", TRUE);
+
+	DECalcBttn(ctx, 0, 0, "7", '7');
+	DECalcBttn(ctx, 1, 0, "8", '8');
+	DECalcBttn(ctx, 2, 0, "9", '9');
+	DECalcBttn(ctx, 3, 0, "/", '/');
+	DECalcBttn(ctx, 0, 1, "4", '4');
+	DECalcBttn(ctx, 1, 1, "5", '5');
+	DECalcBttn(ctx, 2, 1, "6", '6');
+	DECalcBttn(ctx, 3, 1, "*", '*');
+	DECalcBttn(ctx, 0, 2, "1", '1');
+	DECalcBttn(ctx, 1, 2, "2", '2');
+	DECalcBttn(ctx, 2, 2, "3", '3');
+	DECalcBttn(ctx, 3, 2, "-", '-');
+	DECalcBttn(ctx, 0, 3, "0", '0');
+	DECalcBttn(ctx, 1, 3, ".", '.');
+	DECalcBttn(ctx, 2, 3, "=", '=');
+	DECalcBttn(ctx, 3, 3, "+", '+');
+	DECalcBttn(ctx, 0, 4, "C", 'C');
+	DECalcBttn(ctx, 1, 4, "+/-", 'N');
+	DECalcBttn(ctx, 2, 4, "<-", 'B');
+	DECalcBttn(ctx, 3, 4, "Exit", 'Q');
+
+	DELabel(ctx, 16, 376, "Keyboard and numpad work");
+
+	while (!de_calc.done && DEWinPoll(ctx))
+	{
+		if (de_calc.flash_t > 0.0 && tS - de_calc.flash_t > DE_CALC_FLASH)
+		{
+			wg = ctx->head;
+			while (wg)
+			{
+				if (wg->type == DEWT_BUTTON)
+					wg->pressed = FALSE;
+				wg = wg->next;
+			}
+			de_calc.flash_t = 0.0;
+		}
+		Sleep(30);
+	}
+
+	DEWinExit(ctx);
+}

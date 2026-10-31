@@ -1,0 +1,284 @@
+// global palette and colormap
+//
+//   gfx/palette.lmp   768 bytes, 256 RGB triples
+//
+// the world is not coloured through this: BSP30 gives every texture its own 256
+// colours and the renderer composites in RGB. this is the shared palette 2D art
+// is authored against - console font, HUD pieces, menu lumps, quake sprites.
+//
+// gfx/colormap.lmp is a quake file and valve/ has no such lump; when absent the
+// table is generated from the palette.
+
+#define HLPAL_COLORS			256
+#define HLPAL_SHADES			64
+#define HLPAL_FULLBRIGHT		224
+
+U8	 hl_pal_rgb[HLPAL_COLORS * 3];
+U32	 hl_pal_argb[HLPAL_COLORS];
+U8	*hl_pal_colormap = NULL;
+Bool hl_pal_loaded = FALSE;
+
+U8	 hl_pal_colormap_gen[HLPAL_COLORS * HLPAL_SHADES];
+
+U0 HLPalBuildGeneric()
+{
+	I64 i;
+	I64 r, g, b;
+
+	for (i = 0; i < 216; i++)
+	{
+		r = (i / 36) % 6;
+		g = (i / 6) % 6;
+		b = i % 6;
+
+		hl_pal_rgb[i * 3]     = r * 51;
+		hl_pal_rgb[i * 3 + 1] = g * 51;
+		hl_pal_rgb[i * 3 + 2] = b * 51;
+	}
+
+	for (i = 216; i < HLPAL_COLORS; i++)
+	{
+		r = ((i - 216) * 255) / (HLPAL_COLORS - 1 - 216);
+
+		hl_pal_rgb[i * 3]     = r;
+		hl_pal_rgb[i * 3 + 1] = r;
+		hl_pal_rgb[i * 3 + 2] = r;
+	}
+
+	hl_pal_rgb[0] = 0;
+	hl_pal_rgb[1] = 0;
+	hl_pal_rgb[2] = 0;
+}
+
+I64 HLPalNearest(I64 r, I64 g, I64 b)
+{
+	I64 best      = 0;
+	I64 best_dist = I64_MAX;
+	I64 dr, dg, db, dist;
+	I64 i;
+
+	for (i = 0; i < HLPAL_COLORS; i++)
+	{
+		dr = hl_pal_rgb[i * 3]     - r;
+		dg = hl_pal_rgb[i * 3 + 1] - g;
+		db = hl_pal_rgb[i * 3 + 2] - b;
+
+		dist = dr * dr + dg * dg + db * db;
+
+		if (dist < best_dist)
+		{
+			best_dist = dist;
+			best      = i;
+		}
+	}
+
+	return best;
+}
+
+U0 HLPalBuildColormap()
+{
+	I64 shade;
+	I64 i;
+	I64 num;
+	I64 r, g, b;
+
+	for (shade = 0; shade < HLPAL_SHADES; shade++)
+	{
+		//63 steps from full brightness down to zero
+		num = (HLPAL_SHADES - 1 - shade) * 255 / (HLPAL_SHADES - 1);
+
+		for (i = 0; i < HLPAL_COLORS; i++)
+		{
+			if (i >= HLPAL_FULLBRIGHT)
+			{
+				hl_pal_colormap_gen[shade * HLPAL_COLORS + i] = i;
+				goto qpbc_next;
+			}
+
+			r = (hl_pal_rgb[i * 3]     * num) / 255;
+			g = (hl_pal_rgb[i * 3 + 1] * num) / 255;
+			b = (hl_pal_rgb[i * 3 + 2] * num) / 255;
+
+			hl_pal_colormap_gen[shade * HLPAL_COLORS + i] =
+				HLPalNearest(r, g, b);
+
+qpbc_next:
+		}
+	}
+
+	hl_pal_colormap = hl_pal_colormap_gen;
+}
+
+
+I64	 hl_tint_r	= 0;
+I64	 hl_tint_g	= 0;
+I64	 hl_tint_b	= 0;
+I64	 hl_tint_a	= 0;		//0 = no tint, 255 = fully the tint colour
+
+#define HLGAMMA_MIN	0.5
+#define HLGAMMA_MAX	1.0
+
+F64 hl_gamma			= 1.0;
+U8	hl_gamma_ramp[256];
+Bool hl_gamma_dirty	= TRUE;
+
+U0 HLPalBuildGammaRamp()
+{//ramp[v] = 255 * (v/255) ^ gamma
+	F64 g = hl_gamma;
+	F64 v;
+	I64 i;
+
+	if (g < HLGAMMA_MIN)	g = HLGAMMA_MIN;
+	if (g > HLGAMMA_MAX)	g = HLGAMMA_MAX;
+
+	for (i = 0; i < 256; i++)
+	{
+		if (g == 1.0)
+			hl_gamma_ramp[i] = i;
+		else
+		{
+			v = Pow(ToF64(i) / 255.0, g) * 255.0;
+			hl_gamma_ramp[i] = ClampI64(ToI64(v + 0.5), 0, 255);
+		}
+	}
+
+	hl_gamma_dirty = FALSE;
+}
+
+
+U8	hl_disp_r[256];
+U8	hl_disp_g[256];
+U8	hl_disp_b[256];
+Bool hl_disp_identity = TRUE;	//no tint, gamma 1.0: blit copies straight
+
+U0 HLPalBuildDisplayRamps()
+{
+	I64 i;
+	I64 v;
+
+	for (i = 0; i < 256; i++)
+	{
+		v = i + ((hl_tint_r - i) * hl_tint_a) / 255;
+		hl_disp_r[i] = hl_gamma_ramp[ClampI64(v, 0, 255)];
+
+		v = i + ((hl_tint_g - i) * hl_tint_a) / 255;
+		hl_disp_g[i] = hl_gamma_ramp[ClampI64(v, 0, 255)];
+
+		v = i + ((hl_tint_b - i) * hl_tint_a) / 255;
+		hl_disp_b[i] = hl_gamma_ramp[ClampI64(v, 0, 255)];
+	}
+
+	hl_disp_identity = ToBool(!hl_tint_a && hl_gamma == 1.0);
+}
+
+U0 HLPalDisplayInit()
+{
+	I64 i;
+
+	hl_tint_r = 0;
+	hl_tint_g = 0;
+	hl_tint_b = 0;
+	hl_tint_a = 0;
+
+	hl_gamma       = 1.0;
+	hl_gamma_dirty = TRUE;
+
+	for (i = 0; i < 256; i++)
+	{
+		hl_gamma_ramp[i] = i;
+		hl_disp_r[i]     = i;
+		hl_disp_g[i]     = i;
+		hl_disp_b[i]     = i;
+	}
+
+	hl_disp_identity = TRUE;
+}
+
+Bool HLPalLoad()
+{
+	U8  *p;
+	I64  size = 0;
+	I64  i;
+
+	hl_pal_loaded   = FALSE;
+	hl_pal_colormap = NULL;
+
+	p = HLFileData("gfx/palette.lmp", &size);
+
+	if (p && size >= HLPAL_COLORS * 3)
+		MemCopy(hl_pal_rgb, p, HLPAL_COLORS * 3);
+	else
+	{
+		"HLPal: no gfx/palette.lmp, using a generic ramp for 2D art\n";
+		HLPalBuildGeneric;
+	}
+
+	for (i = 0; i < HLPAL_COLORS; i++)
+	{
+		hl_pal_argb[i] = (hl_pal_rgb[i * 3] << 16) |
+					   (hl_pal_rgb[i * 3 + 1] << 8) |
+						hl_pal_rgb[i * 3 + 2];
+	}
+
+	p = HLFileData("gfx/colormap.lmp", &size);
+
+	if (p && size >= HLPAL_COLORS * HLPAL_SHADES)
+	{
+		hl_pal_colormap = p;
+	}
+	else
+	{
+		//the normal case on valve/: 16k of nearest-colour search, once
+		"HLPal: no gfx/colormap.lmp, generating from the palette\n";
+		HLPalBuildColormap;
+	}
+
+	hl_pal_loaded = TRUE;
+
+	HLPalDisplayInit;
+
+	return TRUE;
+}
+
+U32 HLPalColor(I64 index)
+{//palette index to 0x00RRGGBB
+	return hl_pal_argb[index & 255];
+}
+
+U0 HLPalRebuild()
+{
+	if (hl_gamma_dirty)
+		HLPalBuildGammaRamp;
+
+	HLPalBuildDisplayRamps;
+}
+
+U0 HLPalSetGamma(F64 g)
+{
+	if (g < HLGAMMA_MIN)	g = HLGAMMA_MIN;
+	if (g > HLGAMMA_MAX)	g = HLGAMMA_MAX;
+
+	if (g == hl_gamma)
+		return;
+
+	hl_gamma       = g;
+	hl_gamma_dirty = TRUE;
+
+	HLPalRebuild;
+}
+
+U0 HLPalSetTint(I64 r, I64 g, I64 b, I64 a)
+{
+	a = ClampI64(a, 0, 255);
+
+	if (r == hl_tint_r && g == hl_tint_g && b == hl_tint_b && a == hl_tint_a &&
+		!hl_gamma_dirty)
+		return;
+
+	hl_tint_r = r;
+	hl_tint_g = g;
+	hl_tint_b = b;
+	hl_tint_a = a;
+
+	HLPalRebuild;
+}

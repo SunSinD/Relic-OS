@@ -1,0 +1,2725 @@
+//YDE Demo - "DIVINE INTELLECT". Demoscene-style intro and the engine behind
+//the optional screen saver. Six acts, 11s per scene, 24 scenes.
+//
+//ASSET: ::/DE/DemoDance.PNG - RGBA sprite sheet, 6 cols x 48 frames of 30x91,
+//matted via alpha.
+//
+//Run it:      YDEDemo;            (any key / mouse move exits)
+//Screensaver: YDESaverOn(120);    (idle seconds; YDESaverOff to stop)
+//
+//Paints through gr.fp_final_screen_update, the hook the Window Manager calls
+//with the finished frame, as ::/DE/Splash.ZC does. The hook only blits;
+//rendering happens in a separate task into yd_buf, an offscreen U32 buffer at
+//half screen resolution, upscaled 2x on blit.
+//
+//Everything is drawn with YDAdd(), a saturating additive blend into dc->body
+//(U32 0x00RRGGBB, truecolor tree).
+//
+//CHROMATIC ABERRATION: each frame projects the mesh three times at slightly
+//different focal lengths - red wide, green nominal, blue narrow - each into
+//its own colour channel.
+//
+//PHOSPHOR DECAY: the buffer is never cleared, only scaled by 3/4 each frame
+//(two shifts, no divide).
+
+#define YD_W			(GR_WIDTH / 2)		//offscreen buffer is half-res,
+#define YD_H			(GR_HEIGHT / 2)		//blitted 2x - see YDOverlay
+#define YD_MAXV			512
+#define YD_MAXE			1200
+#define YD_STARS		220
+#define YD_SCENES		5	//act one: clean vector
+#define YD_GSCENES		4	//act two: glitch cyberpunk
+#define YD_ASCENES		4	//act three: C64 / ANSI block art
+#define YD_TSCENES		7	//act four: Terry tribute
+#define YD_WSCENES		5	//act five: Eon / The Black Lotus (dithered)
+#define YD_XSCENES		3	//act six: voxel / mode7 / metaballs
+#define YD_ACTS			6
+#define YD_SCENE_SECS	11.0
+
+U32	 *yd_buf	= NULL;		//YD_W * YD_H offscreen, 0x00RRGGBB
+U32	 *yd_row	= NULL;		//one upscaled destination row (2 * YD_W)
+Bool  yd_up		= FALSE;	//overlay installed
+Bool  yd_stop	= FALSE;	//ask the render task to wind down
+Bool  yd_saver_on	= FALSE;
+Bool  yd_as_saver	= FALSE;	//this run was started by the idle watcher
+I64	  yd_saver_secs	= 120;
+U0	(*yd_old_hook)(CDC *dc) = NULL;
+
+//Mesh: plain global arrays rather than a class, so nothing large lands on a
+//task stack. Rebuilt in place whenever the scene changes.
+F64 yd_vx[YD_MAXV], yd_vy[YD_MAXV], yd_vz[YD_MAXV];	//model space
+F64 yd_rx[YD_MAXV], yd_ry[YD_MAXV], yd_rz[YD_MAXV];	//after rotation
+I16 yd_ea[YD_MAXE], yd_eb[YD_MAXE];
+I64 yd_px[YD_MAXV], yd_py[YD_MAXV];		//projected screen coords, per pass
+Bool yd_ok[YD_MAXV];					//vertex survived the near-plane clip
+I64 yd_nv = 0, yd_ne = 0;
+I64 yd_mesh_id = -1;	//which mesh is currently built
+
+F64 yd_sx[YD_STARS], yd_sy[YD_STARS], yd_sz[YD_STARS];
+
+U32 *yd_tmp = NULL;		//one scratch row for the glitch pass. Not yd_row: that
+						//one belongs to the WinMgr blit thread.
+I64	 yd_frame = 0;
+I64 yd_act = 0;		//0 vector, 1 glitch cyberpunk, 2 C64/ANSI, 3 tribute.
+					//Drives the background, the glitch pass, and clear-vs-fade.
+U64 yd_hash = 0x0123456789ABCDEF;	//live 64-bit value for the YDBits readout
+
+#define YD_AGENTS	7		//night-drive scene: the glowies on the road
+F64 yd_agz[YD_AGENTS];		//distance; counts down toward the bumper
+F64 yd_agx[YD_AGENTS];		//lateral offset, -1..1 across the lane
+F64 yd_agflash = 0;			//impact flash, decays
+I64 yd_aghit = 0;			//running total
+
+//Katakana, 8x8, one U64 per glyph, bit (py * 8 + px) - the same packing as
+//text.font, so YDKata is YDText with a different table. Baked from
+//::/System/Gr/CJK.TTF (Sawarabi, OFL) at 11px.
+#define YD_KATA_N	46
+U64 yd_kata[YD_KATA_N] = {
+	0x03040408386840FF, 0x080808080B0C1060, 0x0C30204141C1FF08, 0x00FF080808087F00,
+	0x21262C3830FF2020, 0xC386848C88FF0808, 0x0808087FC8087F08, 0x0618102061427E04,
+	0x060810302123FE04, 0x407F404040407F00, 0x1830222222FF2222, 0x0718302042C10007,
+	0xC16334181020203F, 0xFC04042445BFE404, 0x0618302042434180, 0x020C1830794742FC,
+	0x07040808FF08081F, 0x071830204049CD04, 0x0204080808FF007F, 0x020202623E060202,
+	0x0304080808FF0808, 0x00FF000000007F00, 0x034638182C22407F, 0x0888CB3E18207F08,
+	0x0306081810202060, 0x0080406121223212, 0x7E010101073D6101, 0x030E18306040407F,
+	0x00804020311A0C00, 0x0C88C9494B08FF08, 0x003010081E2360C0, 0x780700300F00300F,
+	0xC37F422206040408, 0x03C64C3818362020, 0x0078040404FF0404, 0x080404244447FA02,
+	0x00FF10302020203F, 0x407F4040407F4040, 0x0C3020407F00003F, 0x1C30604242424242,
+	0x3051939292121212, 0x0719214101010101, 0x417F41414141417F, 0x000C306040818181,
+	0x00061830207F4040, 0x070C102060408201};
+
+#define YD_COLS		(YD_W / 8)
+F64 yd_rain_y[YD_COLS];		//head position, in cells
+F64 yd_rain_sp[YD_COLS];	//fall speed
+I64 yd_rain_hue[YD_COLS];	//0 cyan, 1 magenta, 2 white-hot
+
+
+U0 YDAdd(I64 x, I64 y, I64 r, I64 g, I64 b)
+{//Saturating additive blend of one pixel. Clipped.
+	U32 *p;
+	I64	 c, nr, ng, nb;
+
+	if (x < 0 || y < 0 || x >= YD_W || y >= YD_H)
+		return;
+	p  = yd_buf + y * YD_W + x;
+	c  = *p;
+	nr = (c >> 16 & 0xFF) + r;
+	ng = (c >> 8 & 0xFF) + g;
+	nb = (c & 0xFF) + b;
+	if (nr > 255)
+		nr = 255;
+	if (ng > 255)
+		ng = 255;
+	if (nb > 255)
+		nb = 255;
+	*p = (nr << 16) + (ng << 8) + nb;	//parenthesised: << binds looser than +
+}
+
+U0 YDFade()
+{//Phosphor decay: buf *= 3/4 via two masked shifts, no divide, no clear.
+	I64	 i, n = YD_W * YD_H;
+	U32	 c;
+
+	for (i = 0; i < n; i++)
+	{
+		c = yd_buf[i];
+		if (c)
+			yd_buf[i] = (c >> 1 & 0x7F7F7F) + (c >> 2 & 0x3F3F3F);
+	}
+}
+
+U0 YDLine(I64 x1, I64 y1, I64 x2, I64 y2, I64 r, I64 g, I64 b)
+{//Additive Bresenham. Bails on absurd spans so a vertex behind the camera
+//cannot turn into a million-pixel scanline.
+	I64 dx, dy, sx, sy, err, e2;
+
+	dx = x2 - x1;
+	if (dx < 0)
+		dx = -dx;
+	dy = y2 - y1;
+	if (dy < 0)
+		dy = -dy;
+	if (dx > 4 * YD_W || dy > 4 * YD_H)
+		return;
+	sx = -1;
+	if (x1 < x2)
+		sx = 1;
+	sy = -1;
+	if (y1 < y2)
+		sy = 1;
+	err = dx - dy;
+	while (TRUE)
+	{
+		YDAdd(x1, y1, r, g, b);
+		if (x1 == x2 && y1 == y2)
+			break;
+		e2 = 2 * err;
+		if (e2 > -dy)
+		{
+			err -= dy;
+			x1 += sx;
+		}
+		if (e2 < dx)
+		{
+			err += dx;
+			y1 += sy;
+		}
+	}
+}
+
+#define YD_POLY_MAX	64		//vertices per polygon (ridges need ~27)
+#define YD_XI_MAX	64		//crossings per scanline
+
+I64 yd_pxs[YD_POLY_MAX], yd_pys[YD_POLY_MAX];	//polygon scratch, not on a stack
+
+U0 YDPolyFill(I64 n, I64 r, I64 g, I64 b)
+{//Scanline-fill the polygon in yd_pxs/yd_pys with a FLAT colour, written
+//straight into the buffer rather than blended. Act 5 composites black
+//silhouettes over its dithered fields; an additive fill washes them out.
+//Even-odd rule: for each scanline collect the edge crossings, sort them, and
+//fill between consecutive pairs.
+	I64	 i, j, y, x, ymin, ymax, nx, t, x0, x1;
+	I64	 xi[YD_XI_MAX];
+	U32	*row;
+	U32	 c;
+
+	if (n < 3)
+		return;
+	c = (r << 16) + (g << 8) + b;
+	ymin = yd_pys[0];
+	ymax = yd_pys[0];
+	for (i = 1; i < n; i++)
+	{
+		if (yd_pys[i] < ymin)
+			ymin = yd_pys[i];
+		if (yd_pys[i] > ymax)
+			ymax = yd_pys[i];
+	}
+	if (ymin < 0)
+		ymin = 0;
+	if (ymax >= YD_H)
+		ymax = YD_H - 1;
+
+	for (y = ymin; y <= ymax; y++)
+	{
+		nx = 0;
+		j  = n - 1;
+		for (i = 0; i < n; i++)
+		{//edge j->i crosses this scanline?
+			if ((yd_pys[i] <= y && yd_pys[j] > y) ||
+				(yd_pys[j] <= y && yd_pys[i] > y))
+			{
+				if (nx < YD_XI_MAX)
+				{
+					xi[nx] = yd_pxs[i] + (y - yd_pys[i]) *
+							 (yd_pxs[j] - yd_pxs[i]) /
+							 (yd_pys[j] - yd_pys[i]);
+					nx++;
+				}
+			}
+			j = i;
+		}
+		for (i = 1; i < nx; i++)
+		{//insertion sort; nx is tiny
+			t = xi[i];
+			j = i - 1;
+			while (j >= 0 && xi[j] > t)
+			{
+				xi[j + 1] = xi[j];
+				j--;
+			}
+			xi[j + 1] = t;
+		}
+		row = yd_buf + y * YD_W;
+		for (i = 0; i + 1 < nx; i += 2)
+		{
+			x0 = xi[i];
+			x1 = xi[i + 1];
+			if (x0 < 0)
+				x0 = 0;
+			if (x1 >= YD_W)
+				x1 = YD_W - 1;
+			for (x = x0; x <= x1; x++)
+				row[x] = c;
+		}
+	}
+}
+
+U0 YDPolyPt(I64 i, I64 x, I64 y)
+{
+	if (0 <= i < YD_POLY_MAX)
+	{
+		yd_pxs[i] = x;
+		yd_pys[i] = y;
+	}
+}
+
+U0 YDRectFill(I64 x0, I64 y0, I64 x1, I64 y1, I64 r, I64 g, I64 b)
+{
+	I64	 x, y;
+	U32	*row, c = (r << 16) + (g << 8) + b;
+
+	if (x0 < 0)
+		x0 = 0;
+	if (y0 < 0)
+		y0 = 0;
+	if (x1 >= YD_W)
+		x1 = YD_W - 1;
+	if (y1 >= YD_H)
+		y1 = YD_H - 1;
+	for (y = y0; y <= y1; y++)
+	{
+		row = yd_buf + y * YD_W;
+		for (x = x0; x <= x1; x++)
+			row[x] = c;
+	}
+}
+
+U0 YDText(I64 x, I64 y, U8 *st, I64 sc, I64 r, I64 g, I64 b)
+{//System-font text, pixel-upscaled by sc, drawn additively.
+	CFont *f = text.cur_font;
+	U8	  *rows;
+	I64	   i, px, py, qx, qy;
+
+	for (i = 0; st[i]; i++)
+	{
+		rows = FontGlyphRows(f, st[i]);
+		for (py = 0; py < f->height; py++)
+			for (px = 0; px < f->width; px++)
+				if (rows[py * f->row_bytes] >> px & 1)
+					for (qy = 0; qy < sc; qy++)
+						for (qx = 0; qx < sc; qx++)
+							YDAdd(x + (i * FONT_WIDTH + px) * sc + qx,
+								  y + py * sc + qy, r, g, b);
+	}
+}
+
+U0 YDKata(I64 x, I64 y, I64 gi, I64 sc, I64 r, I64 g, I64 b)
+{//One katakana glyph from yd_kata, same bit packing as the system font.
+	I64 px, py, qx, qy;
+	U64 bits;
+
+	if (gi < 0)
+		gi = -gi;
+	bits = yd_kata[gi % YD_KATA_N];
+	for (py = 0; py < 8; py++)
+		for (px = 0; px < 8; px++)
+			if (bits >> (py * 8 + px) & 1)
+				for (qy = 0; qy < sc; qy++)
+					for (qx = 0; qx < sc; qx++)
+						YDAdd(x + px * sc + qx, y + py * sc + qy, r, g, b);
+}
+
+U0 YDTextC(I64 cx, I64 y, U8 *st, I64 sc, I64 r, I64 g, I64 b)
+{
+	YDText(cx - StrLen(st) * FONT_WIDTH * sc / 2, y, st, sc, r, g, b);
+}
+
+U0 YDTextCA(I64 cx, I64 y, U8 *st, I64 sc, I64 amt)
+{
+	I64 w = StrLen(st) * FONT_WIDTH * sc, x = cx - w / 2;
+
+	YDText(x - amt, y, st, sc, 200, 0, 0);
+	YDText(x + amt, y, st, sc, 0, 0, 200);
+	YDText(x, y, st, sc, 90, 200, 130);
+}
+
+
+U0 YDGlitch(I64 amount)
+{//Datamosh pass, run over the finished frame in act 2 only.
+//Three cheap artefacts: horizontal slice displacement (the "torn VHS" look),
+//a red/blue channel tear on one band, and scanline darkening.
+	I64 k, y, x, sx, y0, h, dx;
+	U32 *row;
+
+	if (!yd_tmp)
+		return;
+
+	for (k = 0; k < amount; k++)
+	{
+		y0 = RandU16 % YD_H;
+		h  = 3 + RandU16 % 18;
+		dx = RandU16 % 61 - 30;
+		if (y0 + h > YD_H)
+			h = YD_H - y0;
+		for (y = y0; y < y0 + h; y++)
+		{
+			row = yd_buf + y * YD_W;
+			MemCopy(yd_tmp, row, YD_W * sizeof(U32));
+			for (x = 0; x < YD_W; x++)
+			{//wrap, so a torn slice reads as displaced signal, not black
+				sx = x - dx;
+				while (sx < 0)
+					sx += YD_W;
+				row[x] = yd_tmp[sx % YD_W];
+			}
+		}
+	}
+
+	y0 = RandU16 % YD_H;
+	h  = 2 + RandU16 % 10;
+	dx = RandU16 % 17 - 8;
+	if (y0 + h > YD_H)
+		h = YD_H - y0;
+	for (y = y0; y < y0 + h; y++)
+	{
+		row = yd_buf + y * YD_W;
+		MemCopy(yd_tmp, row, YD_W * sizeof(U32));
+		for (x = 0; x < YD_W; x++)
+		{
+			sx = x - dx;
+			while (sx < 0)
+				sx += YD_W;
+			row[x] = (row[x] & 0x00FFFF) + (yd_tmp[sx % YD_W] & 0xFF0000);
+		}
+	}
+
+	for (y = 1; y < YD_H; y += 2)
+	{
+		row = yd_buf + y * YD_W;
+		for (x = 0; x < YD_W; x++)
+			row[x] = (row[x] >> 1 & 0x7F7F7F) + (row[x] >> 2 & 0x3F3F3F);
+	}
+}
+
+U0 YDRainInit()
+{
+	I64 i;
+
+	for (i = 0; i < YD_COLS; i++)
+	{
+		yd_rain_y[i]  = ToF64(RandU16 % (YD_H / 8)) - ToF64(YD_H / 8);
+		yd_rain_sp[i] = 8.0 + ToF64(RandU16 % 26);
+		yd_rain_hue[i] = RandU16 % 10;
+	}
+}
+
+U0 YDRain(F64 dt, I64 tail)
+{//Katakana downpour. Head is white-hot, tail fades cyan, magenta on a few
+//columns.
+	I64 i, k, row, gi, v, r, g, b;
+
+	for (i = 0; i < YD_COLS; i++)
+	{
+		yd_rain_y[i] += dt * yd_rain_sp[i];
+		if (yd_rain_y[i] > ToF64(YD_H / 8 + tail))
+		{
+			yd_rain_y[i]   = -ToF64(RandU16 % 20);
+			yd_rain_sp[i]  = 8.0 + ToF64(RandU16 % 26);
+			yd_rain_hue[i] = RandU16 % 10;
+		}
+		for (k = 0; k < tail; k++)
+		{
+			row = ToI64(yd_rain_y[i]) - k;
+			if (0 <= row < YD_H / 8)
+			{//on-screen cells only (ZealC has no `continue`)
+				v = 210 - k * 210 / tail;
+				if (v < 0)
+					v = 0;
+				gi = i * 7 + row * 13 + yd_frame / 5;
+				if (!k)
+				{
+					r = 200;
+					g = 255;
+					b = 230;	//white-hot head
+				}
+				else if (!yd_rain_hue[i])
+				{
+					r = v * 3 / 4;
+					g = v / 5;
+					b = v;		//magenta column
+				}
+				else
+				{
+					r = v / 6;
+					g = v;
+					b = v * 4 / 5;	//cyan-green
+				}
+				YDKata(i * 8, row * 8, gi, 1, r, g, b);
+			}
+		}
+	}
+}
+
+
+U0 YDAnsify(I64 floor_lum)
+{//Turn whatever has been drawn into character-cell art, in place.
+//Per 8x8 cell: average it, wipe it, then stamp one CP437 block glyph
+//(176 . 177 . 178 . 219) chosen by luminance, in a colour snapped to full
+//saturation and 3 levels per channel. ANSI/C64 art has no gradients: the
+//shading lives in the glyph and the palette stays quantised.
+	I64 cx, cy, x, y, r, g, b, v, m, ch;
+	U32 *p, c;
+	U8 s[2];
+
+	s[1] = 0;
+	for (cy = 0; cy < YD_H / 8; cy++)
+		for (cx = 0; cx < YD_W / 8; cx++)
+		{
+			r = 0;
+			g = 0;
+			b = 0;
+			for (y = 0; y < 8; y++)
+			{
+				p = yd_buf + (cy * 8 + y) * YD_W + cx * 8;
+				for (x = 0; x < 8; x++)
+				{
+					c = p[x];
+					r += c >> 16 & 0xFF;
+					g += c >> 8 & 0xFF;
+					b += c & 0xFF;
+				}
+			}
+			r >>= 6;	//  / 64 px
+			g >>= 6;
+			b >>= 6;
+			v = (r * 30 + g * 59 + b * 11) / 100;
+			for (y = 0; y < 8; y++)
+			{
+				p = yd_buf + (cy * 8 + y) * YD_W + cx * 8;
+				for (x = 0; x < 8; x++)
+					p[x] = 0;
+			}
+			if (v >= floor_lum)
+			{//Thresholds are high: ANSI art is mostly black; dim cells drop out
+			//entirely.
+				if (v < 46)
+					ch = 176;		//light shade
+				else if (v < 92)
+					ch = 177;		//medium
+				else if (v < 150)
+					ch = 178;		//dark shade
+				else
+					ch = 219;		//full block
+				m = r;
+				if (g > m)
+					m = g;
+				if (b > m)
+					m = b;
+				if (m < 1)
+					m = 1;
+				//full saturation, then 3 levels per channel
+				r = r * 255 / m;
+				g = g * 255 / m;
+				b = b * 255 / m;
+				r = (r + 64) / 128 * 90;
+				g = (g + 64) / 128 * 90;
+				b = (b + 64) / 128 * 90;
+				if (r > 190)
+					r = 190;
+				if (g > 190)
+					g = 190;
+				if (b > 190)
+					b = 190;
+				s[0] = ch;
+				YDText(cx * 8, cy * 8, s, 1, r, g, b);
+			}
+		}
+}
+
+U0 YDRaster(F64 t, I64 n)
+{//Copper/raster bars: solid horizontal bands sliding on a sine, each a flat
+//colour with a soft edge.
+	I64 k, dy, y, x, yc, r, g, b, i;
+
+	for (k = 0; k < n; k++)
+	{
+		yc = YD_H / 2 + ToI64(84.0 * Sin(t * 1.15 + ToF64(k) * 1.5));
+		for (dy = -5; dy <= 5; dy++)
+		{
+			y = yc + dy;
+			if (0 <= y < YD_H)
+			{
+				i = 6 - dy;
+				if (dy < 0)
+					i = 6 + dy;
+				i = i * 24;		//soft top/bottom edge
+				if (i > 145)
+					i = 145;
+				r = i;
+				g = i / 3;
+				b = i / 2;
+				if (k % 3 == 1)
+				{
+					r = i / 4;
+					g = i;
+					b = i / 3;
+				}
+				if (k % 3 == 2)
+				{
+					r = i / 3;
+					g = i / 3;
+					b = i;
+				}
+				for (x = 0; x < YD_W; x++)
+					YDAdd(x, y, r, g, b);
+			}
+		}
+	}
+}
+
+U0 YDWaterfall(F64 t)
+{//Falling water: two out-of-phase sines per column, a brighter band at the
+//lip, random spray in the plunge pool.
+	I64 x, y, v, i, px, py;
+	I64 top = YD_H / 5, bot = YD_H * 3 / 4;
+	I64 x0 = YD_W / 4, x1 = YD_W * 3 / 4;	//a gorge, not a full-screen wash
+	F64 s;
+
+	for (x = x0; x < x1; x++)
+	{
+		s = Sin(ToF64(x) * 0.11 + t * 0.8) + Sin(ToF64(x) * 0.037 - t * 0.5);
+		for (y = top; y < bot; y++)
+		{
+			v = 40 + ToI64(52.0 * Sin(ToF64(y) * 0.22 - t * 11.0 + s * 2.2));
+			if (v > 24)		//let the troughs fall below the ANSI floor, so the
+				YDAdd(x, y, v / 5, v / 2, v);	//sheet breaks into strands
+		}
+		v = 120 + ToI64(50.0 * s);
+		YDAdd(x, top, v / 3, v * 3 / 4, v);
+		YDAdd(x, top + 1, v / 4, v / 2, v);
+	}
+	for (y = top; y < bot + 20; y += 2)
+	{
+		v = 40 + ToI64(26.0 * Sin(ToF64(y) * 0.13));
+		YDAdd(x0 - 3 + ToI64(6.0 * Sin(ToF64(y) * 0.09)), y, v, v * 3 / 4, v / 2);
+		YDAdd(x1 + 3 - ToI64(6.0 * Sin(ToF64(y) * 0.11)), y, v, v * 3 / 4, v / 2);
+	}
+	for (i = 0; i < 150; i++)
+	{
+		px = x0 + RandU16 % (x1 - x0);
+		py = bot - 8 + RandU16 % 22;
+		v  = 70 + RandU16 % 120;
+		YDAdd(px, py, v / 3, v * 2 / 3, v);
+	}
+}
+
+//The dance is the actual footage, in colour. Frames are cropped to the centre
+//figure of the (tiled 3-up, letterboxed) source, matted off its flat backdrop
+//and packed into ::/DE/DemoDance.PNG - an RGBA sheet, 6 cols x 48 frames of
+//30x91, alpha 0 where the backdrop was. Loaded once with PNGReadRGBA, which
+//preserves full 8-bit alpha, so the matte needs no threshold.
+//
+
+#define YD_DF_W		30		//frame size within the sheet
+#define YD_DF_H		91
+#define YD_DF_COLS	6
+#define YD_DF_N		48
+
+U32 *yd_dance	= NULL;		//0xAARRGGBB sheet
+I64	 yd_dance_w	= 0, yd_dance_h = 0;
+
+U0 YDDanceLoad()
+{
+	if (yd_dance)
+		return;
+	yd_dance = PNGReadRGBA("::/DE/DemoDance.PNG", &yd_dance_w, &yd_dance_h,
+						   sys_task);
+}
+
+U32 YDDancePix(I64 fr, I64 x, I64 y)
+{//0xAARRGGBB of pixel (x,y) in frame fr; alpha 0 = off-sprite or backdrop.
+	I64 sx, sy;
+
+	if (!yd_dance || x < 0 || y < 0 || x >= YD_DF_W || y >= YD_DF_H)
+		return 0;
+	fr = fr % YD_DF_N;
+	if (fr < 0)
+		fr += YD_DF_N;
+	sx = (fr % YD_DF_COLS) * YD_DF_W + x;
+	sy = (fr / YD_DF_COLS) * YD_DF_H + y;
+	if (sx >= yd_dance_w || sy >= yd_dance_h)
+		return 0;
+	return yd_dance[sy * yd_dance_w + sx];
+}
+
+U0 YDDanceBlit(I64 cx, I64 cy, I64 zoom, I64 fr, F64 t,
+			   I64 wob, I64 chroma, I64 bright, I64 tint)
+{//Chunky-pixel blit with the effects an Atari/Amiga part would use:
+//  - per-ROW sine displacement (the classic wobble/ripple)
+//  - RGB channel split, widening with the beat
+//  - `tint` mixes the real colour toward the act's amber/magenta
+//Each source pixel becomes a zoom x zoom block, drawn additively, so the
+//phosphor trail smears it.
+	I64 x, y, i, j, dx, px, py, r, g, b, v;
+	U32 c;
+	F64 fy;
+
+	for (y = 0; y < YD_DF_H; y++)
+	{
+		fy = ToF64(y);
+		//row wobble: two out-of-phase sines so it never looks periodic
+		dx = ToI64(ToF64(wob) * (Sin(fy * 0.16 + t * 3.4) +
+								 0.5 * Sin(fy * 0.07 - t * 2.1)));
+		py = cy + y * zoom;
+		for (x = 0; x < YD_DF_W; x++)
+		{
+			c = YDDancePix(fr, x, y);
+			if (c >> 24 & 0xFF)			//alpha: the matte, no threshold needed
+			{
+				px = cx + x * zoom + dx;
+				r  = c >> 16 & 0xFF;
+				g  = c >> 8 & 0xFF;
+				b  = c & 0xFF;
+				if (tint)
+				{//pull toward amber/magenta by `tint` percent
+					v = (r * 30 + g * 59 + b * 11) / 100;
+					r = (r * (100 - tint) + v * tint) / 100;
+					g = (g * (100 - tint) + v * tint * 3 / 4) / 100;
+					b = (b * (100 - tint) + v * tint / 2) / 100;
+				}
+				r = r * bright / 255;
+				g = g * bright / 255;
+				b = b * bright / 255;
+				for (j = 0; j < zoom; j++)
+					for (i = 0; i < zoom; i++)
+					{//channel split
+						YDAdd(px + i - chroma, py + j, r, 0, 0);
+						YDAdd(px + i, py + j, 0, g, 0);
+						YDAdd(px + i + chroma, py + j, 0, 0, b);
+					}
+			}
+		}
+	}
+}
+
+/* ---------------- act 4: tribute figures ---------------- */
+
+U0 YDBird(I64 cx, I64 cy, I64 sc, F64 flap, I64 r, I64 g, I64 b)
+{
+	I64 w = ToI64(ToF64(sc) * 1.15 * Sin(flap));
+	I64 d = sc / 2;
+
+	if (d < 1)
+		d = 1;
+	//wings
+	YDLine(cx, cy, cx - 2 * sc, cy - w, r, g, b);
+	YDLine(cx - 2 * sc, cy - w, cx - 3 * sc, cy - w / 2 + d, r, g, b);
+	YDLine(cx, cy, cx + 2 * sc, cy - w, r, g, b);
+	YDLine(cx + 2 * sc, cy - w, cx + 3 * sc, cy - w / 2 + d, r, g, b);
+	//body + tail + beak
+	YDLine(cx - d, cy - d, cx + sc, cy, r, g, b);
+	YDLine(cx - d, cy + d, cx + sc, cy, r, g, b);
+	YDLine(cx - d, cy - d, cx - d, cy + d, r, g, b);
+	YDLine(cx + sc, cy, cx + sc + d, cy, r, g, b);
+}
+
+U0 YDLimb(F64 x, F64 y, F64 a1, F64 l1, F64 a2, F64 l2,
+		  I64 r, I64 g, I64 b)
+{//Two-bone limb by forward kinematics. Angles are screen-space radians:
+//0 = +x (right), pi/2 = +y, and +y is DOWN. a2 is the joint bend, relative
+//to the parent bone. Mirroring a limb = (pi - a1, -a2).
+	F64 x1 = x + l1 * Cos(a1), y1 = y + l1 * Sin(a1);
+	F64 x2 = x1 + l2 * Cos(a1 + a2), y2 = y1 + l2 * Sin(a1 + a2);
+
+	YDLine(ToI64(x), ToI64(y), ToI64(x1), ToI64(y1), r, g, b);
+	YDLine(ToI64(x1), ToI64(y1), ToI64(x2), ToI64(y2), r, g, b);
+}
+
+U0 YDDancer(I64 cx, I64 cy, I64 sc, F64 ph, I64 r, I64 g, I64 b)
+{//The dance. Hips shift on the beat, shoulders counter-rotate, the body drops
+//on the double-time bounce, legs step in opposition, arms stay up.
+	F64 L	= ToF64(sc);
+	F64 b1	= Sin(ph);			//beat: weight shift left/right
+	F64 b2	= Sin(ph * 2.0);	//double-time bounce
+	F64 hx, hy, shx, shy, hdx, hdy, aR, eR, lR, lL, kR, kL;
+	I64 i, hr = sc * 3 / 4, ix, iy;
+
+	hx	= ToF64(cx) + 0.75 * L * b1;
+	hy	= ToF64(cy) + 0.30 * L * b2;
+	shx = hx - 0.55 * L * b1;	//counter-rotation gives the torso its twist
+	shy = hy - 3.20 * L;
+	hdx = shx + 0.35 * L * b1;	//head leads the shoulders
+	hdy = shy - 1.50 * L;
+
+	YDLine(ToI64(shx), ToI64(shy), ToI64(hx), ToI64(hy), r, g, b);	//spine
+
+	ix = ToI64(hdx);
+	iy = ToI64(hdy);
+	for (i = 0; i < 10; i++)	//head
+		YDLine(ix + ToI64(ToF64(hr) * Cos(2 * pi * ToF64(i) / 10.0)),
+			   iy + ToI64(ToF64(hr) * Sin(2 * pi * ToF64(i) / 10.0)),
+			   ix + ToI64(ToF64(hr) * Cos(2 * pi * ToF64(i + 1) / 10.0)),
+			   iy + ToI64(ToF64(hr) * Sin(2 * pi * ToF64(i + 1) / 10.0)),
+			   r, g, b);
+	YDLine(ix - hr, iy - hr / 3, ix + hr, iy - hr / 3, r, g, b);	//shades
+
+	aR = -1.25 + 0.55 * b1;
+	eR = 0.70 + 0.30 * b1;
+	YDLimb(shx, shy, aR, 1.25 * L, eR, 1.15 * L, r, g, b);
+	YDLimb(shx, shy, pi + 1.25 + 0.55 * b1, 1.25 * L,
+		   -(0.70 - 0.30 * b1), 1.15 * L, r, g, b);
+
+	//Legs: thigh splays out, then the knee angle is taken relative to vertical
+	//(a2 = pi/2 - a1) so the shin hangs straight. The step is added outward on
+	//each side.
+	lR = pi / 2 - 0.40 + 0.26 * b1;
+	kR = (pi / 2 - lR) - 0.34 * (0.5 + 0.5 * b1);
+	lL = pi / 2 + 0.40 + 0.26 * b1;
+	kL = (pi / 2 - lL) + 0.34 * (0.5 - 0.5 * b1);
+	YDLimb(hx, hy, lR, 1.45 * L, kR, 1.35 * L, r, g, b);
+	YDLimb(hx, hy, lL, 1.45 * L, kL, 1.35 * L, r, g, b);
+}
+
+
+U0 YDEdgeAdd(I64 a, I64 b)
+{
+	if (yd_ne >= YD_MAXE)
+		return;
+	yd_ea[yd_ne] = a;
+	yd_eb[yd_ne] = b;
+	yd_ne++;
+}
+
+U0 YDEdgesByLen(F64 target)
+{//Connect every vertex pair whose separation is ~target.
+	I64 i, j;
+	F64 dx, dy, dz, d2, lo = target * target * 0.85, hi = target * target * 1.15;
+
+	yd_ne = 0;
+	for (i = 0; i < yd_nv; i++)
+		for (j = i + 1; j < yd_nv; j++)
+		{
+			dx = yd_vx[i] - yd_vx[j];
+			dy = yd_vy[i] - yd_vy[j];
+			dz = yd_vz[i] - yd_vz[j];
+			d2 = dx * dx + dy * dy + dz * dz;
+			if (lo < d2 < hi)
+				YDEdgeAdd(i, j);
+		}
+}
+
+U0 YDVert(F64 x, F64 y, F64 z)
+{
+	if (yd_nv >= YD_MAXV)
+		return;
+	yd_vx[yd_nv] = x;
+	yd_vy[yd_nv] = y;
+	yd_vz[yd_nv] = z;
+	yd_nv++;
+}
+
+U0 YDMeshCube()
+{//F64 loop vars throughout: YDVert takes F64, and an I64 argument is not
+//converted at the call site.
+	F64 i, j, k;
+
+	yd_nv = 0;
+	for (i = -1.0; i <= 1.0; i += 2.0)
+		for (j = -1.0; j <= 1.0; j += 2.0)
+			for (k = -1.0; k <= 1.0; k += 2.0)
+				YDVert(i, j, k);
+	YDEdgesByLen(2.0);
+}
+
+U0 YDMeshIco()
+{//Icosahedron: (0, +-1, +-p) and its two cyclic permutations. Edge length 2.
+	F64 p = 1.6180339887;
+	F64 a, b;
+
+	yd_nv = 0;
+	for (a = -1.0; a <= 1.0; a += 2.0)
+		for (b = -1.0; b <= 1.0; b += 2.0)
+		{
+			YDVert(0.0, a, b * p);
+			YDVert(a, b * p, 0.0);
+			YDVert(b * p, 0.0, a);
+		}
+	YDEdgesByLen(2.0);
+}
+
+U0 YDMeshTorus()
+{
+	I64 nu = 20, nv = 10, i, j;
+	F64 R = 1.5, r = 0.55, u, v, cu, su, cv, sv;
+
+	yd_nv = 0;
+	yd_ne = 0;
+	for (i = 0; i < nu; i++)
+		for (j = 0; j < nv; j++)
+		{
+			u  = 2 * pi * ToF64(i) / ToF64(nu);
+			v  = 2 * pi * ToF64(j) / ToF64(nv);
+			cu = Cos(u);
+			su = Sin(u);
+			cv = Cos(v);
+			sv = Sin(v);
+			YDVert((R + r * cv) * cu, (R + r * cv) * su, r * sv);
+		}
+	for (i = 0; i < nu; i++)
+		for (j = 0; j < nv; j++)
+		{
+			YDEdgeAdd(i * nv + j, ((i + 1) % nu) * nv + j);
+			YDEdgeAdd(i * nv + j, i * nv + (j + 1) % nv);
+		}
+}
+
+U0 YDMeshGrid(F64 phase)
+{//Sine terrain, ~380 verts, rebuilt every frame.
+	I64 nx = 22, nz = 16, i, j;
+	F64 x, z;
+
+	yd_nv = 0;
+	yd_ne = 0;
+	for (j = 0; j < nz; j++)
+		for (i = 0; i < nx; i++)
+		{
+			x = ToF64(i - nx / 2) * 0.34;
+			z = ToF64(j - nz / 2) * 0.42;
+			YDVert(x, 0.55 * Sin(x * 1.6 + phase) * Cos(z * 1.2 - phase * 0.7) - 0.7, z);
+		}
+	for (j = 0; j < nz; j++)
+		for (i = 0; i < nx; i++)
+		{
+			if (i + 1 < nx)
+				YDEdgeAdd(j * nx + i, j * nx + i + 1);
+			if (j + 1 < nz)
+				YDEdgeAdd(j * nx + i, (j + 1) * nx + i);
+		}
+}
+
+U0 YDBox(F64 x0, F64 y0, F64 z0, F64 x1, F64 y1, F64 z1)
+{//Axis-aligned wireframe box appended to the current mesh: 8 verts, 12 edges.
+	I64 b = yd_nv;
+
+	YDVert(x0, y0, z0);	YDVert(x1, y0, z0);
+	YDVert(x1, y1, z0);	YDVert(x0, y1, z0);
+	YDVert(x0, y0, z1);	YDVert(x1, y0, z1);
+	YDVert(x1, y1, z1);	YDVert(x0, y1, z1);
+	if (yd_nv != b + 8)
+		return;	//pool ran out mid-box; do not emit dangling edges
+	YDEdgeAdd(b + 0, b + 1);	YDEdgeAdd(b + 1, b + 2);
+	YDEdgeAdd(b + 2, b + 3);	YDEdgeAdd(b + 3, b + 0);
+	YDEdgeAdd(b + 4, b + 5);	YDEdgeAdd(b + 5, b + 6);
+	YDEdgeAdd(b + 6, b + 7);	YDEdgeAdd(b + 7, b + 4);
+	YDEdgeAdd(b + 0, b + 4);	YDEdgeAdd(b + 1, b + 5);
+	YDEdgeAdd(b + 2, b + 6);	YDEdgeAdd(b + 3, b + 7);
+}
+
+U0 YDRing(F64 cx, F64 cy, F64 cz, F64 rad, I64 n)
+{//Closed ring in the XY plane at depth cz, appended to the current mesh.
+	I64 i, b = yd_nv;
+	F64 a;
+
+	for (i = 0; i < n; i++)
+	{
+		a = 2 * pi * ToF64(i) / ToF64(n);
+		YDVert(cx + rad * Cos(a), cy + rad * Sin(a), cz);
+	}
+	for (i = 0; i < n; i++)
+		YDEdgeAdd(b + i, b + (i + 1) % n);
+}
+
+U0 YDMeshVan()
+{//The van. Y is DOWN: the roof is negative, the road is +0.55.
+	yd_nv = 0;
+	yd_ne = 0;
+	YDBox(-1.15, -0.30, -0.55,  1.15, 0.55, 0.55);	//body
+	YDBox(-0.35, -0.78, -0.50,  0.95, -0.30, 0.50);	//raised roof
+	YDBox( 0.95, -0.20, -0.45,  1.30, 0.30, 0.45);	//bonnet
+	YDRing(-0.62, 0.55, -0.58, 0.26, 10);			//wheels
+	YDRing(-0.62, 0.55,  0.58, 0.26, 10);
+	YDRing( 0.72, 0.55, -0.58, 0.26, 10);
+	YDRing( 0.72, 0.55,  0.58, 0.26, 10);
+}
+
+U0 YDMeshCrown()
+{//Crown: a base ring with alternating spikes. High priest of the temple.
+	I64 i, n = 12, b;
+	F64 a, rad = 1.0, y;
+
+	yd_nv = 0;
+	yd_ne = 0;
+	YDRing(0.0, 0.45, 0.0, rad, n);		//base band
+	b = yd_nv;
+	for (i = 0; i < n; i++)
+	{
+		a = 2 * pi * ToF64(i) / ToF64(n);
+		y = -0.55;
+		if (i & 1)
+			y = 0.05;
+		YDVert(rad * Cos(a), y, rad * Sin(a));
+	}
+	for (i = 0; i < n; i++)
+	{
+		YDEdgeAdd(b + i, b + (i + 1) % n);	//the zigzag itself
+		YDEdgeAdd(i, b + i);				//down to the band
+	}
+}
+
+/* ---- logo morph: TempleOS sword+pediment  <->  the ZealOS Z ---- */
+//Both shapes are stored as the SAME number of points, laid out as 4 strokes of
+//16, so morphing is a straight per-vertex lerp and the edge list never changes.
+//Each stroke is authored as a short control polyline and resampled to exactly
+//YD_MPTS evenly spaced points.
+
+#define YD_MSTROKES	4
+#define YD_MPTS		16
+#define YD_MORPH_N	(YD_MSTROKES * YD_MPTS)
+
+F64 yd_max[YD_MORPH_N], yd_may[YD_MORPH_N];	//shape A: TempleOS logo
+F64 yd_mbx[YD_MORPH_N], yd_mby[YD_MORPH_N];	//shape B: the Z
+F64 yd_cpx[32], yd_cpy[32];
+I64 yd_ncp = 0;
+Bool yd_morph_built = FALSE;
+
+U0 YDCpReset()
+{
+	yd_ncp = 0;
+}
+
+U0 YDCp(F64 x, F64 y)
+{
+	if (yd_ncp < 32)
+	{
+		yd_cpx[yd_ncp] = x;
+		yd_cpy[yd_ncp] = y;
+		yd_ncp++;
+	}
+}
+
+U0 YDStrokeBake(F64 *ox, F64 *oy, I64 base)
+{//Walk the control polyline and emit YD_MPTS points spaced evenly by arc
+//length, so both shapes' points correspond.
+	F64 seg[32], total = 0, want, acc, f, dx, dy;
+	I64 i, k, s;
+
+	for (i = 0; i < yd_ncp - 1; i++)
+	{
+		dx = yd_cpx[i + 1] - yd_cpx[i];
+		dy = yd_cpy[i + 1] - yd_cpy[i];
+		seg[i] = Sqrt(dx * dx + dy * dy);
+		total += seg[i];
+	}
+	if (total <= 0.0 || yd_ncp < 2)
+	{
+		for (k = 0; k < YD_MPTS; k++)
+		{
+			ox[base + k] = 0;
+			oy[base + k] = 0;
+		}
+		return;
+	}
+	for (k = 0; k < YD_MPTS; k++)
+	{
+		want = total * ToF64(k) / ToF64(YD_MPTS - 1);
+		acc	 = 0;
+		s	 = 0;
+		while (s < yd_ncp - 2 && acc + seg[s] < want)
+		{
+			acc += seg[s];
+			s++;
+		}
+		f = 0;
+		if (seg[s] > 0.0)
+			f = (want - acc) / seg[s];
+		ox[base + k] = yd_cpx[s] + (yd_cpx[s + 1] - yd_cpx[s]) * f;
+		oy[base + k] = yd_cpy[s] + (yd_cpy[s + 1] - yd_cpy[s]) * f;
+	}
+}
+
+U0 YDBuildMorph()
+{//Author both shapes once. Y is DOWN.
+	//--- A: TempleOS. Sword on the diagonal under a temple pediment.
+	//Four strokes: blade, guard, pediment, hanging beam.
+	YDCpReset;					//0: blade (closed sliver)
+	YDCp(1.45, -1.45);
+	YDCp(-0.28, 0.42);
+	YDCp(-0.42, 0.28);
+	YDCp(1.45, -1.45);
+	YDStrokeBake(yd_max, yd_may, 0 * YD_MPTS);
+
+	YDCpReset;					//1: crossguard, then the grip
+	YDCp(0.00, 0.70);
+	YDCp(-0.70, 0.00);
+	YDCp(-0.35, 0.35);
+	YDCp(-0.82, 0.82);
+	YDStrokeBake(yd_max, yd_may, 1 * YD_MPTS);
+
+	YDCpReset;					//2: pediment, closed triangle
+	YDCp(-1.35, -0.45);
+	YDCp(0.00, -1.15);
+	YDCp(1.35, -0.45);
+	YDCp(-1.35, -0.45);
+	YDStrokeBake(yd_max, yd_may, 2 * YD_MPTS);
+
+	YDCpReset;					//3: beam under the roof + its two hangers
+	YDCp(-0.72, -0.08);
+	YDCp(-0.72, -0.45);
+	YDCp(0.72, -0.45);
+	YDCp(0.72, -0.08);
+	YDStrokeBake(yd_max, yd_may, 3 * YD_MPTS);
+
+	//--- B: the ZealOS Z.
+	YDCpReset;					//0: outline (closed)
+	YDCp(-0.90, -1.00);
+	YDCp(0.90, -1.00);
+	YDCp(0.90, -0.60);
+	YDCp(-0.15, 0.60);
+	YDCp(0.90, 0.60);
+	YDCp(0.90, 1.00);
+	YDCp(-0.90, 1.00);
+	YDCp(-0.90, 0.60);
+	YDCp(0.15, -0.60);
+	YDCp(-0.90, -0.60);
+	YDCp(-0.90, -1.00);
+	YDStrokeBake(yd_mbx, yd_mby, 0 * YD_MPTS);
+
+	YDCpReset;					//1: inner diagonal
+	YDCp(0.15, -0.60);
+	YDCp(-0.15, 0.60);
+	YDStrokeBake(yd_mbx, yd_mby, 1 * YD_MPTS);
+
+	YDCpReset;					//2: top bar underside
+	YDCp(-0.90, -0.60);
+	YDCp(0.90, -0.60);
+	YDStrokeBake(yd_mbx, yd_mby, 2 * YD_MPTS);
+
+	YDCpReset;					//3: bottom bar topside
+	YDCp(-0.90, 0.60);
+	YDCp(0.90, 0.60);
+	YDStrokeBake(yd_mbx, yd_mby, 3 * YD_MPTS);
+
+	yd_morph_built = TRUE;
+}
+
+U0 YDMeshMorph(F64 f)
+{//f = 0 -> TempleOS, 1 -> Z. Flat in Z, so it collapses to a line edge-on.
+	I64 i, s, k;
+
+	if (!yd_morph_built)
+		YDBuildMorph;
+	yd_nv = 0;
+	yd_ne = 0;
+	for (i = 0; i < YD_MORPH_N; i++)
+		YDVert(yd_max[i] + (yd_mbx[i] - yd_max[i]) * f,
+			   yd_may[i] + (yd_mby[i] - yd_may[i]) * f, 0.0);
+	for (s = 0; s < YD_MSTROKES; s++)
+		for (k = 0; k < YD_MPTS - 1; k++)
+			YDEdgeAdd(s * YD_MPTS + k, s * YD_MPTS + k + 1);
+}
+
+I64 yd_city_seed = 12345;
+
+I64 YDRnd()
+{//Deterministic LCG: the skyline must be stable frame to frame.
+	yd_city_seed = (yd_city_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+	return yd_city_seed >> 8;
+}
+
+#define YD_CITY_SPAN	18.0
+#define YD_GROUND		1.30	//Y is down: this is the street plane
+
+U0 YDMeshCity(F64 phase)
+{//Neon skyline scrolling toward the camera, over a synthwave ground grid.
+//Rebuilt per frame: the depth wrap is arithmetic on `phase`.
+	I64 i, n = 18, b;
+	F64 x, z, h, w, gz;
+
+	yd_nv = 0;
+	yd_ne = 0;
+	yd_city_seed = 987654321;	//reseed: identical skyline every frame
+
+	for (i = -4; i <= 4; i++)
+	{
+		b = yd_nv;
+		YDVert(ToF64(i) * 1.5, YD_GROUND, 0.5);
+		YDVert(ToF64(i) * 1.5, YD_GROUND, YD_CITY_SPAN);
+		YDEdgeAdd(b, b + 1);
+	}
+	for (i = 0; i < 12; i++)
+	{
+		gz = ToF64(i) * 1.5 - phase;
+		while (gz < 0.5)
+			gz += 18.0;
+		b = yd_nv;
+		YDVert(-6.0, YD_GROUND, gz);
+		YDVert(6.0, YD_GROUND, gz);
+		YDEdgeAdd(b, b + 1);
+	}
+
+	for (i = 0; i < n; i++)
+	{
+		x = ToF64(YDRnd() % 1000) / 1000.0 * 11.0 - 5.5;
+		if (-1.1 < x < 1.1)
+			x += 2.2;	//keep a corridor down the middle to fly through
+		h = 0.9 + ToF64(YDRnd() % 1000) / 1000.0 * 3.0;
+		w = 0.18 + ToF64(YDRnd() % 1000) / 1000.0 * 0.28;
+		z = ToF64(YDRnd() % 1000) / 1000.0 * YD_CITY_SPAN;
+		z = z - phase;
+		while (z < 0.5)
+			z += YD_CITY_SPAN;	//recycle behind the far plane
+		YDBox(x - w, YD_GROUND - h, z - w, x + w, YD_GROUND, z + w);
+	}
+}
+
+
+U0 YDRotate(F64 ax, F64 ay, F64 az)
+{
+	I64 i;
+	F64 sa = Sin(ax), ca = Cos(ax);
+	F64 sb = Sin(ay), cb = Cos(ay);
+	F64 sc = Sin(az), cc = Cos(az);
+	F64 x, y, z, x1, y1, z1;
+
+	for (i = 0; i < yd_nv; i++)
+	{
+		x = yd_vx[i];
+		y = yd_vy[i];
+		z = yd_vz[i];
+		y1 = y * ca - z * sa;	//X
+		z1 = y * sa + z * ca;
+		x1 = x * cb + z1 * sb;	//Y
+		z  = z1 * cb - x * sb;
+		x  = x1 * cc - y1 * sc;	//Z
+		y  = x1 * sc + y1 * cc;
+		yd_rx[i] = x;
+		yd_ry[i] = y;
+		yd_rz[i] = z;
+	}
+}
+
+U0 YDDrawChan(F64 dist, F64 focal, I64 r, I64 g, I64 b)
+{//Perspective-project the rotated mesh at one focal length and stroke its
+//edges into one colour channel. Called three times per frame with slightly
+//different focals; that difference is the chromatic aberration.
+	I64 i, a, e, x1, y1, x2, y2;
+	F64 z, cx = YD_W / 2, cy = YD_H / 2;
+	//px/py/ok are globals, not locals: 512 verts would put ~9K on a task
+	//stack, three times per frame.
+
+	for (i = 0; i < yd_nv; i++)
+	{
+		z = yd_rz[i] + dist;
+		if (z < 0.25)
+		{
+			yd_ok[i] = FALSE;
+			yd_px[i] = 0;
+			yd_py[i] = 0;
+		}
+		else
+		{
+			yd_ok[i] = TRUE;
+			yd_px[i] = ToI64(cx + yd_rx[i] * focal / z);
+			yd_py[i] = ToI64(cy + yd_ry[i] * focal / z);
+		}
+	}
+	for (e = 0; e < yd_ne; e++)
+	{
+		i = yd_ea[e];
+		a = yd_eb[e];
+		if (yd_ok[i] && yd_ok[a])
+		{//ZealC has no `continue` - invert the guard instead
+			x1 = yd_px[i];
+			y1 = yd_py[i];
+			x2 = yd_px[a];
+			y2 = yd_py[a];
+			YDLine(x1, y1, x2, y2, r, g, b);
+		}
+	}
+}
+
+U0 YDDrawCA(F64 dist, F64 focal, F64 amt, I64 bright)
+{//Three passes, one per channel, focal spread by amt.
+	YDDrawChan(dist, focal * (1.0 + amt), bright, 0, 0);
+	YDDrawChan(dist, focal, 0, bright, 0);
+	YDDrawChan(dist, focal * (1.0 - amt), 0, 0, bright);
+}
+
+
+U0 YDStarsInit()
+{
+	I64 i;
+
+	for (i = 0; i < YD_STARS; i++)
+	{
+		yd_sx[i] = ToF64(RandU16 % 4000) / 1000.0 - 2.0;
+		yd_sy[i] = ToF64(RandU16 % 4000) / 1000.0 - 2.0;
+		yd_sz[i] = ToF64(RandU16 % 6000) / 1000.0 + 0.2;
+	}
+}
+
+U0 YDStars(F64 dt, F64 speed)
+{
+	I64 i, x, y, x2, y2, v;
+	F64 z, cx = YD_W / 2, cy = YD_H / 2, f = 260.0;
+
+	for (i = 0; i < YD_STARS; i++)
+	{
+		yd_sz[i] -= dt * speed;
+		if (yd_sz[i] < 0.2)
+		{
+			yd_sx[i] = ToF64(RandU16 % 4000) / 1000.0 - 2.0;
+			yd_sy[i] = ToF64(RandU16 % 4000) / 1000.0 - 2.0;
+			yd_sz[i] = 6.0;
+		}
+		z = yd_sz[i];
+		x = ToI64(cx + yd_sx[i] * f / z);
+		y = ToI64(cy + yd_sy[i] * f / z);
+		v = ToI64(200.0 / (z + 0.4));
+		if (v > 200)
+			v = 200;
+		if (v < 12)
+			v = 12;
+		x2 = ToI64(cx + yd_sx[i] * f / (z + dt * speed));
+		y2 = ToI64(cy + yd_sy[i] * f / (z + dt * speed));
+		YDLine(x, y, x2, y2, v * 3 / 4, v * 4 / 5, v);
+	}
+}
+
+
+U8 *yd_scroll_msg =
+	"YDE  -  THE Y4M DESKTOP ENVIRONMENT FOR ZEALOS  ...  WRITTEN IN PURE ZEALC: "
+	"NO ELF, NO FFI, NO LIBC, NO CIA, RING 0 ALL THE WAY DOWN  ...  NOTHING "
+	"HERE IS LINKED - THE INFLATER, THE TLS, THE JPEG DECODER AND THE "
+	"JAVASCRIPT ENGINE ARE ALL OURS  ...  TRUECOLOR FRAMEBUFFER AND A COMPILER "
+	"THAT REBUILDS THE WHOLE SYSTEM AT EVERY BOOT  ...  IN MEMORY OF TERRY A. "
+	"DAVIS, 1969-2018, WHO WROTE AN ENTIRE OPERATING SYSTEM BY HIMSELF AND "
+	"CALLED IT A TEMPLE  ...  AN IDIOT ADMIRES COMPLEXITY, A GENIUS ADMIRES "
+	"SIMPLICITY  ...  GREETINGS TO EVERYONE STILL WRITING THEIR OWN OS IN 2026 "
+	" ...  ";
+
+U0 YDScroller(F64 t)
+{
+	I64	 n = StrLen(yd_scroll_msg), i, cw = FONT_WIDTH * 2, x, y;
+	U8	 ch[2];
+	F64	 base = ToF64(YD_W + 40) - t * 78.0;
+	F64	 total = ToF64(n * cw + YD_W + 80);
+	F64	 pos;
+
+	ch[1] = 0;
+	//Wrap the base once per frame: at an hour of uptime base is ~ -280000.
+	while (base < -total)
+		base += total;
+	for (i = 0; i < n; i++)
+	{
+		pos = base + ToF64(i * cw);
+		while (pos < ToF64(-cw))
+			pos += total;	//wrap so the banner is endless
+		x = ToI64(pos);
+		if (-cw <= x <= YD_W)
+		{//only glyphs actually on screen (ZealC has no `continue`)
+			y = ToI64(ToF64(YD_H - 34) + 9.0 * Sin(t * 2.6 + ToF64(i) * 0.32));
+			ch[0] = yd_scroll_msg[i];
+			YDText(x, y, ch, 2, 120, 90, 30);
+			YDText(x, y - 1, ch, 2, 60, 150, 200);
+		}
+	}
+}
+
+
+Bool YDSceneVector(I64 sc, F64 t, F64 lt, F64 pulse)
+{//ACT ONE: clean vector intro. Returns FALSE if sc is out of range.
+	F64 amt, dist;
+	I64 cx = YD_W / 2;
+
+	switch (sc)
+	{
+		case 0:	//icosahedron, gentle
+			if (yd_mesh_id != 0)
+			{
+				YDMeshIco;
+				yd_mesh_id = 0;
+			}
+			YDRotate(t * 0.5, t * 0.73, t * 0.21);
+			dist = 4.8 + 1.0 * Sin(t * 0.7);
+			YDDrawCA(dist, 235.0, 0.012 + 0.010 * pulse, 150);
+			YDTextCA(cx, 30, "YDE", 6, 2);
+			YDTextCA(cx, 78, "DIVINE INTELLECT", 2, 1);
+			break;
+
+		case 1:	//cube, hard aberration, tumbling in close
+			if (yd_mesh_id != 1)
+			{
+				YDMeshCube;
+				yd_mesh_id = 1;
+			}
+			YDRotate(t * 1.1, t * 0.8, t * 0.6);
+			dist = 4.2 + 1.8 * Sin(lt * 0.9);
+			amt	 = 0.030 + 0.026 * pulse;
+			YDDrawCA(dist, 210.0, amt, 170);
+			YDTextCA(cx, 30, "ZEALC ONLY", 3, 3);
+			YDTextCA(cx, 66, "NO ELF  NO FFI  NO LIBC  NO CIA", 2, 1);
+			break;
+
+		case 2:	//torus
+			if (yd_mesh_id != 2)
+			{
+				YDMeshTorus;
+				yd_mesh_id = 2;
+			}
+			YDRotate(0.65 + 0.30 * Sin(t * 0.45), t * 0.35, 0);
+			dist = 4.6 + 0.7 * Sin(t * 0.55);
+			YDDrawCA(dist, 250.0, 0.014 + 0.012 * pulse, 130);
+			YDTextCA(cx, 30, "ZEALOS", 4, 2);
+			YDTextCA(cx, 72, "COMPILES ITSELF AT EVERY BOOT", 2, 1);
+			break;
+
+		case 3:	//flying over sine terrain
+			YDMeshGrid(t * 1.7);	//rebuilt per frame: it has to move
+			yd_mesh_id = 3;
+			YDRotate(0.62, t * 0.10, 0);
+			YDDrawCA(3.4, 230.0, 0.016 + 0.014 * pulse, 120);
+			YDTextCA(cx, 26, "TEMPLEOS", 4, 2);
+			YDTextCA(cx, 68, "640x480  16 COLORS  BY DESIGN", 2, 1);
+			break;
+
+		case 4:	//tribute: fast spin, pulls away
+			if (yd_mesh_id != 4)
+			{
+				YDMeshIco;
+				yd_mesh_id = 4;
+			}
+			YDRotate(t * 1.6, t * 1.9, t * 0.9);
+			dist = 4.2 + lt * 0.30;
+			YDDrawCA(dist, 230.0, 0.010 + 0.030 * pulse, 160);
+			YDTextCA(cx, 28, "TERRY A. DAVIS", 3, 2);
+			YDTextCA(cx, 64, "1969 - 2018", 2, 1);
+			YDTextCA(cx, YD_H / 2 + 96, "AN IDIOT ADMIRES COMPLEXITY", 1, 1);
+			YDTextCA(cx, YD_H / 2 + 110, "A GENIUS ADMIRES SIMPLICITY", 1, 1);
+			break;
+
+		default:
+			//Unreachable (sc is % YD_SCENES), but a HolyC switch throws on an
+			//unmatched value and this runs unattended as a screen saver.
+			return FALSE;
+	}
+	return TRUE;
+}
+
+U0 YDBanner(I64 cx, I64 y, I64 n, I64 seed, I64 sc)
+{
+	I64 i, x0 = cx - n * 8 * sc / 2;
+
+	for (i = 0; i < n; i++)
+		YDKata(x0 + i * 8 * sc, y, seed + i * 5 + yd_frame / 7, sc,
+			   40, 190, 210);
+}
+
+U0 YDSceneGlitch(I64 sc, F64 t, F64 lt, F64 pulse)
+{//ACT TWO: japanese cyberpunk. Same 3D pipeline; the palette goes neon,
+//katakana replaces the vector titles, and YDGlitch tears up every frame.
+	F64 dist, f;
+	I64 cx = YD_W / 2, bright;
+
+	switch (sc)
+	{
+		case 0:	//pure downpour
+			YDRain(0.033, 16);
+			YDBanner(cx, 22, 7, 3, 3);
+			YDTextCA(cx, YD_H - 74, "ZEALOS", 3, 2);
+			break;
+
+		case 1:	//TempleOS logo dissolving into the spinning ZealOS Z
+			YDRain(0.033, 10);
+			//hold the sword ~2.5s, ease across ~3.5s, hold the Z
+			f = (lt - 2.5) / 3.5;
+			if (f < 0.0)
+				f = 0.0;
+			if (f > 1.0)
+				f = 1.0;
+			f = 0.5 - 0.5 * Cos(pi * f);	//ease in/out
+			YDMeshMorph(f);
+			yd_mesh_id = 11;
+			//spin accelerates as it becomes the Z
+			YDRotate(0.10 * Sin(t * 0.7), t * (0.5 + 1.7 * f), 0);
+			dist = 4.2 + 0.4 * Sin(t * 0.4);
+			YDDrawChan(dist, 250.0 * 1.03, 220, 0, 0);
+			YDDrawChan(dist, 250.0, 0, 80, 0);
+			YDDrawChan(dist, 250.0 * 0.97, 0, 0, 230);
+			YDBanner(cx, 18, 6, 17, 2);
+			if (f < 0.5)
+				YDTextCA(cx, YD_H - 70, "TEMPLEOS", 2, 2);
+			else
+				YDTextCA(cx, YD_H - 70, "ZEALOS", 2, 2);
+			break;
+
+		case 2:	//flying the neon skyline
+			YDMeshCity(t * 2.6);
+			yd_mesh_id = 12;
+			YDRotate(0.10 + 0.05 * Sin(t * 0.6), 0.08 * Sin(t * 0.42), 0);
+			bright = ToI64(110.0 + 60.0 * pulse);
+			//Camera distance adds to world Z; small, so near buildings pass the
+			//edge of frame.
+			YDDrawChan(0.8, 245.0 * 1.02, bright, 0, bright / 3);
+			YDDrawChan(0.8, 245.0, 0, bright / 2, bright);
+			YDBanner(cx, 18, 9, 31, 2);
+			YDTextCA(cx, YD_H - 76, "ELECTRIC TEMPLE", 2, 2);
+			break;
+
+		case 3:	//sign-off slab
+			YDRain(0.033, 9);
+			if (yd_mesh_id != 13)
+			{
+				YDMeshCube;
+				yd_mesh_id = 13;
+			}
+			YDRotate(t * 0.9, t * 1.3, t * 0.5);
+			dist = 3.4 + 1.2 * Sin(lt * 0.7);
+			YDDrawCA(dist, 215.0, 0.045 + 0.030 * pulse, 150);
+			YDBanner(cx, 16, 11, 5, 2);
+			YDTextCA(cx, YD_H / 2 - 8, "YDE", 6, 3);
+			YDTextCA(cx, YD_H / 2 + 40, "FOR ZEALOS", 2, 1);
+			break;
+
+		default:
+			break;
+	}
+}
+
+U0 YDSceneAnsi(I64 sc, F64 t, F64 lt, F64 pulse)
+{//ACT THREE: rendered normally, then pushed through YDAnsify into block
+//characters.
+	F64 dist;
+	I64 cx = YD_W / 2, i, y;
+
+	switch (sc)
+	{
+		case 0:	//C64 boot screen: raster bars behind a READY. prompt
+			YDRaster(t, 3);
+			YDAnsify(22);
+			YDTextCA(cx, 40, "**** ZEALOS BASIC V2 ****", 2, 1);
+			YDTextCA(cx, 64, "64K RAM SYSTEM  38911 BASIC BYTES FREE", 1, 0);
+			YDText(48, 100, "READY.", 2, 120, 200, 255);
+			if (ToI64(t * 2.0) & 1)
+				for (y = 0; y < 16; y++)	//blinking block cursor
+					for (i = 0; i < 16; i++)
+						YDAdd(48 + i, 120 + y, 120, 200, 255);
+			break;
+
+		case 1:	//waterfall
+			YDWaterfall(t);
+			YDAnsify(20);
+			YDTextCA(cx, 16, "TEMPLE OF THE FALLS", 2, 1);
+			break;
+
+		case 2:	//the logo again, but as ANSI art this time
+			YDMeshMorph(0.5 - 0.5 * Cos(lt * 0.55));
+			yd_mesh_id = 21;
+			YDRotate(0.12 * Sin(t * 0.6), t * 0.55, 0);
+			dist = 3.2 + 0.4 * Sin(t * 0.5);
+			YDDrawCA(dist, 250.0, 0.015, 230);
+			YDAnsify(20);
+			YDTextCA(cx, 18, "VECTORS IN 80 COLUMNS", 2, 1);
+			break;
+
+		case 3:	//sign-off, C64 palette
+			YDRaster(t, 3);
+			for (i = 0; i < 26; i++)
+			{//a little starfield of full blocks, C64 sprite-ish
+				YDAdd(ToI64(ToF64(YD_W) * 0.5 + 200.0 * Sin(ToF64(i) * 1.7 + t * 0.4)),
+					  ToI64(ToF64(YD_H) * 0.5 + 120.0 * Cos(ToF64(i) * 2.3 + t * 0.31)),
+					  200, 200, 120);
+			}
+			YDAnsify(22);
+			YDTextCA(cx, YD_H / 2 - 40, "IN MEMORY OF", 1, 0);
+			YDTextCA(cx, YD_H / 2 - 22, "TERRY A. DAVIS", 3, 2);
+			YDTextCA(cx, YD_H / 2 + 16, "1969 - 2018", 2, 1);
+			YDTextCA(cx, YD_H / 2 + 48, "GOD SAID 640x480 16 COLORS", 1, 1);
+			break;
+
+		default:
+			break;
+	}
+}
+
+//The bird quote, verbatim, hand-wrapped to 48 columns. The inner quotation
+//marks are single so the ZealC string literals stay simple.
+#define YD_Q_N	12
+U8 *yd_quote[YD_Q_N] = {
+	"WHAT'S REALITY? I DON'T KNOW. WHEN MY BIRD WAS",
+	"LOOKING AT MY COMPUTER MONITOR I THOUGHT 'THAT",
+	"BIRD HAS NO IDEA WHAT HE'S LOOKING AT.' AND YET",
+	"WHAT DOES THE BIRD DO? DOES HE PANIC? NO, HE",
+	"CAN'T REALLY PANIC, HE JUST DOES THE BEST HE",
+	"CAN. IS HE ABLE TO LIVE IN A WORLD WHERE HE'S",
+	"SO IGNORANT? WELL, HE DOESN'T REALLY HAVE A",
+	"CHOICE. THE BIRD IS OKAY EVEN THOUGH HE DOESN'T",
+	"UNDERSTAND THE WORLD. YOU'RE THAT BIRD LOOKING",
+	"AT THE MONITOR, AND YOU'RE THINKING TO YOURSELF,",
+	"I CAN FIGURE THIS OUT. MAYBE YOU HAVE SOME BIRD",
+	"IDEAS. MAYBE THAT'S THE BEST YOU CAN DO."};
+
+U0 YDQuote(F64 lt)
+{
+//whole quote lands around 9s of the 11s scene.
+	I64 n = ToI64(lt * 62.0), i, j, k, len, x0, y;
+	U8	ch[2];
+
+	ch[1] = 0;
+	for (i = 0; i < YD_Q_N && n > 0; i++)
+	{
+		len = StrLen(yd_quote[i]);
+		k	= len;
+		if (k > n)
+			k = n;
+		x0 = YD_W / 2 - len * FONT_WIDTH / 2;
+		y  = 56 + i * 13;
+		for (j = 0; j < k; j++)
+		{
+			ch[0] = yd_quote[i][j];
+			YDText(x0 + j * FONT_WIDTH, y, ch, 1, 210, 190, 120);
+		}
+		if (k < len && ToI64(lt * 6.0) & 1)
+			YDText(x0 + k * FONT_WIDTH, y, "_", 1, 240, 220, 160);
+		n -= k;
+	}
+	if (lt > 9.2)
+		YDTextCA(YD_W / 2, 56 + YD_Q_N * 13 + 10, "- TERRY A. DAVIS", 2, 2);
+}
+
+
+//64-bit showcase. One checkerboard rendered twice. Cell size is tied to the
+//zoom, so the grid stays 8 cells wide at any depth. The left half rounds its
+//coordinates to a 24-bit mantissa (a 32-bit float); the right keeps full F64.
+//Past ~5e4 zoom the left cannot separate neighbouring cells.
+#define YD_M_CELL	4
+
+F64 YDAsF32(F64 v)
+{//Emulate a 32-bit float: keep the exponent, round the mantissa to 24 bits.
+//The step derives from the exponent; a step proportional to the value
+//(|v| * 2^-24) is a no-op. Checked against a float32 round-trip: 1.0 + 7e-10
+//comes back as exactly 1.0.
+	F64 a = v, step;
+
+	if (a < 0)
+		a = -a;
+	if (a <= 0.0)
+		return v;
+	step = Pow(2.0, ToF64(ToI64(Log2(a))) - 23.0);
+	return ToF64(ToI64(v / step)) * step;
+}
+
+U0 YDMandel(F64 lt)
+{
+	F64 zoom = Exp(lt * 1.95), span, u, v, cw;
+	F64 ox = 1.0, oy = 1.0;
+	I64 gx, gy, i, j, iu, iv, r, g, b, half;
+	I64 gw = YD_W / YD_M_CELL, gh = YD_H / YD_M_CELL;
+	U32 *p;
+
+	span = 2.0 / (ToF64(YD_W) * zoom);	//world units per screen pixel
+	cw	 = span * ToF64(YD_W) / 8.0;	//checker cell = 1/8 screen, always
+	half = gw / 2;
+
+	for (gy = 0; gy < gh; gy++)
+		for (gx = 0; gx < gw; gx++)
+		{
+			u = ox + (ToF64(gx * YD_M_CELL) - ToF64(YD_W / 2)) * span;
+			v = oy + (ToF64(gy * YD_M_CELL) - ToF64(YD_H / 2)) * span;
+			if (gx < half)
+			{
+				u = YDAsF32(u);
+				v = YDAsF32(v);
+			}
+			iu = ToI64(u / cw);
+			iv = ToI64(v / cw);
+			if ((iu + iv) & 1)
+			{
+				r = 40 + (iu * 37 & 0x7F);
+				g = 90 + (iv * 53 & 0x7F);
+				b = 150;
+			}
+			else
+			{
+				r = 12;
+				g = 16;
+				b = 40;
+			}
+			for (j = 0; j < YD_M_CELL; j++)
+			{//direct write: full-coverage additive saturates to white
+				p = yd_buf + (gy * YD_M_CELL + j) * YD_W + gx * YD_M_CELL;
+				for (i = 0; i < YD_M_CELL; i++)
+					p[i] = (r << 16) + (g << 8) + b;
+			}
+		}
+	for (gy = 0; gy < YD_H; gy++)		//the divider
+		YDAdd(half * YD_M_CELL, gy, 120, 120, 120);
+}
+
+U0 YDBits(I64 y, U64 val, I64 r, I64 g, I64 b)
+{//64 cells, one per bit of val, MSB left.
+	I64 i, x, w = 8;
+
+	for (i = 0; i < 64; i++)
+	{
+		x = YD_W / 2 - 32 * w + i * w;
+		if (val >> (63 - i) & 1)
+			YDLine(x, y, x + w - 2, y, r, g, b);
+		else
+			YDLine(x, y, x + w - 2, y, r / 6, g / 6, b / 6);
+	}
+}
+
+#define YD_LIN_N	11
+U8 *yd_lineage[YD_LIN_N] = {
+	"TPMOS", "HOPPY", "DOORS", "DAVOS", "J OPERATING SYSTEM", "LOSETHOS",
+	"SPARROWOS", "TEMPLEOS", "ZENITHOS", "ZEALOS", "???"};
+
+U0 YDSceneTribute(I64 sc, F64 t, F64 lt, F64 pulse)
+{//ACT FOUR: vector like act one, in TempleOS amber/gold, no post-processing.
+	F64 dist, a;
+	I64 cx = YD_W / 2, cy = YD_H / 2, i, j, n, x, y, sh;
+	U8  sbuf[96];
+
+	switch (sc)
+	{
+		case 0:	//NIGHT DRIVE - first person, running down the glowies
+			YDRectFill(0, 0, YD_W - 1, YD_H / 2 - 1, 4, 4, 12);		//night sky
+			YDRectFill(0, YD_H / 2, YD_W - 1, YD_H - 1, 8, 7, 9);	//tarmac
+			YDPolyPt(0, cx - 24, YD_H / 2);
+			YDPolyPt(1, cx + 24, YD_H / 2);
+			YDPolyPt(2, YD_W + 260, YD_H);
+			YDPolyPt(3, -260, YD_H);
+			YDPolyFill(4, 18, 17, 22);
+			YDPolyPt(0, cx - 30, YD_H / 2 + 4);
+			YDPolyPt(1, cx + 30, YD_H / 2 + 4);
+			YDPolyPt(2, cx + 300, YD_H - 30);
+			YDPolyPt(3, cx - 300, YD_H - 30);
+			YDPolyFill(4, 30, 29, 24);
+			YDPolyPt(0, cx - 16, YD_H / 2 + 4);
+			YDPolyPt(1, cx + 16, YD_H / 2 + 4);
+			YDPolyPt(2, cx + 170, YD_H - 30);
+			YDPolyPt(3, cx - 170, YD_H - 30);
+			YDPolyFill(4, 46, 45, 36);
+			for (i = 0; i < 12; i++)
+			{
+				a = ToF64(i) * 0.5 - t * 2.4;
+				while (a < 0.06)
+					a += 6.0;
+				y  = YD_H / 2 + ToI64(26.0 / a);
+				n  = 1 + ToI64(3.0 / a);
+				sh = ToI64(9.0 / a);
+				if (0 <= y < YD_H)
+					YDRectFill(cx - n, y, cx + n, y + sh, 120, 115, 80);
+			}
+			for (i = 0; i < YD_AGENTS; i++)
+			{
+				yd_agz[i] -= 0.055;
+				if (yd_agz[i] < 0.10)
+				{//run over: reset far away and count it
+					yd_agz[i] = 3.0 + ToF64(RandU16 % 240) / 100.0;
+					yd_agx[i] = ToF64(RandU16 % 200) / 100.0 - 1.0;
+					yd_aghit++;
+					yd_agflash = 1.0;
+				}
+				a  = yd_agz[i];
+				y  = YD_H / 2 + ToI64(26.0 / a);
+				n  = ToI64(12.0 / a);			//half width
+				sh = ToI64(58.0 / a);			//height
+				x  = cx + ToI64(yd_agx[i] * 120.0 / a);
+				if (n > 0 && 0 <= y < YD_H + 200)
+				{
+					YDRectFill(x - n / 2, y - sh, x + n / 2, y - sh / 3,
+							   40, 230, 90);
+					YDRectFill(x - n / 3, y - sh - n, x + n / 3, y - sh,
+							   80, 255, 130);
+					YDRectFill(x - n / 2, y - sh / 3, x - n / 8, y, 40, 230, 90);
+					YDRectFill(x + n / 8, y - sh / 3, x + n / 2, y, 40, 230, 90);
+					for (j = 1; j < 4; j++)
+						YDLine(x - n - j * 2, y - sh / 2, x + n + j * 2,
+							   y - sh / 2, 8 / j, 60 / j, 20 / j);
+				}
+			}
+			if (yd_agflash > 0.02)
+			{
+				sh = ToI64(34.0 * yd_agflash);
+				for (i = 0; i < YD_W; i += 2)
+					for (y = 0; y < YD_H; y += 2)
+						YDAdd(i, y, sh / 2, sh, sh * 2 / 3);
+				yd_agflash *= 0.55;		//short, or every hit floods the frame
+			}
+			YDRectFill(0, YD_H - 34, YD_W - 1, YD_H - 1, 0, 0, 0);
+			for (i = 0; i < 30; i++)
+			{
+				a = pi + pi * ToF64(i) / 29.0;
+				YDLine(cx + ToI64(96.0 * Cos(a)), YD_H - 6 + ToI64(58.0 * Sin(a)),
+					   cx + ToI64(96.0 * Cos(a + 0.11)),
+					   YD_H - 6 + ToI64(58.0 * Sin(a + 0.11)), 60, 55, 45);
+			}
+			YDTextCA(cx, 16, "NIGHT DRIVE", 3, 2);
+			YDTextC(cx, 44, "GLOW IN THE DARK AGENTS", 1, 90, 220, 120);
+			StrPrint(sbuf, "RUN OVER: %d", yd_aghit);
+			YDTextC(cx, YD_H - 28, sbuf, 2, 200, 240, 170);
+			break;
+
+		case 1:	//Percival and the birds
+			for (i = 0; i < 9; i++)
+			{
+				a = t * 0.55 + ToF64(i) * 0.7;
+				x = ToI64(ToF64(YD_W) * 0.5 + 210.0 * Sin(a));
+				y = ToI64(ToF64(cy) - 30.0 + 70.0 * Sin(a * 1.7 + ToF64(i)));
+				sh = 5 + i % 3;
+				YDBird(x, y, sh, t * 6.0 + ToF64(i), 210, 180, 90);
+			}
+			YDBird(cx, cy + 40 + ToI64(14.0 * Sin(t * 1.1)), 13, t * 5.0,
+				   240, 210, 130);
+			YDTextCA(cx, 24, "PERCIVAL", 3, 2);
+			YDTextCA(cx, YD_H - 48, "THAT BIRD HAS NO IDEA", 2, 2);
+			break;
+
+		case 2:	//THE DANCE - the real footage, manipulated
+			a  = t * 15.0;				//sprite playback rate
+			n  = ToI64(a);				//current frame
+			for (i = 0; i < 22; i++)
+			{
+				sh = 18 + i * 7;
+				y  = 18 + i * 5;
+				YDLine(cx - sh, y, cx - sh + 6, y, 26, 20, 8);
+				YDLine(cx + sh - 6, y, cx + sh, y, 26, 20, 8);
+			}
+			if (Sin(t * 4.4) > 0.86)
+				for (i = 0; i < YD_W; i += 3)
+					for (y = 0; y < YD_H; y += 3)
+						YDAdd(i, y, 18, 13, 5);
+			YDDanceBlit(cx - 150 - YD_DF_W, cy - 84, 2, n - 6, t, 3, 1, 78, 55);
+			YDDanceBlit(cx + 150, cy - 84, 2, n - 12, t, 3, 1, 78, 55);
+			YDDanceBlit(cx - YD_DF_W * 3 / 2, cy - 118, 3, n, t,
+						//bright stays under 255: additive blending and the phosphor
+						//trail stack to roughly 4x a single frame.
+						2 + ToI64(3.0 * pulse), 1 + ToI64(3.0 * pulse), 150,
+						ToI64(30.0 * pulse));
+			for (i = 0; i < 5; i++)
+			{
+				sh = ToI64(60.0 + 170.0 * pulse) - i * 20;
+				if (sh > 0)
+					YDLine(cx - sh, cy + 142 + i * 3, cx + sh, cy + 142 + i * 3,
+						   90 - i * 14, 68 - i * 10, 22);
+			}
+			YDTextCA(cx, 18, "THE DANCE", 3, 2);
+			YDTextC(cx, YD_H - 26, "GOT THE MOVES", 2, 190, 150, 70);
+			break;
+
+		case 3:	//the bird quote, in full
+			for (i = 0; i < 5; i++)
+			{
+				a = t * 0.35 + ToF64(i) * 1.3;
+				YDBird(ToI64(ToF64(YD_W) * 0.5 + 250.0 * Sin(a)),
+					   30 + ToI64(18.0 * Sin(a * 1.9)), 4 + i % 2,
+					   t * 5.0 + ToF64(i), 70, 58, 26);
+			}
+			YDQuote(lt);
+			break;
+
+		case 4:	//64-BIT: Mandelbrot in F64, and the register itself
+			YDMandel(lt);
+			YDTextCA(cx, 10, "64-BIT", 4, 3);
+			YDTextC(cx / 2, 44, "32-BIT FLOAT", 2, 255, 150, 110);
+			YDTextC(cx + cx / 2, 44, "64-BIT DOUBLE", 2, 150, 255, 190);
+			YDTextC(cx / 2, 62, "24-BIT MANTISSA", 1, 200, 120, 90);
+			YDTextC(cx + cx / 2, 62, "52-BIT MANTISSA", 1, 120, 200, 150);
+			sh = ToI64(lt * 1.95 / 2.302585);	//ln -> log10
+			StrPrint(sbuf, "SAME VIEW, SAME CODE   ZOOM x1E%02d", sh);
+			YDTextC(cx, YD_H - 46, sbuf, 1, 230, 210, 160);
+			if (sh >= 5)
+				YDTextC(cx, YD_H - 32,
+						"THE LEFT HALF HAS RUN OUT OF NUMBERS", 1,
+						255, 140, 90);
+			yd_hash = yd_hash * 6364136223846793005 + 1442695040888963407;
+			YDBits(YD_H - 16, yd_hash, 120, 220, 255);
+			break;
+
+		case 5:	//high priest
+			if (yd_mesh_id != 33)
+			{
+				YDMeshCrown;
+				yd_mesh_id = 33;
+			}
+			YDRotate(0.30 + 0.10 * Sin(t * 0.4), t * 0.65, 0);
+			dist = 4.0 + 0.4 * Sin(t * 0.5);
+			YDDrawChan(dist, 250.0 * 1.014, 230, 0, 0);
+			YDDrawChan(dist, 250.0, 0, 190, 0);
+			YDDrawChan(dist, 250.0 * 0.986, 0, 0, 70);
+			YDTextCA(cx, 24, "HIGH PRIEST", 3, 2);
+			YDTextCA(cx, YD_H - 60, "OF THE THIRD TEMPLE", 2, 1);
+			break;
+
+		case 6:	//the lineage, one link at a time
+			//11 links at 24px pitch end at y=260; the footer sits at
+			//YD_H-40.
+			n = ToI64(lt / 0.85);
+			if (n > YD_LIN_N - 1)
+				n = YD_LIN_N - 1;
+			for (i = 0; i <= n; i++)
+			{
+				y = 20 + i * 24;
+				if (i == n && i < YD_LIN_N - 1)
+					YDTextCA(cx, y, yd_lineage[i], 2, 2);	//newest arrives lit
+				else if (i < YD_LIN_N - 1)
+					YDText(cx - StrLen(yd_lineage[i]) * FONT_WIDTH,
+						   y, yd_lineage[i], 2, 90, 70, 25);
+				if (i < n)
+					YDText(cx - FONT_WIDTH, y + 16, "v", 1, 70, 55, 20);
+			}
+			if (n >= YD_LIN_N - 1 && ToI64(t * 2.0) & 1)
+				YDTextCA(cx, 20 + (YD_LIN_N - 1) * 24, "???", 2, 3);
+			YDTextCA(cx, YD_H - 40, "THE TEMPLE OUTLIVED THE BUILDER", 1, 1);
+			break;
+
+		default:
+			break;
+	}
+}
+
+//After "Eon" by The Black Lotus (Amiga, Revision 2019): a near-monochrome
+//deep-blue palette of about six steps, ordered (Bayer) dithering between
+//them, crushed blacks and one bright source. These scenes are per-pixel
+//intensity fields pushed through YDShade(), with solid black polygons
+//composited on top for the silhouettes.
+
+#define YD_PAL_N	6
+U32 yd_eon_pal[YD_PAL_N] = {
+	0x00000000, 0x0003070F, 0x000A1730, 0x0014335F, 0x002E6BA8, 0x008FD8FF};
+//Active ramp. Explicit initialiser: globals are not zeroed by the JIT.
+U32 *yd_pal_cur = &yd_eon_pal[0];
+
+//Standard 8x8 Bayer threshold matrix, 0..63.
+I64 yd_bayer[64] = {
+	 0, 32,  8, 40,  2, 34, 10, 42,
+	48, 16, 56, 24, 50, 18, 58, 26,
+	12, 44,  4, 36, 14, 46,  6, 38,
+	60, 28, 52, 20, 62, 30, 54, 22,
+	 3, 35, 11, 43,  1, 33,  9, 41,
+	51, 19, 59, 27, 49, 17, 57, 25,
+	15, 47,  7, 39, 13, 45,  5, 37,
+	63, 31, 55, 23, 61, 29, 53, 21};
+
+U0 YDShade(I64 x, I64 y, I64 v)
+{//Ordered-dither intensity v (0..255) into the palette and write it directly.
+//Take the exact level, then push up one step when the remainder beats this
+//pixel's Bayer threshold.
+	I64 s, lvl, rem;
+
+	if (x < 0 || y < 0 || x >= YD_W || y >= YD_H)
+		return;
+	if (v < 0)
+		v = 0;
+	if (v > 255)
+		v = 255;
+	s	= v * (YD_PAL_N - 1);
+	lvl = s / 255;
+	rem = s % 255;
+	if (rem * 64 > yd_bayer[(y & 7) * 8 + (x & 7)] * 255)
+		lvl++;
+	if (lvl > YD_PAL_N - 1)
+		lvl = YD_PAL_N - 1;
+	yd_buf[y * YD_W + x] = yd_pal_cur[lvl];
+}
+
+U0 YDPolyShade(I64 n, I64 v)
+{//Scanline-fill a polygon with one intensity, dithered per pixel.
+	I64	 i, j, y, x, ymin, ymax, nx, t, x0, x1;
+	I64	 xi[YD_XI_MAX];
+
+	if (n < 3)
+		return;
+	ymin = yd_pys[0];
+	ymax = yd_pys[0];
+	for (i = 1; i < n; i++)
+	{
+		if (yd_pys[i] < ymin)
+			ymin = yd_pys[i];
+		if (yd_pys[i] > ymax)
+			ymax = yd_pys[i];
+	}
+	if (ymin < 0)
+		ymin = 0;
+	if (ymax >= YD_H)
+		ymax = YD_H - 1;
+	for (y = ymin; y <= ymax; y++)
+	{
+		nx = 0;
+		j  = n - 1;
+		for (i = 0; i < n; i++)
+		{
+			if ((yd_pys[i] <= y && yd_pys[j] > y) ||
+				(yd_pys[j] <= y && yd_pys[i] > y))
+			{
+				if (nx < YD_XI_MAX)
+				{
+					xi[nx] = yd_pxs[i] + (y - yd_pys[i]) *
+							 (yd_pxs[j] - yd_pxs[i]) /
+							 (yd_pys[j] - yd_pys[i]);
+					nx++;
+				}
+			}
+			j = i;
+		}
+		for (i = 1; i < nx; i++)
+		{
+			t = xi[i];
+			j = i - 1;
+			while (j >= 0 && xi[j] > t)
+			{
+				xi[j + 1] = xi[j];
+				j--;
+			}
+			xi[j + 1] = t;
+		}
+		for (i = 0; i + 1 < nx; i += 2)
+		{
+			x0 = xi[i];
+			x1 = xi[i + 1];
+			if (x0 < 0)
+				x0 = 0;
+			if (x1 >= YD_W)
+				x1 = YD_W - 1;
+			for (x = x0; x <= x1; x++)
+				YDShade(x, y, v);
+		}
+	}
+}
+
+F64 YDAtan2(F64 y, F64 x)
+{//No ATan2 in the kernel, and a per-pixel call has to be cheap: standard
+//rational approximation, good to ~0.01 rad, about eight flops.
+	F64 ax = x, ay = y, a, r;
+
+	if (ax < 0)
+		ax = -ax;
+	if (ay < 0)
+		ay = -ay;
+	if (ax + ay < 0.000000001)
+		return 0;
+	if (ax >= ay)
+		a = ay / ax;
+	else
+		a = ax / ay;
+	r = a * 0.7853981634 - a * (a - 1.0) * (0.2447 + 0.0663 * a);
+	if (ay > ax)
+		r = 1.5707963268 - r;
+	if (x < 0)
+		r = pi - r;
+	if (y < 0)
+		r = -r;
+	return r;
+}
+
+//Baked portrait data (YD_FACE_W/H + yd_face_data).
+#include "DemoFace"
+
+/* ---- portrait -> polygon takeover ---- */
+//A photo stored as raw 4-bit intensity packed 16 pixels to a U64 in
+//::/DE/DemoFace.ZC, rendered through the same Bayer dither. A triangle mesh
+//then eats it along a diagonal wavefront, each triangle flat-filled with the
+//average intensity under it.
+
+//At 16x20 each triangle spans several facial features.
+#define YD_FG_X		32					//triangle grid
+#define YD_FG_Y		40
+#define YD_FVN		((YD_FG_X + 1) * (YD_FG_Y + 1))
+#define YD_FTRI		(YD_FG_X * YD_FG_Y * 2)
+
+I64 yd_fvx[YD_FVN], yd_fvy[YD_FVN];		//jittered grid vertices, screen space
+I64 yd_ftri[YD_FTRI * 3];				//triangle -> 3 vertex indices
+I64 yd_ftv[YD_FTRI];					//average intensity under each triangle
+F64 yd_ftr[YD_FTRI];					//reveal time, 0..1 along the wavefront
+Bool yd_face_built = FALSE;
+
+I64 YDFacePix(I64 x, I64 y)
+{//4-bit intensity (0..15) at (x,y) of the packed portrait
+	I64 idx;
+
+	if (x < 0 || y < 0 || x >= YD_FACE_W || y >= YD_FACE_H)
+		return 0;
+	idx = y * YD_FACE_W + x;
+	return yd_face_data[idx >> 4] >> ((idx & 15) * 4) & 0xF;
+}
+
+I64 yd_face_seed = 7;
+
+I64 YDFaceRnd()
+{
+	yd_face_seed = (yd_face_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+	return yd_face_seed >> 9;
+}
+
+U0 YDFaceBuild()
+{//Lay out the mesh once: jittered grid, per-triangle average, reveal order.
+	I64 gx, gy, i, j, n, dw, dh, ox, oy, a, b, c, sx, sy, sum, cnt, px, py, rad;
+	F64 fx, fy;
+
+	if (yd_face_built)
+		return;
+	dw = YD_FACE_W * 2;					//on-screen size (2x, chunky)
+	dh = YD_FACE_H * 2;
+	ox = YD_W / 2 - dw / 2;
+	oy = YD_H / 2 - dh / 2;
+
+	yd_face_seed = 7;					//deterministic: the mesh must not
+										//reshuffle every frame
+	for (gy = 0; gy <= YD_FG_Y; gy++)
+		for (gx = 0; gx <= YD_FG_X; gx++)
+		{
+			i = gy * (YD_FG_X + 1) + gx;
+			yd_fvx[i] = ox + gx * dw / YD_FG_X;
+			yd_fvy[i] = oy + gy * dh / YD_FG_Y;
+			if (0 < gx < YD_FG_X)		//interior only: keep the border square
+				yd_fvx[i] += YDFaceRnd() % 7 - 3;
+			if (0 < gy < YD_FG_Y)
+				yd_fvy[i] += YDFaceRnd() % 7 - 3;
+		}
+
+	n = 0;
+	for (gy = 0; gy < YD_FG_Y; gy++)
+		for (gx = 0; gx < YD_FG_X; gx++)
+		{
+			a = gy * (YD_FG_X + 1) + gx;
+			b = a + 1;
+			c = a + YD_FG_X + 1;
+			yd_ftri[n * 3]	   = a;
+			yd_ftri[n * 3 + 1] = b;
+			yd_ftri[n * 3 + 2] = c;
+			n++;
+			yd_ftri[n * 3]	   = b;
+			yd_ftri[n * 3 + 1] = c + 1;
+			yd_ftri[n * 3 + 2] = c;
+			n++;
+		}
+
+	for (i = 0; i < n; i++)
+	{//average the image under each triangle, sampled at its centroid area
+		sx = (yd_fvx[yd_ftri[i * 3]] + yd_fvx[yd_ftri[i * 3 + 1]] +
+			  yd_fvx[yd_ftri[i * 3 + 2]]) / 3;
+		sy = (yd_fvy[yd_ftri[i * 3]] + yd_fvy[yd_ftri[i * 3 + 1]] +
+			  yd_fvy[yd_ftri[i * 3 + 2]]) / 3;
+			//Sample box scales with the cell: a fixed 7x7 source box is four
+			//times wider than a triangle at this grid.
+		rad = dw / YD_FG_X / 4;
+		if (rad < 1)
+			rad = 1;
+		sum = 0;
+		cnt = 0;
+		for (py = -rad; py <= rad; py++)
+			for (px = -rad; px <= rad; px++)
+			{
+				sum += YDFacePix((sx - ox) / 2 + px, (sy - oy) / 2 + py);
+				cnt++;
+			}
+		yd_ftv[i] = sum * 255 / (cnt * 15);
+			//reveal along a diagonal wavefront, with a little noise
+		fx = ToF64(sx - ox) / ToF64(dw);
+		fy = ToF64(sy - oy) / ToF64(dh);
+		yd_ftr[i] = (fx * 0.65 + fy * 0.35) * 0.85 +
+					ToF64(YDFaceRnd() % 100) / 100.0 * 0.15;
+	}
+	yd_face_built = TRUE;
+}
+
+U0 YDFaceScene(F64 t, F64 lt)
+{
+	I64	 i, x, y, dw, dh, ox, oy, v, a, b, c;
+	I64	 mx, my, ax, ay, bx, by, cx2, cy2;
+	F64	 prog, k;
+
+	YDFaceBuild;
+	dw = YD_FACE_W * 2;
+	dh = YD_FACE_H * 2;
+	ox = YD_W / 2 - dw / 2;
+	oy = YD_H / 2 - dh / 2;
+
+	for (y = 0; y < YD_H; y++)
+		for (x = 0; x < YD_W; x++)
+		{
+			if (ox <= x < ox + dw && oy <= y < oy + dh)
+				v = YDFacePix((x - ox) / 2, (y - oy) / 2) * 17;
+			else
+				v = 0;
+			YDShade(x, y, v);
+		}
+
+	prog = lt / 7.5;
+	if (prog > 1.35)
+		prog = 1.35;
+	for (i = 0; i < YD_FTRI; i++)
+	{
+		if (yd_ftr[i] < prog)
+		{
+			k = (prog - yd_ftr[i]) / 0.13;	//pop-in
+			if (k > 1.0)
+				k = 1.0;
+			a = yd_ftri[i * 3];
+			b = yd_ftri[i * 3 + 1];
+			c = yd_ftri[i * 3 + 2];
+				//Wobble the shared vertices, not the triangle as a whole: scaling
+				//each triangle about its own centroid pulls shared edges apart.
+			ax = yd_fvx[a] + ToI64(2.0 * Sin(t * 1.3 + ToF64(a) * 0.9));
+			ay = yd_fvy[a] + ToI64(2.0 * Cos(t * 1.1 + ToF64(a) * 0.7));
+			bx = yd_fvx[b] + ToI64(2.0 * Sin(t * 1.3 + ToF64(b) * 0.9));
+			by = yd_fvy[b] + ToI64(2.0 * Cos(t * 1.1 + ToF64(b) * 0.7));
+			cx2 = yd_fvx[c] + ToI64(2.0 * Sin(t * 1.3 + ToF64(c) * 0.9));
+			cy2 = yd_fvy[c] + ToI64(2.0 * Cos(t * 1.1 + ToF64(c) * 0.7));
+			mx = (ax + bx + cx2) / 3;
+			my = (ay + by + cy2) / 3;
+			//k only shrinks during the pop-in; at k = 1 the mesh is sealed
+			YDPolyPt(0, mx + ToI64(ToF64(ax - mx) * k),
+					 my + ToI64(ToF64(ay - my) * k));
+			YDPolyPt(1, mx + ToI64(ToF64(bx - mx) * k),
+					 my + ToI64(ToF64(by - my) * k));
+			YDPolyPt(2, mx + ToI64(ToF64(cx2 - mx) * k),
+					 my + ToI64(ToF64(cy2 - my) * k));
+			YDPolyShade(3, yd_ftv[i]);
+		}
+	}
+}
+
+U0 YDSceneEon(I64 sc, F64 t, F64 lt, F64 pulse)
+{
+	I64 cx = YD_W / 2, cy = YD_H / 2, x, y, i, n, v, hx, hy;
+	F64 dx, dy, d, ang, ray, u, vv, fog, r2;
+
+	switch (sc)
+	{
+		case 0:	//MONOLITH: dithered sky, one light behind a black slab
+			hy = YD_H * 58 / 100;
+			for (y = 0; y < YD_H; y++)
+				for (x = 0; x < YD_W; x++)
+				{
+					dx = ToF64(x - cx) * 0.55;
+					dy = ToF64(y - hy);
+					d  = Sqrt(dx * dx + dy * dy);
+					v  = ToI64(210.0 / (1.0 + d * 0.028)) +
+						 ToI64(46.0 * (1.0 - ToF64(y) / ToF64(YD_H)));
+					YDShade(x, y, v);
+				}
+			n = cx + ToI64(30.0 * Sin(t * 0.16));
+			YDPolyPt(0, n - 34, 18);
+			YDPolyPt(1, n + 34, 10);
+			YDPolyPt(2, n + 40, hy + 4);
+			YDPolyPt(3, n - 40, hy + 4);
+			YDPolyFill(4, 0, 0, 0);
+			YDRectFill(0, hy + 4, YD_W - 1, YD_H - 1, 0, 0, 0);
+			break;
+
+		case 1:	//GOD RAYS through columns
+			hx = cx + ToI64(120.0 * Sin(t * 0.21));
+			hy = -30;
+			for (y = 0; y < YD_H; y++)
+				for (x = 0; x < YD_W; x++)
+				{
+					dx	= ToF64(x - hx);
+					dy	= ToF64(y - hy);
+					d	= Sqrt(dx * dx + dy * dy);
+					ang = YDAtan2(dy, dx);
+					ray = 0.5 + 0.5 * Sin(ang * 26.0 + t * 0.5);
+					ray = ray * ray * ray;
+					r2 = 1.0 - 0.75 * ToF64((x - cx) * (x - cx) +
+										    (y - cy) * (y - cy)) / 150000.0;
+					if (r2 < 0.05)
+						r2 = 0.05;
+					v	= ToI64(255.0 * ray * (1.0 - d / 640.0) * r2);
+					YDShade(x, y, v + 6);
+				}
+			for (i = -3; i <= 3; i++)
+			{//colonnade, black, with a parallax slide
+				n = cx + i * 96 + ToI64(26.0 * Sin(t * 0.18));
+				YDRectFill(n - 16, 0, n + 16, YD_H - 1, 0, 0, 0);
+			}
+			break;
+
+		case 2:	//TUNNEL, shaded by depth
+			for (y = 0; y < YD_H; y++)
+				for (x = 0; x < YD_W; x++)
+				{
+					dx = ToF64(x - cx);
+					dy = ToF64(y - cy) * 1.6;
+					d  = Sqrt(dx * dx + dy * dy);
+					if (d < 1.0)
+						d = 1.0;
+					ang = YDAtan2(dy, dx);
+					u	= 1100.0 / d + t * 6.5;
+					vv	= ang * 14.0 / (2 * pi) + t * 0.30;
+					fog = d / 260.0;
+					if (fog > 1.0)
+						fog = 1.0;
+					if ((ToI64(u) + ToI64(vv + 64.0)) & 1)
+						v = ToI64(150.0 * fog);
+					else
+						v = ToI64(38.0 * fog);
+					r2 = 1.0 - 0.9 * (dx * dx + dy * dy) / 150000.0;
+					if (r2 < 0.05)
+						r2 = 0.05;
+					YDShade(x, y, ToI64(ToF64(v) * r2));
+				}
+			break;
+
+		case 3:	//ECLIPSE: corona, rim, birds
+			r2 = 78.0 + 6.0 * pulse;
+			for (y = 0; y < YD_H; y++)
+				for (x = 0; x < YD_W; x++)
+				{
+					dx = ToF64(x - cx);
+					dy = ToF64(y - cy + 10);
+					d  = Sqrt(dx * dx + dy * dy);
+					if (d < r2)
+						v = 0;					//the disc itself
+					else if (d < r2 + 3.0)
+						v = 255;				//hard rim
+					else
+					{//corona falling off, with faint streamers
+						ang = YDAtan2(dy, dx);
+						ray = 0.75 + 0.25 * Sin(ang * 9.0 + t * 0.3);
+						v	= ToI64(230.0 * ray * r2 * r2 /
+									(d * d + 1.0) * 0.9);
+					}
+					YDShade(x, y, v);
+				}
+			for (i = 0; i < 7; i++)
+			{//birds crossing the disc
+				u  = t * 0.5 + ToF64(i) * 0.9;
+				hx = ToI64(ToF64(YD_W) * 0.5 + 240.0 * Sin(u));
+				hy = cy - 40 + ToI64(46.0 * Sin(u * 1.7 + ToF64(i)));
+				n  = 4 + i % 2;
+				YDLine(hx - 2 * n, hy - ToI64(ToF64(n) * Sin(t * 7.0 + ToF64(i))),
+					   hx, hy, 0, 0, 0);
+				YDLine(hx, hy, hx + 2 * n,
+					   hy - ToI64(ToF64(n) * Sin(t * 7.0 + ToF64(i))), 0, 0, 0);
+			}
+			break;
+
+		case 4:	//the portrait becoming geometry
+			YDFaceScene(t, lt);
+			break;
+
+		default:
+			break;
+	}
+}
+
+/* ---------------- act 6: the technical act ---------------- */
+//Three techniques, all fed by the same baked portrait:
+//  0  VOXEL SPACE   - Comanche-style heightmap raycasting. The terrain is the
+//                     portrait: face luminance is elevation and colour.
+//  1  MODE 7        - perspective-correct infinite textured plane. Exact: each
+//                     scanline's depth comes from 1/(y-horizon) and the
+//                     texture step is then linear across x.
+//  2  METABALLS     - summed inverse-square potential field, iso-surface by
+//                     threshold, dithered.
+//Act 6 runs on a warm palette so it reads apart from act 5's blues.
+
+U32 yd_fire_pal[YD_PAL_N] = {
+	0x00000000, 0x00140600, 0x00451404, 0x00913A0C, 0x00DC8A24, 0x00FFE6B0};
+
+I64 YDFaceWrap(I64 x, I64 y)
+{//Portrait sampled with wraparound; ZealC % keeps the sign of the dividend, so
+//a negative world coordinate would index off the front of the array.
+	x = x % YD_FACE_W;
+	if (x < 0)
+		x += YD_FACE_W;
+	y = y % YD_FACE_H;
+	if (y < 0)
+		y += YD_FACE_H;
+	return YDFacePix(x, y);
+}
+
+U0 YDVoxel(F64 t)
+{//Voxel Space: for every screen column march a ray outward, and because the
+//march goes near->far, a running "highest thing drawn so far" y-buffer makes
+//occlusion free - no depth buffer, no sorting.
+	I64	 x, y, sy, ybuf, v, h, g, lum;
+	F64	 a, ca, sa, z, dz, px, py, camx, camy, camh, hh;
+	I64	 horizon = YD_H * 38 / 100;
+
+	camx = 30.0 + t * 7.0;
+	camy = 20.0 + 14.0 * Sin(t * 0.19);
+	//Camera stays above the tallest terrain: max height is 15 * 3.4 = 51.
+	camh = 72.0 + 6.0 * Sin(t * 0.23);
+	for (x = 0; x < YD_W; x++)
+	{
+		a  = 0.30 * Sin(t * 0.11) + (ToF64(x) / ToF64(YD_W) - 0.5) * 0.95;
+		ca = Cos(a);
+		sa = Sin(a);
+		ybuf = YD_H;
+		z	 = 1.0;
+		dz	 = 0.30;
+		while (z < 200.0 && ybuf > 0)
+		{
+			px = camx + ca * z;
+			py = camy + sa * z;
+			h  = YDFaceWrap(ToI64(px), ToI64(py));
+			hh = ToF64(h) * 3.4;	//exaggerate relief: raw face luminance is flat
+			sy = horizon + ToI64((camh - hh) * 150.0 / z);
+			if (sy < ybuf)
+			{
+				//Slope shading against a fixed light, not raw albedo, which turns
+				//flat bright regions into featureless slabs.
+				g = h - YDFaceWrap(ToI64(px) + 1, ToI64(py) + 1);
+				lum = 128 + g * 26;
+				if (lum < 40)
+					lum = 40;
+				if (lum > 255)
+					lum = 255;
+				v = ToI64((ToF64(h * 17) * 0.40 + ToF64(lum) * 0.60) *
+						  (1.0 - z / 200.0));
+				for (y = sy; y < ybuf; y++)
+					if (y >= 0)
+						YDShade(x, y, v);
+				ybuf = sy;
+			}
+			z  += dz;
+			dz *= 1.013;		//exponential steps: near detail, far cheap
+		}
+		for (y = 0; y < ybuf; y++)
+			if (y >= 0)			//sky
+				YDShade(x, y, 30 - y * 24 / YD_H);
+	}
+}
+
+U0 YDMode7(F64 t)
+{//Perspective-correct textured ground plane. Depth for a scanline is
+//camh*focal/(y-horizon); sampling the two edge rays at that depth and
+//stepping linearly between them across x is exact for a plane.
+	I64	 x, y, v, h;
+	I64	 horizon = YD_H * 34 / 100;
+	F64	 z, a, lx, ly, rx, ry, dx, dy, ux, uy, fog;
+
+	a = t * 0.16;
+	for (y = horizon + 1; y < YD_H; y++)
+	{
+		z  = 2600.0 / ToF64(y - horizon);
+		lx = 40.0 + t * 9.0 + z * Cos(a - 0.45);
+		ly = 20.0 + z * Sin(a - 0.45);
+		rx = 40.0 + t * 9.0 + z * Cos(a + 0.45);
+		ry = 20.0 + z * Sin(a + 0.45);
+		dx = (rx - lx) / ToF64(YD_W);
+		dy = (ry - ly) / ToF64(YD_W);
+		ux = lx;
+		uy = ly;
+		fog = 1.0 - z / 900.0;
+		if (fog < 0.0)
+			fog = 0.0;
+		for (x = 0; x < YD_W; x++)
+		{
+			h = YDFaceWrap(ToI64(ux), ToI64(uy));
+			v = ToI64(ToF64(h * 17) * fog);
+			YDShade(x, y, v);
+			ux += dx;
+			uy += dy;
+		}
+	}
+	for (y = 0; y <= horizon; y++)
+		for (x = 0; x < YD_W; x++)
+			YDShade(x, y, 40 - y * 34 / (horizon + 1));
+}
+
+#define YD_MBALLS	7
+
+U0 YDMetaballs(F64 t)
+{//Iso-surface of a summed inverse-square field. No geometry: the blobs merge
+//and separate from the arithmetic.
+	I64	 x, y, i, v;
+	F64	 bx[YD_MBALLS], by[YD_MBALLS], br[YD_MBALLS];
+	F64	 sum, dx, dy;
+
+	for (i = 0; i < YD_MBALLS; i++)
+	{
+		bx[i] = ToF64(YD_W / 2) + 190.0 * Sin(t * (0.31 + ToF64(i) * 0.07) +
+											  ToF64(i) * 1.7);
+		by[i] = ToF64(YD_H / 2) + 110.0 * Cos(t * (0.27 + ToF64(i) * 0.05) +
+											  ToF64(i) * 2.3);
+		br[i] = 900.0 + 500.0 * Sin(t * 0.6 + ToF64(i));
+	}
+	for (y = 0; y < YD_H; y++)
+		for (x = 0; x < YD_W; x++)
+		{
+			sum = 0;
+			for (i = 0; i < YD_MBALLS; i++)
+			{
+				dx = ToF64(x) - bx[i];
+				dy = ToF64(y) - by[i];
+				sum += br[i] / (dx * dx + dy * dy + 1.0);
+			}
+			v = ToI64(sum * 120.0);
+			if (v > 255)
+				v = 255;
+			YDShade(x, y, v);
+		}
+}
+
+U0 YDSceneTech(I64 sc, F64 t, F64 lt, F64 pulse)
+{
+	yd_pal_cur = yd_fire_pal;
+	switch (sc)
+	{
+		case 0:
+			YDVoxel(t);
+			break;
+		case 1:
+			YDMode7(t);
+			break;
+		case 2:
+			YDMetaballs(t);
+			break;
+		default:
+			break;
+	}
+	yd_pal_cur = yd_eon_pal;
+}
+
+I64 YDActStart(I64 a)
+{//First scene index of act a - used by the 1..5 hotkeys.
+	if (a <= 0)
+		return 0;
+	if (a == 1)
+		return YD_SCENES;
+	if (a == 2)
+		return YD_SCENES + YD_GSCENES;
+	if (a == 3)
+		return YD_SCENES + YD_GSCENES + YD_ASCENES;
+	if (a == 4)
+		return YD_SCENES + YD_GSCENES + YD_ASCENES + YD_TSCENES;
+	return YD_SCENES + YD_GSCENES + YD_ASCENES + YD_TSCENES + YD_WSCENES;
+}
+
+U0 YDScene(F64 t)
+{
+	I64 total = YD_SCENES + YD_GSCENES + YD_ASCENES + YD_TSCENES +
+				YD_WSCENES + YD_XSCENES;
+	I64 idx	  = ToI64(t / YD_SCENE_SECS) % total;
+	F64 lt	  = t - ToF64(ToI64(t / YD_SCENE_SECS)) * YD_SCENE_SECS;
+	F64 pulse = 0.5 + 0.5 * Sin(t * 3.1);	//stands in for a beat
+
+	if (idx < YD_SCENES)
+	{
+		yd_act = 0;
+		YDSceneVector(idx, t, lt, pulse);
+	}
+	else if (idx < YD_SCENES + YD_GSCENES)
+	{
+		yd_act = 1;
+		YDSceneGlitch(idx - YD_SCENES, t, lt, pulse);
+	}
+	else if (idx < YD_SCENES + YD_GSCENES + YD_ASCENES)
+	{
+		yd_act = 2;
+		YDSceneAnsi(idx - YD_SCENES - YD_GSCENES, t, lt, pulse);
+	}
+	else if (idx < YD_SCENES + YD_GSCENES + YD_ASCENES + YD_TSCENES)
+	{
+		yd_act = 3;
+		YDSceneTribute(idx - YD_SCENES - YD_GSCENES - YD_ASCENES, t, lt, pulse);
+	}
+	else if (idx < YD_SCENES + YD_GSCENES + YD_ASCENES + YD_TSCENES +
+					YD_WSCENES)
+	{
+		yd_act = 4;
+		YDSceneEon(idx - YD_SCENES - YD_GSCENES - YD_ASCENES - YD_TSCENES,
+				  t, lt, pulse);
+	}
+	else
+	{
+		yd_act = 5;
+		YDSceneTech(idx - YD_SCENES - YD_GSCENES - YD_ASCENES - YD_TSCENES -
+					YD_WSCENES, t, lt, pulse);
+	}
+}
+
+
+U0 YDOverlay(CDC *dc)
+{//WinMgr frame hook: blit only, 2x nearest upscale. Each source row is
+//doubled once into yd_row, then MemCopy'd to both destination rows.
+	I64	 y, x, dw = YD_W * 2;
+	U32	*src, *d0;
+
+	if (yd_up && yd_buf && yd_row)
+	{
+		if (dw > dc->width)
+			dw = dc->width;
+		for (y = 0; y < YD_H; y++)
+		{
+			if (2 * y + 1 >= dc->height)
+				break;
+			src = yd_buf + y * YD_W;
+			for (x = 0; x < YD_W; x++)
+			{
+				yd_row[2 * x]	  = src[x];
+				yd_row[2 * x + 1] = src[x];
+			}
+			d0 = dc->body + (2 * y) * dc->width_internal;
+			MemCopy(d0, yd_row, dw * sizeof(U32));
+			MemCopy(d0 + dc->width_internal, yd_row, dw * sizeof(U32));
+		}
+	}
+	if (yd_old_hook)
+		(*yd_old_hook)(dc);
+}
+
+U0 YDRenderTask()
+{//Owns the animation and the teardown. Exits on any key or mouse activity.
+	F64	 t0 = tS, t, prev = 0, dt;
+	I64	 snap = kbd.last_down_scan_code, k, dig, last_dig = -1;
+	Bool quit;
+	I64	 mx = mouse.pos.x, my = mouse.pos.y;
+
+	while (!yd_stop)
+	{
+		t  = tS - t0;
+		dt = t - prev;
+		if (dt > 0.15)
+			dt = 0.15;	//a long stall must not teleport the starfield
+		if (dt < 0.0)
+			dt = 0.0;	//an act jump rewinds the clock; do not run backwards
+		prev = t;
+
+		if (yd_act == 2 || yd_act == 4 || yd_act == 5)
+		{//Acts 3, 5 and 6 hard-clear rather than fade. YDAnsify averages each
+		//8x8 cell, so a 3/4-faded previous frame averages in with the new one
+		//and its glyphs keep re-qualifying above the floor: the block art
+		//smears instead of redrawing. C64/ANSI has no motion blur.
+		//yd_act holds last frame's value; at a boundary that is one frame.
+			MemSet(yd_buf, 0, YD_W * YD_H * sizeof(U32));
+		}
+		else
+			YDFade;
+		if (!yd_act)
+			YDStars(dt, 1.15);	//act 2 has rain, act 3 paints its own ground
+		YDScene(t);
+		if (yd_act != 3 && yd_act != 4 && yd_act != 5)
+			YDScroller(t);		//acts 4 and 5 stand on their own
+		if (yd_act == 1)
+		{//tear up the finished frame; heavier on the beat
+			YDGlitch(1 + ToI64(2.5 * (0.5 + 0.5 * Sin(t * 3.1))));
+		}
+		yd_frame++;
+
+		//INPUT. Two different contracts:
+		//  screen saver -> any key or mouse dismisses it.
+		//  manual run   -> 1..6 jump between acts, anything else exits.
+		//Poll kbd.down_bitmap (live held-key bitmap, indexed by scan code)
+		//rather than last_down_scan_code: the latter only latches on key-down,
+		//so an act key and a quit key are indistinguishable by edge alone.
+		//PC set-1: '1' is 0x02 .. '6' is 0x07.
+		dig = -1;
+		if (!yd_as_saver)
+			for (k = 0; k < YD_ACTS; k++)
+				if (Bt(kbd.down_bitmap, 0x02 + k))
+					dig = k;
+		if (dig >= 0 && dig != last_dig)
+		{//new act key: rewind the clock so scene-local time starts fresh
+			t0	 = tS - ToF64(YDActStart(dig)) * YD_SCENE_SECS - 0.02;
+			prev = 0;
+			yd_mesh_id = -1;		//force a mesh rebuild for the new act
+			snap = kbd.last_down_scan_code;	//do not read it as a quit
+		}
+		last_dig = dig;
+		if (t > 0.7)
+		{
+			quit = FALSE;
+			if (mouse.lb || mouse.rb || mouse.pos.x != mx ||
+				mouse.pos.y != my)
+				quit = TRUE;
+			if (kbd.last_down_scan_code != snap)
+			{
+				snap = kbd.last_down_scan_code;
+				if (yd_as_saver || dig < 0)
+					quit = TRUE;	//act keys never quit a manual run
+			}
+			if (quit)
+				break;
+		}
+		Sleep(28);	//~30fps target
+	}
+
+	yd_up = FALSE;
+	gr.fp_final_screen_update = yd_old_hook;
+	yd_old_hook = NULL;
+	Sleep(80);	//let the in-flight frame finish reading the buffer
+	if (yd_buf)
+	{
+		Free(yd_buf);
+		yd_buf = NULL;
+	}
+	if (yd_row)
+	{
+		Free(yd_row);
+		yd_row = NULL;
+	}
+	if (yd_tmp)
+	{
+		Free(yd_tmp);
+		yd_tmp = NULL;
+	}
+	if (yd_dance)
+	{
+		Free(yd_dance);
+		yd_dance = NULL;
+	}
+	yd_mesh_id = -1;
+}
+
+public U0 YDEDemo(Bool as_saver=FALSE)
+{//Start the demo. Returns immediately; it runs in its own task.
+//as_saver: started by the idle watcher, so any key must dismiss it.
+	I64 i;
+
+	if (yd_up)
+		return;
+	yd_buf = MAlloc(YD_W * YD_H * sizeof(U32), sys_task);
+	yd_row = MAlloc(YD_W * 2 * sizeof(U32), sys_task);
+	yd_tmp = MAlloc(YD_W * sizeof(U32), sys_task);
+	MemSet(yd_buf, 0, YD_W * YD_H * sizeof(U32));	//globals are not zeroed
+	yd_nv = 0;
+	yd_ne = 0;
+	yd_mesh_id = -1;
+	yd_frame = 0;
+	yd_act	 = 0;
+	yd_morph_built = FALSE;	//globals are not zeroed; force a rebuild
+	YDStarsInit;
+	YDRainInit;
+	yd_aghit   = 0;			//globals are not zeroed
+	yd_agflash = 0;
+	for (i = 0; i < YD_AGENTS; i++)
+	{
+		yd_agz[i] = 0.6 + ToF64(i) * 0.45;
+		yd_agx[i] = ToF64(RandU16 % 200) / 100.0 - 1.0;
+	}
+	YDBuildMorph;
+	YDDanceLoad;	//PNG sprite sheet for act 4
+
+	yd_as_saver	= as_saver;
+	yd_stop		= FALSE;
+	yd_old_hook	= gr.fp_final_screen_update;
+	yd_up		= TRUE;
+	gr.fp_final_screen_update = &YDOverlay;
+	Spawn(&YDRenderTask, NULL, "YDE Demo");
+}
+
+/* ---------------- screen saver ---------------- */
+
+U0 YDESaverTask()
+{//Poll for idle. Any key, button or mouse movement resets the countdown.
+	I64	 snap = kbd.last_down_scan_code;
+	I64	 mx = mouse.pos.x, my = mouse.pos.y;
+	F64	 idle0 = tS;
+
+	while (yd_saver_on)
+	{
+		if (kbd.last_down_scan_code != snap || mouse.lb || mouse.rb ||
+			mouse.pos.x != mx || mouse.pos.y != my)
+		{
+			snap  = kbd.last_down_scan_code;
+			mx	  = mouse.pos.x;
+			my	  = mouse.pos.y;
+			idle0 = tS;
+		}
+		else if (!yd_up && tS - idle0 >= ToF64(yd_saver_secs))
+			YDEDemo(TRUE);
+		Sleep(400);
+	}
+}
+
+public U0 YDESaverOn(I64 secs=120)
+{//Enable the screen saver after `secs` idle seconds. Safe to call again with a
+//new delay: it retunes the running watcher rather than spawning a second one.
+	yd_saver_secs = secs;
+	if (yd_saver_on)
+		return;
+	yd_saver_on = TRUE;
+	Spawn(&YDESaverTask, NULL, "YDE Saver");
+}
+
+public U0 YDESaverOff()
+{
+	yd_saver_on = FALSE;
+	yd_stop		= TRUE;
+}

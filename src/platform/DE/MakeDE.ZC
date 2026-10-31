@@ -1,0 +1,23 @@
+Cd(__DIR__);;
+
+#include "Theme"
+#include "Demo"		//before DEConfig: the saver lives there
+#include "DEDef"
+#include "DEImage"
+#include "DEConfig"	//needs DEWallpaperLoad
+#include "DEBar"
+#include "DEDesk"
+#include "DE"
+#include "BootTerm"
+#include "StartMenu"	//after DE: uses de/de_theme, installs de_menu_fp
+#include "Widgets"
+#include "Games"
+#include "Settings"
+#include "yViewer"
+#include "yVideo"
+#include "Calc"
+#include "Calendar"
+
+Cd("..");;
+
+DEStart;

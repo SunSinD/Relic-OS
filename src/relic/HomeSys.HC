@@ -95,6 +95,18 @@ U0 RelicDevSync()
       Copy(src, "::/Home/RelicOS");
       StrPrint(src, "%c:/wallpaper.raw", drv);
       Copy(src, "::/Home/RelicOS");
+      StrPrint(src, "%c:/Icons.BIN", drv);
+      Copy(src, "::/Home/RelicOS");
+      StrPrint(src, "%c:/Net/Load.HC", drv);
+      if (FileFind(src)) {
+        StrPrint(src, "%c:/Net", drv);
+        CopyTree(src, "::/Home/RelicOS/Net");
+      }
+      StrPrint(src, "%c:/Games/Tetris/Tetris.HC", drv);
+      if (FileFind(src)) {
+        StrPrint(src, "%c:/Games", drv);
+        CopyTree(src, "::/Home/RelicOS/Games");
+      }
       StrPrint(src, "%c:/HomeSys.HC", drv);
       Copy(src, "::/Home/HomeSys.HC.Z");
       StrPrint(src, "%c:/TOOM/*.HC", drv);
@@ -140,6 +152,7 @@ U0 RelicStartUpRun()
   // ExeFile reports compile errors itself and returns, so check the flag.
   if (!relic_startup_ok) {
     RelicBootLog("HomeSys: RelicStartUp.HC failed, plain terminal");
+    if (dbg.fix_file_line) RelicBootLog(dbg.fix_file_line);
     User("\"RelicStartUp.HC failed (see ::/Home/Boot.LOG).\\n\";\n");
   }
 }

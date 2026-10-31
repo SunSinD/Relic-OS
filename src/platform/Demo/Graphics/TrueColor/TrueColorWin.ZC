@@ -1,0 +1,47 @@
+// Windowed native 32-bit truecolor demo.
+
+F64 tc_phase;
+
+U0 TrueColorWinDraw(CTask *task, CDC *dc)
+{
+	I64 x, y, w = task->pix_width, h = task->pix_height, r, g, b, half = h >> 1;
+	F64 t;
+
+	for (x = 0; x < w; x++)
+	{
+		t = 6.283 * x / w + tc_phase;
+		r = 128 + 127.0 * Sin(t);
+		g = 128 + 127.0 * Sin(t + 2.094);
+		b = 128 + 127.0 * Sin(t + 4.188);
+		dc->color = ColorRGB(r, g, b);
+		GrVLine(dc, x, 0, half - 1);
+	}
+
+	for (y = half; y < h; y++)
+	{
+		b = 255 * (y - half) / (h - half);
+		for (x = 0; x < w; x++)
+		{
+			r = 255 * x / w;
+			dc->color = ColorRGB(r, 40, b);
+			GrPlot(dc, x, y);
+		}
+	}
+
+	dc->color = ColorRGB(255, 255, 255);
+	GrPrint(dc, 8, 8, "Truecolor window content - press any key");
+}
+
+U0 TrueColorWin()
+{
+	SettingsPush;
+	Fs->draw_it = &TrueColorWinDraw;
+	while (!CharScan)
+	{
+		tc_phase += 0.05;
+		Refresh;
+	}
+	SettingsPop;
+}
+
+TrueColorWin;

@@ -1,17 +1,26 @@
 # Changelog
 
-All notable changes to Relic OS are recorded here.
-Each entry marks a point where Relic OS diverges from the TempleOS baseline.
+## [0.5.0] - 2026-10-31
 
----
+### Added
+- Matte-black desktop with the blue Reaper wallpaper, a bottom taskbar (Browser
+  and Files pinned) and a searchable Start menu behind the TempleOS logo.
+- Sharp pixel icons built from Fluent UI System Icons (`tools/relic_icons.py`).
+- New apps: Browser (plain HTTP), Paint, Calculator, Calendar, Notes and Settings.
+  Files and Help were redone; Help keeps the full Terry A. Davis tribute.
+- Networking (TinkerOS PCNet driver and IPv4 stack) with DHCP, DNS and HTTP.
+- Games library with 28 games: DOOM (TOOM), Tetris, Scorch, Sudoku and Chess
+  (TinkerOS ports) and the TempleOS games.
+- Loading screen and automatic boot to the desktop. Esc during boot opens recovery.
+- VMware mouse integration (no capture needed on the desktop).
+- `help` in the shell lists common commands.
+- Experimental 1080p platform build in `src/platform/` (YDE/ZealOS based, not in the ISO).
 
-## [Unreleased]
-
-### Changed
-- README: screenshots, shorter intro, a Feedback section.
-- Roadmap rewritten as Done / Next / Later / Known issues.
-- Issue forms: simple bug report and an "Idea or feedback" form.
-- README artwork is stored in the repo (`docs/images/`) instead of imgur.
+### Fixed
+- DOOM mouse turning in VMware: the game switches to relative mouse while it runs.
+- About 75 FPS desktop refresh instead of 30.
+- Missing files in the ISO build list, save checks, bounds checks in the file,
+  image, DNS and settings code.
 
 ---
 
@@ -78,10 +87,10 @@ First public release with a downloadable ISO. Tested in VMware Workstation (inst
 ## [0.3.0] - 2026-05-23
 
 ### Added
-- `RelicShellTaskMain` — Shell runs in an independent task with dark terminal chrome.
-- `RelicDesktopRefresh` — lightweight redraw after spawning Shell/Games without full doc reset.
+- `RelicShellTaskMain`: Shell runs in an independent task with dark terminal chrome.
+- `RelicDesktopRefresh`: lightweight redraw after spawning Shell/Games without full doc reset.
 - `freedoom1.wad` in `src/relic/TOOM/` for TOOM testing (Freedoom IWAD).
-- `docs/CONTINUATION.md` — handoff prompt and VM workflow for resuming development.
+- `docs/CONTINUATION.md`: handoff prompt and VM workflow for resuming development.
 
 ### Changed
 - **Desktop top strip:** System status line (`RelicOS V1.0.0` + date/time + FPS) via `RelicChrome.HC` / `fp_wall_paper`; no version or "Desktop" text on wallpaper graphics.

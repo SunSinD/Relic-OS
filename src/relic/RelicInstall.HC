@@ -68,7 +68,7 @@ U0 RelicInstallBanner()
 {
   "\n\n";
   "$FG,CYAN$  =========================================$FG$\n";
-  "$FG,CYAN$   RelicOS V0.4.0 Setup$FG$\n";
+  "$FG,CYAN$   RelicOS V0.5.0 Setup$FG$\n";
   "$FG,CYAN$  =========================================$FG$\n\n";
   "$FG,LTGRAY$  You are running RelicOS from the live CD image.$FG$\n\n";
   if (RelicHasHardDrive)
@@ -90,7 +90,7 @@ U0 RelicInstallRun()
 {
   "\n\n$FG,CYAN$  Starting installer...$FG$\n\n";
   try {
-    RunFile("::/Misc/OSInstall",,TRUE);
+    RunFile("::/Home/RelicOS/RelicOSInstall.HC",,TRUE);
   } catch {
     Fs->catch_except = TRUE;
     "\n$FG,LTRED$  Installer stopped with an error.$FG$\n";
@@ -147,6 +147,8 @@ U0 RelicInstallPrompt()
   I64 ch, sc, mc;
   Bool done = FALSE;
 
+  // The boot splash draws over the text layer; hide it while asking.
+  Fs->draw_it = NULL;
   RelicInstallScreen;
   RelicInstallBanner;
   FlushMsgs;
@@ -166,4 +168,5 @@ U0 RelicInstallPrompt()
   DocClear;
   DCFill;
   FlushMsgs;
+  Fs->draw_it = &RelicSplashDraw;
 }

@@ -1,0 +1,2416 @@
+// entity-aware collision and player movement, from world.c
+// (SV_Move and friends) and sv_phys/sv_user.
+//
+// needs the edict field table, so it sits after HLProgs. HLPhys traces hulls
+// against the world BSP alone; here traces also hit every solid edict.
+
+#define HLSOLID_NOT_			0
+#define HLSOLID_TRIGGER_		1
+#define HLSOLID_BBOX_		2
+#define HLSOLID_SLIDEBOX_	3
+#define HLSOLID_BSP_			4
+
+#define HLCLIP_MAX_PRECACHE	1024
+
+I64 hl_precache_bmodel[HLCLIP_MAX_PRECACHE];
+
+U0 HLClipPrecacheReset()
+{
+	I64 i;
+
+	for (i = 0; i < HLCLIP_MAX_PRECACHE; i++)
+		hl_precache_bmodel[i] = -1;
+}
+
+I64 HLClipBrushModel(I64 precache_index)
+{
+	if (precache_index < 1 || precache_index >= HLCLIP_MAX_PRECACHE)
+		return -1;
+
+	return hl_precache_bmodel[precache_index];
+}
+
+Bool hl_brush_rotates[HLENT_MAX];
+
+
+U0 HLClipRotatingReset()
+{
+	I64 i;
+
+	for (i = 0; i < HLENT_MAX; i++)
+		hl_brush_rotates[i] = FALSE;
+}
+
+U0 HLClipSetRotating(I64 ent, Bool on)
+{
+	if (ent < 0 || ent >= HLENT_MAX)
+		return;
+
+	hl_brush_rotates[ent] = on;
+}
+
+U0 HLClipSetRotatingDraw(I64 ent, Bool on)
+{
+	HLClipSetRotating(ent, on);
+}
+
+Bool HLClipIsRotatingDraw(I64 ent)
+{
+	if (ent < 0 || ent >= HLENT_MAX)
+		return FALSE;
+
+	return hl_brush_rotates[ent];
+}
+
+Bool HLClipIsRotating(I64 ent)
+{
+	if (ent < 0 || ent >= HLENT_MAX)
+		return FALSE;
+
+	return hl_brush_rotates[ent];
+}
+
+U0 HLHullClipMins(I64 hull, F64 *out)
+{
+	if (hull == 1)
+		HLVecSet(out, -16.0, -16.0, -36.0);
+	else if (hull == 2)
+		HLVecSet(out, -32.0, -32.0, -32.0);
+	else if (hull == 3)
+		HLVecSet(out, -16.0, -16.0, -18.0);
+	else
+		HLVecSet(out, 0.0, 0.0, 0.0);
+}
+
+U0 HLHullOffset(I64 hull, F64 *mins, F64 *offset)
+{
+	F64 clip[3];
+	I64 j;
+
+	HLHullClipMins(hull, clip);
+
+	for (j = 0; j < 3; j++)
+		offset[j] = clip[j] - mins[j];
+}
+
+I64 HLHullForSize(F64 *mins, F64 *maxs)
+{
+	F64 width  = maxs[0] - mins[0];
+	F64 height = maxs[2] - mins[2];
+
+	if (width < 3.0)
+		return 0;
+
+	if (width <= 32.0)
+	{
+		if (height <= 36.0)
+			return 3;
+
+		return 1;
+	}
+
+	return 2;
+}
+
+U0 HLTraceInit(CHLTrace *trace, F64 *end)
+{
+	trace->all_solid   = TRUE;
+	trace->start_solid = FALSE;
+	trace->fraction    = 1.0;
+	trace->hit         = FALSE;
+	trace->plane_dist  = 0.0;
+	trace->in_open     = FALSE;
+	trace->in_water    = FALSE;
+	HLVecSet(trace->plane_normal, 0.0, 0.0, 0.0);
+	HLVecCopy(end, trace->end_pos);
+}
+
+U0 HLTraceHullRotated(CHLMap *map, I64 model, I64 hull, F64 *offset,
+	F64 *angles, F64 *start, F64 *end, CHLTrace *trace)
+{
+	F64  lstart[3];
+	F64  lend[3];
+	F64  wstart[3];
+	F64  wend[3];
+	F64  nrm[3];
+	F64  m[12];
+	I64  head;
+	I64  i;
+	Bool rotated = FALSE;
+
+	HLTraceInit(trace, end);
+
+	if (!HLMapValid(map, "HLTraceHull"))
+		return;
+
+	if (model < 0 || model >= map->num_models)
+		return;
+
+	if (hull < 0 || hull > 3)
+		hull = 1;
+
+	if (hull)
+		head = map->models[model].head_node[hull];
+	else
+		head = map->models[model].hull0_head;
+
+	if (head < 0)
+		return;
+
+	if (model > 0 && head == 0)
+		return;
+
+	if (angles)
+	{
+		if (HLMatAnglesActive(angles))
+			rotated = TRUE;
+	}
+
+	if (rotated)
+	{
+		HLMatFromAngles(angles, offset, m);
+
+		HLMatTransformInv(start, m, lstart);
+		HLMatTransformInv(end, m, lend);
+	}
+	else
+	{
+		HLVecSub(start, offset, lstart);
+		HLVecSub(end, offset, lend);
+	}
+
+	HLVecCopy(lend, trace->end_pos);
+
+	hl_hull_head = head;
+	HLRecursiveHullCheck(map, head, 0.0, 1.0, lstart, lend, trace);
+
+	if (!rotated)
+	{
+		HLVecAdd(trace->end_pos, offset, trace->end_pos);
+		return;
+	}
+
+
+	if (trace->hit)
+	{
+		HLMatRotate(trace->plane_normal, m, nrm);
+		HLVecCopy(nrm, trace->plane_normal);
+
+		trace->plane_dist += HLVecDot(trace->plane_normal, offset);
+	}
+
+	HLVecCopy(start, wstart);
+	HLVecCopy(end, wend);
+
+	for (i = 0; i < 3; i++)
+		trace->end_pos[i] = wstart[i] + (wend[i] - wstart[i]) * trace->fraction;
+}
+
+U0 HLTraceHull(CHLMap *map, I64 model, I64 hull, F64 *offset, F64 *start,
+	F64 *end, CHLTrace *trace)
+{
+	HLTraceHullRotated(map, model, hull, offset, NULL, start, end, trace);
+}
+
+U0 HLClipMoveToBox(F64 *bmins, F64 *bmaxs, F64 *mins, F64 *maxs, F64 *start,
+	F64 *end, CHLTrace *trace)
+{
+	F64  emins[3];
+	F64  emaxs[3];
+	F64  d;
+	F64  t1;
+	F64  t2;
+	F64  swap;
+	F64  enter    = 0.0;
+	F64  leave    = 1.0;
+	F64  sign     = 0.0;
+	I64  axis     = -1;
+	I64  i;
+	Bool inside   = TRUE;
+
+	HLTraceInit(trace, end);
+
+	for (i = 0; i < 3; i++)
+	{
+		emins[i] = bmins[i] - maxs[i];
+		emaxs[i] = bmaxs[i] - mins[i];
+
+		if (start[i] < emins[i] - HLPHYS_EPSILON ||
+			start[i] > emaxs[i] + HLPHYS_EPSILON)
+			inside = FALSE;
+	}
+
+	if (inside)
+	{
+		trace->all_solid   = FALSE;
+		trace->start_solid = TRUE;
+		return;
+	}
+
+	for (i = 0; i < 3; i++)
+	{
+		d = end[i] - start[i];
+
+		if (d > -HLPHYS_EPSILON && d < HLPHYS_EPSILON)
+		{
+			if (start[i] < emins[i] || start[i] > emaxs[i])
+			{
+				trace->all_solid = FALSE;
+				return;
+			}
+		}
+		else
+		{
+			t1 = (emins[i] - start[i]) / d;
+			t2 = (emaxs[i] - start[i]) / d;
+
+			if (t1 > t2)
+			{
+				swap = t1;
+				t1   = t2;
+				t2   = swap;
+			}
+
+			if (t1 > enter)
+			{
+				enter = t1;
+				axis  = i;
+				if (d < 0.0)
+					sign = 1.0;
+				else
+					sign = -1.0;
+			}
+
+			if (t2 < leave)
+				leave = t2;
+
+			if (enter > leave)
+			{
+				trace->all_solid = FALSE;
+				return;
+			}
+		}
+	}
+
+	trace->all_solid = FALSE;
+
+	if (axis < 0 || enter >= 1.0)
+		return;
+
+	enter -= HLPHYS_EPSILON;
+	if (enter < 0.0)
+		enter = 0.0;
+
+	trace->fraction          = enter;
+	trace->hit               = TRUE;
+	trace->plane_normal[axis] = sign;
+
+	for (i = 0; i < 3; i++)
+		trace->end_pos[i] = start[i] + (end[i] - start[i]) * enter;
+}
+
+I64 hl_trace_native_ent = -1;
+
+I64 hl_trace_native_solid = -1;
+
+U0 HLClipToNativeBrushes(CHLMap *map, F64 *start, F64 *end, F64 *mins,
+	F64 *maxs, CHLTrace *trace)
+{
+	CHLTrace	 tr;
+	CHLEntity	*e;
+	F64			 eofs[3];
+	I64			 ehull;
+	I64			 i;
+	I64			 j;
+
+	if (!hl_entities || !HLMapValid(map, "HLClipToNativeBrushes"))
+		return;
+
+	ehull = HLHullForSize(mins, maxs);
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->in_use || e->solid != HLSOLID_BSP)
+			goto qcnb_next;
+
+		if (e->monsterclip && !hl_clip_for_monster)
+			goto qcnb_next;
+
+		if (e->brush_model < 1 || e->brush_model >= map->num_models)
+			goto qcnb_next;
+
+		HLHullOffset(ehull, mins, eofs);
+		for (j = 0; j < 3; j++)
+			eofs[j] += e->origin[j];
+
+		if (hl_brush_rotates[i])
+			HLTraceHullRotated(map, e->brush_model, ehull, eofs, e->angles,
+				start, end, &tr);
+		else
+			HLTraceHull(map, e->brush_model, ehull, eofs, start, end, &tr);
+
+		if (tr.fraction < trace->fraction)
+		{
+			trace->fraction = tr.fraction;
+			trace->hit      = tr.hit;
+			HLVecCopy(tr.end_pos, trace->end_pos);
+			HLVecCopy(tr.plane_normal, trace->plane_normal);
+			hl_trace_native_ent = i;
+		}
+
+		if (tr.start_solid)
+		{
+			trace->start_solid    = TRUE;
+			hl_trace_native_solid = i;
+		}
+
+qcnb_next:
+	}
+}
+
+U0 HLTraceEntity(CHLMap *map, F64 *start, F64 *end, F64 *mins, F64 *maxs,
+	I64 pass, Bool nomonsters, CHLTrace *trace)
+{
+	I64 hull = HLHullForSize(mins, maxs);
+	F64 offset[3];
+
+	//world sits at the origin, so the offset is box vs hull only
+	HLHullOffset(hull, mins, offset);
+
+	HLTraceHull(map, 0, hull, offset, start, end, trace);
+
+	if (trace->all_solid)
+		return;
+
+	hl_trace_native_ent   = -1;
+	hl_trace_native_solid = -1;
+
+	no_warn pass;
+
+	HLClipToNativeBrushes(map, start, end, mins, maxs, trace);
+
+	if (!nomonsters && hl_ent_slidebox_hook)
+		hl_ent_slidebox_hook(map, start, end, mins, maxs, trace);
+}
+
+
+
+F64 hl_player_mins[3];
+F64 hl_player_maxs[3];
+
+
+#define HLPM_DUCK_MULT		0.333
+
+#define HLPM_DUCK_TIMER		1.0
+
+Bool hl_jump_held    = FALSE;
+
+Bool hl_duck_held_last = FALSE;
+
+F64  hl_step_time  = 0.0;
+I64  hl_step_side  = 0;
+Bool hl_step_play  = FALSE;
+
+F64  hl_step_dist  = 0.0;
+
+I64 hl_step_kind = HLSTEP_CONCRETE;
+F64 hl_step_vol  = 0.5;
+
+F64 hl_gravity_scale = 1.0;
+
+Bool hl_ducking      = FALSE;
+Bool hl_duck_pending = FALSE;
+F64	 hl_duck_time    = 0.0;
+F64	 hl_view_ofs_z   = HLPHYS_VIEW_Z;
+
+U0 HLDuckSetHull(Bool ducked)
+{//pmove->usehull: point the trace box at hull 1 or hull 3
+	if (ducked)
+	{
+		HLVecSet(hl_player_mins, -16.0, -16.0, HLPHYS_DUCK_MINS_Z);
+		HLVecSet(hl_player_maxs,  16.0,  16.0, HLPHYS_DUCK_MAXS_Z);
+	}
+	else
+	{
+		HLVecSet(hl_player_mins, -16.0, -16.0, HLPHYS_MINS_Z);
+		HLVecSet(hl_player_maxs,  16.0,  16.0, HLPHYS_MAXS_Z);
+	}
+}
+
+F64 HLDuckSpline(F64 t)
+{
+	F64 tt = t * t;
+
+	return 3.0 * tt - 2.0 * tt * t;
+}
+
+U0 HLDuckReset()
+{
+	hl_jump_held      = FALSE;
+	hl_duck_held_last = FALSE;
+	hl_gravity_scale  = 1.0;
+	hl_step_time      = 0.0;
+	hl_step_dist      = 0.0;
+	hl_step_side      = 0;
+	hl_step_play      = FALSE;
+	hl_step_kind      = HLSTEP_CONCRETE;
+	hl_step_vol       = 0.5;
+	hl_ducking        = FALSE;
+	hl_duck_pending   = FALSE;
+	hl_duck_time      = 0.0;
+	hl_view_ofs_z     = HLPHYS_VIEW_Z;
+	HLDuckSetHull(FALSE);
+}
+
+#define HLPM_STUCK_SLOTS		54
+
+F64 hl_pm_stuck_table[HLPM_STUCK_SLOTS * 3];
+
+U0 HLPMStuckPut(I64 *idx, F64 x, F64 y, F64 z)
+{
+	I64 i = *idx;
+
+	if (i < 0 || i >= HLPM_STUCK_SLOTS)
+		return;
+
+	hl_pm_stuck_table[i * 3]     = x;
+	hl_pm_stuck_table[i * 3 + 1] = y;
+	hl_pm_stuck_table[i * 3 + 2] = z;
+
+	*idx = i + 1;
+}
+
+U0 HLPMCreateStuckTable()
+{
+	F64 zi[3];
+	I64 idx = 0;
+	I64 i;
+	I64 j;
+	I64 k;
+
+	for (i = 0; i < HLPM_STUCK_SLOTS * 3; i++)
+		hl_pm_stuck_table[i] = 0.0;
+
+	for (i = -1; i <= 1; i++)
+	{
+		HLPMStuckPut(&idx, 0.0, 0.0, ToF64(i) * 0.125);
+	}
+
+	for (i = -1; i <= 1; i++)
+	{
+		HLPMStuckPut(&idx, 0.0, ToF64(i) * 0.125, 0.0);
+	}
+
+	for (i = -1; i <= 1; i++)
+	{
+		HLPMStuckPut(&idx, ToF64(i) * 0.125, 0.0, 0.0);
+	}
+
+	for (i = -1; i <= 1; i += 2)
+	{
+		for (j = -1; j <= 1; j += 2)
+		{
+			for (k = -1; k <= 1; k += 2)
+			{
+				HLPMStuckPut(&idx, ToF64(i) * 0.125, ToF64(j) * 0.125,
+					ToF64(k) * 0.125);
+			}
+		}
+	}
+
+	zi[0] = 0.0;
+	zi[1] = 1.0;
+	zi[2] = 6.0;
+
+	for (i = 0; i < 3; i++)
+	{
+		HLPMStuckPut(&idx, 0.0, 0.0, zi[i]);
+	}
+
+	for (i = -1; i <= 1; i++)
+	{
+		HLPMStuckPut(&idx, 0.0, ToF64(i) * 2.0, 0.0);
+	}
+
+	for (i = -1; i <= 1; i++)
+	{
+		HLPMStuckPut(&idx, ToF64(i) * 2.0, 0.0, 0.0);
+	}
+
+	for (i = 0; i < 3; i++)
+	{
+		for (j = -1; j <= 1; j++)
+		{
+			for (k = -1; k <= 1; k++)
+			{
+				HLPMStuckPut(&idx, ToF64(j) * 2.0, ToF64(k) * 2.0, zi[i]);
+			}
+		}
+	}
+}
+
+I64 hl_move_pass = 0;		//edict doing the current player move, 0 = none
+
+I64 hl_ground_entity = 0;
+I64 hl_ground_native = -1;
+
+I64 HLStairFlag(Bool b)
+{
+	if (b)
+		return 1;
+
+	return 0;
+}
+
+//stair step-up diagnostics, armed with stairlog 1.
+#define HLSTAIR_MAX_REPORTS	200
+
+Bool	hl_stair_log		= FALSE;
+I64		hl_stair_reports	= 0;
+U8		hl_stair_line[128];
+F64		hl_stair_last_nz	  = 0.0;
+F64		hl_stair_last_frac = 0.0;
+F64		hl_stair_nz[4];
+I64		hl_stair_nz_count  = 0;
+
+#define HLRIDE_LINES	1024
+#define HLRIDE_WIDTH	256
+#define HLRIDE_FLUSH	256
+
+U8	   *hl_ride_buf		= NULL;
+Bool	hl_ride_log		= FALSE;
+I64		hl_ride_ticks	= 0;
+I64		hl_ride_head	= 0;
+
+I64		hl_ride_probe_calls	= 0;
+Bool	hl_ride_probe_hit	= FALSE;
+Bool	hl_ride_probe_solid	= FALSE;
+F64		hl_ride_probe_frac	= 1.0;
+F64		hl_ride_probe_nrm[3];
+I64		hl_ride_probe_nat	= -1;
+
+I64		hl_ride_rides	= -1;
+I64		hl_ride_branch	= 0;
+
+U0 HLRideLogFree()
+{
+	if (hl_ride_buf)
+		Free(hl_ride_buf);
+
+	hl_ride_buf   = NULL;
+	hl_ride_log   = FALSE;
+	hl_ride_ticks = 0;
+	hl_ride_head  = 0;
+}
+
+U0 HLRideLogArm()
+{
+	HLRideLogFree;
+
+	hl_ride_buf = CAlloc(HLRIDE_LINES * HLRIDE_WIDTH);
+
+	hl_ride_probe_calls	= 0;
+	hl_ride_probe_hit	= FALSE;
+	hl_ride_probe_solid	= FALSE;
+	hl_ride_probe_frac	= 1.0;
+	HLVecSet(hl_ride_probe_nrm, 0.0, 0.0, 0.0);
+	hl_ride_probe_nat	= -1;
+	hl_ride_rides		= -1;
+	hl_ride_branch		= 0;
+
+	hl_ride_log = ToBool(hl_ride_buf != NULL);
+}
+
+U0 HLRideLogPut(U8 *s)
+{
+	if (!hl_ride_buf)
+		return;
+
+	HLStrCopy(hl_ride_buf + hl_ride_head * HLRIDE_WIDTH, s, HLRIDE_WIDTH);
+
+	hl_ride_head = (hl_ride_head + 1) % HLRIDE_LINES;
+	hl_ride_ticks++;
+}
+
+U0 HLRideLogFlush()
+{
+	U8 *out;
+	U8 *slot;
+	I64 count = hl_ride_ticks;
+	I64 first;
+	I64 len;
+	I64 n;
+	I64 i;
+	I64 k;
+
+	if (!hl_ride_buf || !hl_disk_writes || count <= 0)
+		return;
+
+	if (count > HLRIDE_LINES)
+		count = HLRIDE_LINES;
+
+	first = (hl_ride_head - count + HLRIDE_LINES) % HLRIDE_LINES;
+
+	//the slack is the legend below, which runs to about 800 bytes
+	out = CAlloc(count * (HLRIDE_WIDTH + 1) + 2048);
+
+	if (!out)
+		return;
+
+	StrPrint(out,
+		"ridelog. one record per server tick, oldest first, 72 Hz.\n"
+		"  N T      tick index, hl_ent_time\n"
+		"  og gn    hl_pm_onground, hl_ground_native\n"
+		"  pc h s   ground probes this tick, trace.hit, trace.start_solid\n"
+		"  f n      probe fraction, probe plane normal xyz\n"
+		"  pn       hl_trace_native_ent\n"
+		"  pa       hl_platform_active\n"
+		"  rd br    HLEntPlayerRides for the tracktrain: -1 not asked, 0 no,\n"
+		"           1 yes. branch 1 ground clause, 2 box, 3 neither, 4 no player\n"
+		"  pv av pi hl_platform_velocity, hl_platform_avel_z, pivot xy\n"
+		"  o v      player origin, player velocity\n"
+		"  T        tracktrain index, then its origin, angles[1],\n"
+		"           avelocity[1]\n\n");
+
+	len = StrLen(out);
+
+	for (i = 0; i < count; i++)
+	{
+		k    = (first + i) % HLRIDE_LINES;
+		slot = hl_ride_buf + k * HLRIDE_WIDTH;
+		n    = StrLen(slot);
+
+		MemCopy(out + len, slot, n);
+		len += n;
+
+		out[len] = '\n';
+		len++;
+	}
+
+	out[len] = 0;
+
+	FileWrite("::/Apps/HL1/RIDELOG.TXT", out, len);
+	Free(out);
+}
+
+
+Bool	hl_on_ladder		= FALSE;
+I64		hl_ladder_ent		= -1;
+
+F64		hl_waterjump_time	= 0.0;
+F64		hl_waterjump_dir[3];
+
+F64		hl_fall_velocity		= 0.0;
+F64		hl_fall_damage_pending = 0.0;
+F64		hl_fall_sound_vol	= 0.0;
+Bool	hl_fall_pain			= FALSE;
+F64		hl_fall_punch_z		= 0.0;
+
+F64		hl_surface_friction	= 1.0;
+
+F64		hl_base_velocity[3];
+
+F64		hl_platform_velocity[3];
+F64		hl_platform_pivot[3];
+F64		hl_platform_avel_z		= 0.0;
+Bool	hl_platform_active		= FALSE;
+F64		hl_platform_yaw_carry	= 0.0;
+
+F64		hl_conveyor_velocity[3];
+Bool	hl_conveyor_active		= FALSE;
+
+CHLMap *hl_pm_map;
+F64		hl_pm_org[3];
+F64		hl_pm_vel[3];
+F64		hl_pm_wishdir[3];
+F64		hl_pm_move;
+F64		hl_pm_view[3];
+Bool	hl_pm_have_view	= FALSE;
+F64		hl_pm_frametime	= 0.0;
+F64		hl_pm_maxspeed		= HLPHYS_MAXSPEED;
+I64		hl_pm_onground		= -1;	//pmove->onground, -1 airborne, 0 on something
+I64		hl_pm_waterlevel	= 0;
+I64		hl_pm_watertype	= HLCONTENTS_EMPTY;
+Bool	hl_pm_wj_extern	= FALSE;
+Bool	hl_pm_jump_btn		= FALSE;
+Bool	hl_pm_duck_btn		= FALSE;
+Bool	hl_pm_on_ladder	= FALSE;
+
+U0 HLMoveStateReset()
+{
+	HLDuckReset;
+
+	hl_on_ladder			= FALSE;
+	hl_ladder_ent			= -1;
+
+	hl_waterjump_time		= 0.0;
+	HLVecSet(hl_waterjump_dir, 0.0, 0.0, 0.0);
+
+	hl_fall_velocity		= 0.0;
+	hl_fall_damage_pending	= 0.0;
+	hl_fall_sound_vol		= 0.0;
+	hl_fall_pain			= FALSE;
+	hl_fall_punch_z			= 0.0;
+
+	hl_surface_friction		= 1.0;
+	HLVecSet(hl_base_velocity, 0.0, 0.0, 0.0);
+
+	HLVecSet(hl_platform_velocity, 0.0, 0.0, 0.0);
+	HLVecSet(hl_platform_pivot, 0.0, 0.0, 0.0);
+	hl_platform_avel_z		= 0.0;
+	hl_platform_active		= FALSE;
+	hl_platform_yaw_carry	= 0.0;
+
+	HLVecSet(hl_conveyor_velocity, 0.0, 0.0, 0.0);
+	hl_conveyor_active		= FALSE;
+
+	hl_ground_entity		= 0;
+	hl_ground_native		= -1;
+
+	hl_pm_map				= NULL;
+	HLVecSet(hl_pm_org, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pm_wishdir, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pm_view, 0.0, 0.0, 0.0);
+	hl_pm_move				= 0.0;
+	hl_pm_have_view			= FALSE;
+	hl_pm_frametime			= 0.0;
+	hl_pm_maxspeed			= HLPHYS_MAXSPEED;
+	hl_pm_onground			= -1;
+	hl_pm_waterlevel		= 0;
+	hl_pm_watertype			= HLCONTENTS_EMPTY;
+	hl_pm_wj_extern			= FALSE;
+	hl_pm_jump_btn			= FALSE;
+	hl_pm_duck_btn			= FALSE;
+	hl_pm_on_ladder			= FALSE;
+
+	hl_stair_nz_count		= 0;
+	hl_stair_nz[0]			= 0.0;
+	hl_stair_nz[1]			= 0.0;
+	hl_stair_nz[2]			= 0.0;
+	hl_stair_nz[3]			= 0.0;
+	hl_stair_last_nz		= 0.0;
+	hl_stair_last_frac		= 0.0;
+}
+
+U0 HLClipInit()
+{
+	HLDuckReset;
+	HLMoveStateReset;
+	HLPMCreateStuckTable;
+	hl_move_pass = 0;
+
+	HLClipPrecacheReset;
+
+	HLClipRotatingReset;
+
+	hl_ride_buf   = NULL;
+	hl_ride_log   = FALSE;
+	hl_ride_ticks = 0;
+	hl_ride_head  = 0;
+}
+
+U0 HLTracePlayer(CHLMap *map, F64 *start, F64 *end, CHLTrace *trace)
+{
+	HLTraceEntity(map, start, end, hl_player_mins, hl_player_maxs, hl_move_pass,
+		FALSE, trace);
+}
+
+U0 HLPMTrace(F64 *start, F64 *end, CHLTrace *trace)
+{
+	HLTracePlayer(hl_pm_map, start, end, trace);
+}
+
+Bool HLDuckFits(CHLMap *map, F64 *origin)
+{
+	CHLTrace tr;
+
+	HLTracePlayer(map, origin, origin, &tr);
+
+	return ToBool(!tr.start_solid);
+}
+
+U0 HLPMCheckStuck(CHLMap *map, F64 *origin)
+{
+	F64 test[3];
+	I64 i;
+
+	if (!map || !origin)
+		return;
+
+	if (HLDuckFits(map, origin))
+	{
+		HLVecCopy(origin, hl_old_origin);
+		return;
+	}
+
+	for (i = 0; i < HLPM_STUCK_SLOTS; i++)
+	{
+		test[0] = origin[0] + hl_pm_stuck_table[i * 3];
+		test[1] = origin[1] + hl_pm_stuck_table[i * 3 + 1];
+		test[2] = origin[2] + hl_pm_stuck_table[i * 3 + 2];
+
+		if (HLDuckFits(map, test))
+		{
+			HLVecCopy(test, origin);
+			return;
+		}
+	}
+
+	if (hl_platform_active)
+		return;
+
+	if (HLDuckFits(map, hl_old_origin))
+		HLVecCopy(hl_old_origin, origin);
+}
+
+U0 HLPMFixCrouchStuck(F64 dir)
+{
+	F64 test[3];
+	I64 i;
+
+	if (HLDuckFits(hl_pm_map, hl_pm_org))
+		return;
+
+	HLVecCopy(hl_pm_org, test);
+
+	for (i = 0; i < 36; i++)
+	{
+		hl_pm_org[2] += dir;
+
+		if (HLDuckFits(hl_pm_map, hl_pm_org))
+			return;
+	}
+
+	HLVecCopy(test, hl_pm_org);
+}
+
+U0 HLCheckVelocity(F64 *velocity)
+{
+	I64 i;
+
+	for (i = 0; i < 3; i++)
+	{
+		if (velocity[i] > HLPHYS_MAXVELOCITY)
+			velocity[i] = HLPHYS_MAXVELOCITY;
+		if (velocity[i] < -HLPHYS_MAXVELOCITY)
+			velocity[i] = -HLPHYS_MAXVELOCITY;
+	}
+}
+
+U0 HLPMCheckVelocity()
+{
+	HLCheckVelocity(hl_pm_vel);
+}
+
+Bool HLPMInWaterJump()
+{
+	if (hl_waterjump_time > 0.0)
+		return TRUE;
+
+	return hl_pm_wj_extern;
+}
+
+//PM_ClipVelocity's STOP_EPSILON.
+#define HLPM_STOP_EPSILON	0.1
+
+#define HLPHYS_MAXPLANES		5
+
+#define HLBLOCK_FLOOR		1
+#define HLBLOCK_WALL			2
+
+I64 HLPMClipVelocity(F64 *in, F64 *normal, F64 *out, F64 overbounce)
+{
+	F64 backoff;
+	F64 angle   = normal[2];
+	I64 blocked = 0;
+	I64 i;
+
+	if (angle > 0.0)
+		blocked |= HLBLOCK_FLOOR;
+	if (HLIsZeroF(angle))
+		blocked |= HLBLOCK_WALL;
+
+	backoff = HLVecDot(in, normal) * overbounce;
+
+	for (i = 0; i < 3; i++)
+	{
+		out[i] = in[i] - normal[i] * backoff;
+
+		if (out[i] > -HLPM_STOP_EPSILON && out[i] < HLPM_STOP_EPSILON)
+			out[i] = 0.0;
+	}
+
+	return blocked;
+}
+
+U0 HLPMAddCorrectGravity()
+{
+	if (HLPMInWaterJump())
+		return;
+
+	hl_pm_vel[2] -= hl_gravity_scale * HLPHYS_GRAVITY * 0.5 * hl_pm_frametime;
+	hl_pm_vel[2] += hl_base_velocity[2] * hl_pm_frametime;
+	hl_base_velocity[2] = 0.0;
+
+	HLPMCheckVelocity;
+}
+
+U0 HLPMFixupGravityVelocity()
+{
+	if (HLPMInWaterJump())
+		return;
+
+	hl_pm_vel[2] -= hl_gravity_scale * HLPHYS_GRAVITY * hl_pm_frametime * 0.5;
+
+	HLPMCheckVelocity;
+}
+
+//CONTENTS_CURRENT_* push.
+#define HLPM_CURRENT_SPEED	50.0
+
+U0 HLPMCurrentBaseVelocity(I64 contents)
+{
+	F64 speed;
+
+	if (!HLContentsCurrent(contents))
+		return;
+
+	speed = HLPM_CURRENT_SPEED * hl_pm_waterlevel;
+
+	if (contents == HLCONTENTS_CURRENT_0)
+		hl_base_velocity[0] += speed;
+	else if (contents == HLCONTENTS_CURRENT_90)
+		hl_base_velocity[1] += speed;
+	else if (contents == HLCONTENTS_CURRENT_180)
+		hl_base_velocity[0] -= speed;
+	else if (contents == HLCONTENTS_CURRENT_270)
+		hl_base_velocity[1] -= speed;
+	else if (contents == HLCONTENTS_CURRENT_UP)
+		hl_base_velocity[2] += speed;
+	else
+		hl_base_velocity[2] -= speed;
+}
+
+Bool HLPMCheckWater()
+{
+	F64 point[3];
+	F64 height;
+	I64 contents;
+	I64 truecont;
+
+	hl_pm_waterlevel = 0;
+	hl_pm_watertype  = HLCONTENTS_EMPTY;
+
+	if (!hl_pm_map)
+		return FALSE;
+
+	point[0] = hl_pm_org[0] + (hl_player_mins[0] + hl_player_maxs[0]) * 0.5;
+	point[1] = hl_pm_org[1] + (hl_player_mins[1] + hl_player_maxs[1]) * 0.5;
+	point[2] = hl_pm_org[2] + hl_player_mins[2] + 1.0;
+
+	truecont = HLPointContents(hl_pm_map, point);
+	contents = truecont;
+
+	if (!HLContentsLiquid(contents))
+		return FALSE;
+
+	hl_pm_watertype  = HLContentsWaterType(contents);
+	hl_pm_waterlevel = 1;
+
+	height   = hl_player_mins[2] + hl_player_maxs[2];
+	point[2] = hl_pm_org[2] + height * 0.5;
+
+	contents = HLPointContents(hl_pm_map, point);
+
+	if (HLContentsLiquid(contents))
+	{
+		hl_pm_waterlevel = 2;
+
+		point[2] = hl_pm_org[2] + hl_view_ofs_z;
+
+		contents = HLPointContents(hl_pm_map, point);
+		if (HLContentsLiquid(contents))
+			hl_pm_waterlevel = 3;
+	}
+
+	HLPMCurrentBaseVelocity(truecont);
+
+	return ToBool(hl_pm_waterlevel > 1);
+}
+
+Bool HLPMInWater()
+{
+	return ToBool(hl_pm_waterlevel > 1);
+}
+
+U0 HLPMCatagorizePosition()
+{
+	CHLTrace tr;
+	F64		point[3];
+	I64		prev_ent;
+	I64		prev_native;
+
+	HLPMCheckWater;
+
+	point[0] = hl_pm_org[0];
+	point[1] = hl_pm_org[1];
+	point[2] = hl_pm_org[2] - 2.0;
+
+	prev_ent    = hl_ground_entity;
+	prev_native = hl_ground_native;
+
+	hl_ground_entity = 0;
+	hl_ground_native = -1;
+
+	hl_ride_probe_calls++;
+	hl_ride_probe_hit   = FALSE;
+	hl_ride_probe_solid = FALSE;
+	hl_ride_probe_frac  = 1.0;
+	HLVecSet(hl_ride_probe_nrm, 0.0, 0.0, 0.0);
+	hl_ride_probe_nat   = -1;
+
+	if (hl_pm_vel[2] > 180.0)
+	{
+		hl_pm_onground = -1;
+		return;
+	}
+
+	hl_trace_native_ent   = -1;
+	hl_trace_native_solid = -1;
+	HLPMTrace(hl_pm_org, point, &tr);
+
+	hl_ride_probe_hit   = tr.hit;
+	hl_ride_probe_solid = tr.start_solid;
+	hl_ride_probe_frac  = tr.fraction;
+	HLVecCopy(tr.plane_normal, hl_ride_probe_nrm);
+	hl_ride_probe_nat   = hl_trace_native_ent;
+
+	if (tr.start_solid || tr.all_solid)
+	{
+		hl_pm_onground   = 0;
+		hl_ground_entity = prev_ent;
+		hl_ground_native = prev_native;
+
+		if (hl_trace_native_solid >= 0)
+			hl_ground_native = hl_trace_native_solid;
+
+		hl_waterjump_time = 0.0;
+		hl_pm_wj_extern   = FALSE;
+		return;
+	}
+
+	if (tr.plane_normal[2] < 0.7)
+	{
+		hl_pm_onground = -1;
+		return;
+	}
+
+	hl_pm_onground = 0;
+
+	if (hl_trace_native_ent >= 0)
+		hl_ground_native = hl_trace_native_ent;
+
+	hl_waterjump_time = 0.0;
+	hl_pm_wj_extern   = FALSE;
+
+	if (hl_pm_waterlevel < 2 && !tr.start_solid && !tr.all_solid)
+		HLVecCopy(tr.end_pos, hl_pm_org);
+}
+
+I64 HLPMFlyMove()
+{
+	CHLTrace	trace;
+	F64		planes[HLPHYS_MAXPLANES * 3];
+	F64		primal[3];
+	F64		original[3];
+	F64		new_vel[3];
+	F64		end[3];
+	F64		dir[3];
+	F64		time_left   = hl_pm_frametime;
+	F64		all_fraction = 0.0;
+	F64		d;
+	F64		bounce;
+	I64		numplanes = 0;
+	I64		blocked   = 0;
+	I64		bump;
+	I64		i;
+	I64		j;
+	Bool	ok;
+	Bool	found;
+	Bool	reflect;
+
+	HLVecCopy(hl_pm_vel, primal);
+	HLVecCopy(hl_pm_vel, original);
+
+	//numbumps is 4
+	for (bump = 0; bump < HLPHYS_MAXCLIP; bump++)
+	{
+		if (hl_pm_vel[0] == 0.0 && hl_pm_vel[1] == 0.0 && hl_pm_vel[2] == 0.0)
+			break;
+
+		HLVecMA(hl_pm_org, time_left, hl_pm_vel, end);
+		HLPMTrace(hl_pm_org, end, &trace);
+
+		all_fraction += trace.fraction;
+
+		if (trace.all_solid)
+		{
+			HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+			return HLBLOCK_FLOOR | HLBLOCK_WALL;
+		}
+
+		if (trace.fraction > 0.0)
+		{
+			HLVecCopy(trace.end_pos, hl_pm_org);
+			HLVecCopy(hl_pm_vel, original);
+			numplanes = 0;
+		}
+
+		if (trace.fraction == 1.0)
+			break;
+
+		//0.7 is about 45 degrees: flatter than that is floor
+		if (trace.plane_normal[2] > 0.7)
+			blocked |= HLBLOCK_FLOOR;
+
+		if (HLIsZeroF(trace.plane_normal[2]))
+			blocked |= HLBLOCK_WALL;
+
+		hl_stair_last_nz   = trace.plane_normal[2];
+		hl_stair_last_frac = trace.fraction;
+
+		if (hl_stair_nz_count < 4)
+		{
+			hl_stair_nz[hl_stair_nz_count] = trace.plane_normal[2];
+			hl_stair_nz_count++;
+		}
+
+		time_left -= time_left * trace.fraction;
+
+		if (numplanes >= HLPHYS_MAXPLANES)
+		{
+			HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+			break;
+		}
+
+		HLVecCopy(trace.plane_normal, &planes[numplanes * 3]);
+		numplanes++;
+
+		reflect = FALSE;
+		if (numplanes == 1)
+		{
+			if (hl_pm_onground == -1 || hl_surface_friction != 1.0)
+				reflect = TRUE;
+		}
+
+		if (reflect)
+		{
+			if (planes[2] > 0.7)
+				bounce = 1.0;
+			else
+				bounce = 1.0 + 1.0 * (1.0 - hl_surface_friction);
+
+			HLPMClipVelocity(original, planes, new_vel, bounce);
+
+			HLVecCopy(new_vel, hl_pm_vel);
+			HLVecCopy(new_vel, original);
+
+			goto qfm_next;
+		}
+
+		found = FALSE;
+		i     = 0;
+
+		while (i < numplanes && !found)
+		{
+			HLPMClipVelocity(original, &planes[i * 3], new_vel, 1.0);
+
+			ok = TRUE;
+			for (j = 0; j < numplanes; j++)
+			{
+				if (j != i && HLVecDot(new_vel, &planes[j * 3]) < 0.0)
+					ok = FALSE;
+			}
+
+			if (ok)
+				found = TRUE;
+			else
+				i++;
+		}
+
+		if (found)
+			HLVecCopy(new_vel, hl_pm_vel);
+		else
+		{
+			if (numplanes != 2)
+			{
+				HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+				break;
+			}
+
+			HLVecCross(planes, &planes[3], dir);
+			d = HLVecDot(dir, hl_pm_vel);
+			HLVecScale(dir, d, hl_pm_vel);
+		}
+
+		if (HLVecDot(hl_pm_vel, primal) <= 0.0)
+		{
+			HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+			break;
+		}
+
+qfm_next:
+	}
+
+	if (all_fraction == 0.0)
+		HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+
+	return blocked;
+}
+
+U0 HLPMAccelerate(F64 *wishdir, F64 wishspeed, F64 accel)
+{
+	F64 currentspeed;
+	F64 addspeed;
+	F64 accelspeed;
+
+	if (HLPMInWaterJump())
+		return;
+
+	currentspeed = HLVecDot(hl_pm_vel, wishdir);
+	addspeed     = wishspeed - currentspeed;
+
+	if (addspeed <= 0.0)
+		return;
+
+	accelspeed = accel * hl_pm_frametime * wishspeed * hl_surface_friction;
+
+	if (accelspeed > addspeed)
+		accelspeed = addspeed;
+
+	HLVecMA(hl_pm_vel, accelspeed, wishdir, hl_pm_vel);
+}
+
+U0 HLPMAirAccelerate(F64 *wishdir, F64 wishspeed, F64 accel)
+{
+	F64 wishspd = wishspeed;
+	F64 currentspeed;
+	F64 addspeed;
+	F64 accelspeed;
+
+	if (HLPMInWaterJump())
+		return;
+
+	if (wishspd > HLPHYS_AIRSPEEDCAP)
+		wishspd = HLPHYS_AIRSPEEDCAP;
+
+	currentspeed = HLVecDot(hl_pm_vel, wishdir);
+	addspeed     = wishspd - currentspeed;
+
+	if (addspeed <= 0.0)
+		return;
+
+	accelspeed = accel * wishspeed * hl_pm_frametime * hl_surface_friction;
+
+	if (accelspeed > addspeed)
+		accelspeed = addspeed;
+
+	HLVecMA(hl_pm_vel, accelspeed, wishdir, hl_pm_vel);
+}
+
+U0 HLPMFriction()
+{
+	CHLTrace tr;
+	F64	start[3];
+	F64	stop[3];
+	F64	speed;
+	F64	friction;
+	F64	control;
+	F64	drop = 0.0;
+	F64	newspeed;
+
+	if (HLPMInWaterJump())
+		return;
+
+	speed = Sqrt(hl_pm_vel[0] * hl_pm_vel[0] + hl_pm_vel[1] * hl_pm_vel[1] +
+				 hl_pm_vel[2] * hl_pm_vel[2]);
+
+	if (speed < 0.1)
+		return;
+
+	if (hl_pm_onground != -1)
+	{
+		start[0] = hl_pm_org[0] + hl_pm_vel[0] / speed * 16.0;
+		start[1] = hl_pm_org[1] + hl_pm_vel[1] / speed * 16.0;
+		start[2] = hl_pm_org[2] + hl_player_mins[2];
+
+		stop[0] = start[0];
+		stop[1] = start[1];
+		stop[2] = start[2] - 34.0;
+
+		HLPMTrace(start, stop, &tr);
+
+		friction = HLPHYS_FRICTION;
+		if (tr.fraction == 1.0)
+			friction *= HLPHYS_EDGEFRICTION;
+
+		friction *= hl_surface_friction;
+
+		if (speed < HLPHYS_STOPSPEED)
+			control = HLPHYS_STOPSPEED;
+		else
+			control = speed;
+
+		drop += control * friction * hl_pm_frametime;
+	}
+
+	newspeed = speed - drop;
+	if (newspeed < 0.0)
+		newspeed = 0.0;
+
+	newspeed /= speed;
+
+	hl_pm_vel[0] *= newspeed;
+	hl_pm_vel[1] *= newspeed;
+	hl_pm_vel[2] *= newspeed;
+}
+
+U0 HLPMFlatWish(F64 *wishvel, F64 *wishdir, F64 *_wishspeed)
+{
+	F64 flat[3];
+	F64 wishspeed;
+
+	HLVecSet(flat, hl_pm_wishdir[0], hl_pm_wishdir[1], 0.0);
+	HLVecNormalize(flat);
+
+	HLVecScale(flat, hl_pm_move, wishvel);
+	wishvel[2] = 0.0;
+
+	HLVecCopy(wishvel, wishdir);
+	wishspeed = HLVecNormalize(wishdir);
+
+	if (wishspeed > hl_pm_maxspeed)
+	{
+		HLVecScale(wishvel, hl_pm_maxspeed / wishspeed, wishvel);
+		wishspeed = hl_pm_maxspeed;
+	}
+
+	if (_wishspeed)
+		*_wishspeed = wishspeed;
+}
+
+U0 HLPMWalkMove()
+{
+	CHLTrace	trace;
+	F64		wishvel[3];
+	F64		wishdir[3];
+	F64		dest[3];
+	F64		original[3];
+	F64		originalvel[3];
+	F64		down[3];
+	F64		downvel[3];
+	F64		up[3];
+	F64		wishspeed = 0.0;
+	F64		spd;
+	F64		downdist;
+	F64		updist;
+	I64		oldonground;
+	Bool	usedown;
+
+	HLPMFlatWish(wishvel, wishdir, &wishspeed);
+
+	hl_pm_vel[2] = 0.0;
+	HLPMAccelerate(wishdir, wishspeed, HLPHYS_ACCEL);
+	hl_pm_vel[2] = 0.0;
+
+	HLVecAdd(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+
+	spd = HLVecLength(hl_pm_vel);
+	if (spd < 1.0)
+	{
+		HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+		return;
+	}
+
+	oldonground = hl_pm_onground;
+
+	dest[0] = hl_pm_org[0] + hl_pm_vel[0] * hl_pm_frametime;
+	dest[1] = hl_pm_org[1] + hl_pm_vel[1] * hl_pm_frametime;
+	dest[2] = hl_pm_org[2];
+
+	HLPMTrace(hl_pm_org, dest, &trace);
+
+	if (trace.fraction == 1.0)
+	{
+		HLVecCopy(trace.end_pos, hl_pm_org);
+		return;
+	}
+
+	if (oldonground == -1 && hl_pm_waterlevel == 0)
+		return;
+
+	if (HLPMInWaterJump())
+		return;
+
+	HLVecCopy(hl_pm_org, original);
+	HLVecCopy(hl_pm_vel, originalvel);
+
+	hl_stair_nz_count = 0;
+	hl_stair_nz[0]    = 0.0;
+	hl_stair_nz[1]    = 0.0;
+	hl_stair_nz[2]    = 0.0;
+	hl_stair_nz[3]    = 0.0;
+
+	HLPMFlyMove;
+
+	HLVecCopy(hl_pm_org, down);
+	HLVecCopy(hl_pm_vel, downvel);
+
+	HLVecCopy(original, hl_pm_org);
+	HLVecCopy(originalvel, hl_pm_vel);
+
+	HLVecCopy(hl_pm_org, dest);
+	dest[2] += HLPHYS_STEPSIZE;
+
+	HLPMTrace(hl_pm_org, dest, &trace);
+
+	if (!trace.start_solid && !trace.all_solid)
+		HLVecCopy(trace.end_pos, hl_pm_org);
+
+	HLPMFlyMove;
+
+	HLVecCopy(hl_pm_org, dest);
+	dest[2] -= HLPHYS_STEPSIZE;
+
+	HLPMTrace(hl_pm_org, dest, &trace);
+
+	usedown = FALSE;
+
+	if (trace.plane_normal[2] < 0.7)
+		usedown = TRUE;
+	else
+	{
+		if (!trace.start_solid && !trace.all_solid)
+			HLVecCopy(trace.end_pos, hl_pm_org);
+
+		HLVecCopy(hl_pm_org, up);
+
+		downdist = (down[0] - original[0]) * (down[0] - original[0]) +
+				   (down[1] - original[1]) * (down[1] - original[1]);
+		updist   = (up[0] - original[0]) * (up[0] - original[0]) +
+				   (up[1] - original[1]) * (up[1] - original[1]);
+
+		if (downdist > updist)
+			usedown = TRUE;
+		else
+			hl_pm_vel[2] = downvel[2];
+	}
+
+	if (hl_stair_log && hl_stair_reports < HLSTAIR_MAX_REPORTS)
+	{
+		hl_stair_reports++;
+
+		StrPrint(hl_stair_line,
+			"stair: dn(%5.2f,%5.2f) up(%5.2f,%5.2f) dz %4.1f n_z %4.2f %d\n",
+			down[0] - original[0], down[1] - original[1],
+			hl_pm_org[0] - original[0], hl_pm_org[1] - original[1],
+			hl_pm_org[2] - original[2], trace.plane_normal[2],
+			HLStairFlag(usedown));
+
+		HLLog(hl_stair_line);
+		HLLogFlush;
+	}
+
+	if (usedown)
+	{
+		HLVecCopy(down, hl_pm_org);
+		HLVecCopy(downvel, hl_pm_vel);
+	}
+}
+
+U0 HLPMAirMove()
+{
+	F64 wishvel[3];
+	F64 wishdir[3];
+	F64 wishspeed = 0.0;
+
+	HLPMFlatWish(wishvel, wishdir, &wishspeed);
+
+	HLPMAirAccelerate(wishdir, wishspeed, HLPHYS_AIRACCEL);
+
+	HLVecAdd(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+
+	HLPMFlyMove;
+}
+
+U0 HLPMWaterMove()
+{
+	CHLTrace	trace;
+	F64		wishvel[3];
+	F64		wishdir[3];
+	F64		temp[3];
+	F64		start[3];
+	F64		dest[3];
+	F64		wishspeed;
+	F64		speed;
+	F64		newspeed;
+	F64		addspeed;
+	F64		accelspeed;
+
+	HLVecScale(hl_pm_wishdir, hl_pm_move, wishvel);
+
+	if (hl_pm_move < 0.1)
+		wishvel[2] -= HLPHYS_WATERSINK;
+
+	HLVecCopy(wishvel, wishdir);
+	wishspeed = HLVecNormalize(wishdir);
+
+	if (wishspeed > hl_pm_maxspeed)
+	{
+		HLVecScale(wishvel, hl_pm_maxspeed / wishspeed, wishvel);
+		wishspeed = hl_pm_maxspeed;
+	}
+
+	wishspeed *= HLPHYS_WATERSPEED;
+
+	HLVecAdd(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+
+	HLVecCopy(hl_pm_vel, temp);
+	speed    = HLVecNormalize(temp);
+	newspeed = 0.0;
+
+	if (speed > 0.0)
+	{
+		newspeed = speed - hl_pm_frametime * speed * HLPHYS_WATERFRICTION *
+			hl_surface_friction;
+
+		if (newspeed < 0.0)
+			newspeed = 0.0;
+
+		HLVecScale(hl_pm_vel, newspeed / speed, hl_pm_vel);
+	}
+
+	if (wishspeed < 0.1)
+		return;
+
+	addspeed = wishspeed - newspeed;
+
+	if (addspeed > 0.0)
+	{
+		HLVecNormalize(wishvel);
+
+		accelspeed = HLPHYS_ACCEL * wishspeed * hl_pm_frametime *
+			hl_surface_friction;
+
+		if (accelspeed > addspeed)
+			accelspeed = addspeed;
+
+		HLVecMA(hl_pm_vel, accelspeed, wishvel, hl_pm_vel);
+	}
+
+	HLVecMA(hl_pm_org, hl_pm_frametime, hl_pm_vel, dest);
+	HLVecCopy(dest, start);
+	start[2] += HLPHYS_STEPSIZE + 1.0;
+
+	HLPMTrace(start, dest, &trace);
+
+	if (!trace.start_solid && !trace.all_solid)
+	{
+		HLVecCopy(trace.end_pos, hl_pm_org);
+		return;
+	}
+
+	HLPMFlyMove;
+}
+
+
+I64 HLLadderFind(CHLMap *map, F64 *origin)
+{
+	CHLEntity	*e;
+	F64			 eofs[3];
+	F64			 test[3];
+	I64			 hull;
+	I64			 head;
+	I64			 i;
+	I64			 j;
+
+	if (!hl_entities || !HLMapValid(map, "HLLadderFind"))
+		return -1;
+
+	hull = HLHullForSize(hl_player_mins, hl_player_maxs);
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->in_use || e->brush_model < 1 ||
+			e->brush_model >= map->num_models)
+			goto qlf_next;
+
+		if (StrCompare(e->classname, "func_ladder"))
+			goto qlf_next;
+
+		if (hull)
+			head = map->models[e->brush_model].head_node[hull];
+		else
+			head = map->models[e->brush_model].hull0_head;
+
+		if (head <= 0)
+			goto qlf_next;
+
+		HLHullOffset(hull, hl_player_mins, eofs);
+		for (j = 0; j < 3; j++)
+			eofs[j] += e->origin[j];
+
+		HLVecSub(origin, eofs, test);
+
+		if (HLHullPointContents(map, head, test) == HLCONTENTS_SOLID)
+			return i;
+
+qlf_next:
+	}
+
+	return -1;
+}
+
+U0 HLPMLadderMove(I64 ent)
+{
+	CHLEntity	*e;
+	CHLTrace	 tr;
+	F64			 fwd[3];
+	F64			 rgt[3];
+	F64			 flat_f[3];
+	F64			 flat_r[3];
+	F64			 centre[3];
+	F64			 eofs[3];
+	F64			 floor_pt[3];
+	F64			 wish[3];
+	F64			 perp[3];
+	F64			 tmp[3];
+	F64			 into[3];
+	F64			 lateral[3];
+	F64			 speed;
+	F64			 f_amt;
+	F64			 r_amt;
+	F64			 normal_amt;
+	I64			 j;
+	Bool		 on_floor;
+
+	if (ent < 0 || ent >= hl_num_entities || !hl_pm_have_view)
+		return;
+
+	e = &hl_entities[ent];
+
+	HLAngleVectors(hl_pm_view, fwd, rgt, NULL);
+
+	speed = HLPHYS_CLIMBSPEED;
+	if (speed > hl_pm_maxspeed)
+		speed = hl_pm_maxspeed;
+
+	if (hl_ducking)
+		speed *= HLPM_DUCK_MULT;
+
+	HLVecSet(flat_f, fwd[0], fwd[1], 0.0);
+	HLVecSet(flat_r, rgt[0], rgt[1], 0.0);
+	HLVecNormalize(flat_f);
+	HLVecNormalize(flat_r);
+
+	f_amt = HLVecDot(hl_pm_wishdir, flat_f) * speed;
+	r_amt = HLVecDot(hl_pm_wishdir, flat_r) * speed;
+
+	if (hl_pm_jump_btn)
+	{
+		HLVecScale(fwd, HLPHYS_LADDER_JUMP, hl_pm_vel);
+		return;
+	}
+
+	HLVecCopy(hl_pm_org, floor_pt);
+	floor_pt[2] += hl_player_mins[2] - 1.0;
+	on_floor = ToBool(HLPointContents(hl_pm_map, floor_pt) == HLCONTENTS_SOLID);
+
+	for (j = 0; j < 3; j++)
+		centre[j] = e->origin[j] + (e->mins[j] + e->maxs[j]) * 0.5;
+
+	HLVecCopy(e->origin, eofs);
+
+	HLTraceHull(hl_pm_map, e->brush_model, 0, eofs, hl_pm_org, centre, &tr);
+
+	if (!tr.hit)
+		return;
+
+	if (f_amt > -0.1 && f_amt < 0.1 && r_amt > -0.1 && r_amt < 0.1)
+	{
+		HLVecSet(hl_pm_vel, 0.0, 0.0, 0.0);
+		return;
+	}
+
+	HLVecScale(fwd, f_amt, wish);
+	HLVecMA(wish, r_amt, rgt, wish);
+
+	HLVecSet(tmp, 0.0, 0.0, 1.0);
+	HLVecCross(tmp, tr.plane_normal, perp);
+
+	if (HLVecNormalize(perp) < HLPHYS_EPSILON)
+	{
+		HLClipVelocity(wish, tr.plane_normal, HLPHYS_OVERCLIP, hl_pm_vel);
+		return;
+	}
+
+	normal_amt = HLVecDot(wish, tr.plane_normal);
+	HLVecScale(tr.plane_normal, normal_amt, into);
+	HLVecSub(wish, into, lateral);
+
+	HLVecCross(tr.plane_normal, perp, tmp);
+	HLVecMA(lateral, -normal_amt, tmp, hl_pm_vel);
+
+	if (on_floor && normal_amt > 0.0)
+		HLVecMA(hl_pm_vel, HLPHYS_CLIMBSPEED, tr.plane_normal, hl_pm_vel);
+}
+
+
+U0 HLPMCheckWaterJump()
+{
+	CHLTrace tr;
+	F64 flat_fwd[3];
+	F64 flat_vel[3];
+	F64 vec_start[3];
+	F64 vec_end[3];
+	F64 save_mins[3];
+	F64 save_maxs[3];
+	F64 push[3];
+	F64 top;
+	F64 curspeed;
+	F64 nz;
+
+	if (HLPMInWaterJump())
+		return;
+
+	if (hl_pm_vel[2] < HLPHYS_WJ_SINKING)
+		return;
+
+	if (!hl_pm_have_view)
+		return;
+
+	HLAngleVectors(hl_pm_view, flat_fwd, NULL, NULL);
+	flat_fwd[2] = 0.0;
+	HLVecNormalize(flat_fwd);
+
+	HLVecSet(flat_vel, hl_pm_vel[0], hl_pm_vel[1], 0.0);
+	curspeed = HLVecNormalize(flat_vel);
+
+	if (curspeed != 0.0 && HLVecDot(flat_vel, flat_fwd) < 0.0)
+		return;
+
+	top = hl_player_maxs[2];
+
+	HLVecCopy(hl_player_mins, save_mins);
+	HLVecCopy(hl_player_maxs, save_maxs);
+	HLVecSet(hl_player_mins, 0.0, 0.0, 0.0);
+	HLVecSet(hl_player_maxs, 0.0, 0.0, 0.0);
+
+	HLVecCopy(hl_pm_org, vec_start);
+	vec_start[2] += HLPHYS_WJ_HEIGHT;
+	HLVecMA(vec_start, HLPHYS_WJ_FORWARD, flat_fwd, vec_end);
+
+	HLPMTrace(vec_start, vec_end, &tr);
+
+	nz = tr.plane_normal[2];
+	if (nz < 0.0)
+		nz = -nz;
+
+	if (tr.fraction < 1.0 && nz < 0.1)
+	{
+		HLVecScale(tr.plane_normal, HLPHYS_WJ_PUSH, push);
+
+		vec_start[2] += top - HLPHYS_WJ_HEIGHT;
+		HLVecMA(vec_start, HLPHYS_WJ_FORWARD, flat_fwd, vec_end);
+
+		HLPMTrace(vec_start, vec_end, &tr);
+
+		if (tr.fraction == 1.0)
+		{
+			hl_waterjump_time = HLPHYS_WJ_TIME;
+			HLVecCopy(push, hl_waterjump_dir);
+			hl_pm_vel[2] = HLPHYS_WJ_UP;
+
+			hl_jump_held = TRUE;
+		}
+	}
+
+	HLVecCopy(save_mins, hl_player_mins);
+	HLVecCopy(save_maxs, hl_player_maxs);
+}
+
+U0 HLPMWaterJump()
+{
+	if (hl_waterjump_time <= 0.0)
+		return;
+
+	if (hl_waterjump_time > 10.0)
+		hl_waterjump_time = 10.0;
+
+	hl_waterjump_time -= hl_pm_frametime;
+
+	if (hl_waterjump_time < 0.0 || hl_pm_waterlevel == 0)
+		hl_waterjump_time = 0.0;
+
+	hl_pm_vel[0] = hl_waterjump_dir[0];
+	hl_pm_vel[1] = hl_waterjump_dir[1];
+}
+
+
+U0 HLPMCheckFalling()
+{
+	F64 fvol;
+
+	hl_fall_sound_vol = 0.0;
+	hl_fall_pain      = FALSE;
+
+	if (hl_pm_onground != -1 && hl_fall_velocity >= HLPHYS_FALL_PUNCH)
+	{
+		fvol = 0.5;
+
+		if (hl_pm_waterlevel > 0)
+			fvol = 0.0;
+		else if (hl_fall_velocity > HLPHYS_FALL_SAFE)
+		{
+			hl_fall_pain = TRUE;
+			fvol         = 1.0;
+
+			hl_fall_damage_pending += (hl_fall_velocity - HLPHYS_FALL_SAFE) *
+				(100.0 / (HLPHYS_FALL_FATAL - HLPHYS_FALL_SAFE));
+		}
+		else if (hl_fall_velocity > HLPHYS_FALL_SAFE * 0.5)
+			fvol = 0.85;
+
+
+		if (fvol > 0.0)
+		{
+			hl_step_time = 0.0;
+			hl_fall_sound_vol = fvol;
+
+			hl_fall_punch_z = hl_fall_velocity * 0.013;
+			if (hl_fall_punch_z > 8.0)
+				hl_fall_punch_z = 8.0;
+		}
+	}
+
+	if (hl_pm_onground != -1)
+		hl_fall_velocity = 0.0;
+}
+
+U0 HLPMUpdateStepSound()
+{
+	F64		knee[3];
+	F64		feet[3];
+	F64		height;
+	F64		speed;
+	F64		velwalk;
+	F64		velrun;
+	F64		flduck;
+	F64		fvol;
+	I64		step;
+	I64		mat;
+	Bool	walking;
+	Bool	moving;
+
+	if (hl_step_time > 0.0)
+		return;
+
+	speed = HLVecLength(hl_pm_vel);
+
+	if (hl_ducking || hl_pm_on_ladder)
+	{
+		velwalk = 60.0;
+		velrun  = 80.0;
+		flduck  = 0.1;		//the SDK's 100ms
+	}
+	else
+	{
+		velwalk = 120.0;
+		velrun  = 210.0;
+		flduck  = 0.0;
+	}
+
+	moving = FALSE;
+	if (hl_pm_on_ladder || hl_pm_onground != -1)
+	{
+		if (speed > 0.0 && speed >= velwalk)
+			moving = TRUE;
+	}
+
+	if (!moving)
+		return;
+
+	walking = ToBool(speed < velrun);
+
+	HLVecCopy(hl_pm_org, knee);
+	HLVecCopy(hl_pm_org, feet);
+
+	height  = hl_player_maxs[2] - hl_player_mins[2];
+	knee[2] = hl_pm_org[2] - 0.3 * height;
+	feet[2] = hl_pm_org[2] - 0.5 * height;
+
+	if (hl_pm_on_ladder)
+	{
+		step         = HLSTEP_LADDER;
+		fvol         = 0.35;
+		hl_step_time = 0.35;
+	}
+	else if (HLPointContents(hl_pm_map, knee) == HLCONTENTS_WATER)
+	{
+		step         = HLSTEP_WADE;
+		fvol         = 0.65;
+		hl_step_time = 0.6;
+	}
+	else if (HLPointContents(hl_pm_map, feet) == HLCONTENTS_WATER)
+	{
+		step = HLSTEP_SLOSH;
+
+		if (walking)
+		{
+			fvol         = 0.2;
+			hl_step_time = 0.4;
+		}
+		else
+		{
+			fvol         = 0.5;
+			hl_step_time = 0.3;
+		}
+	}
+	else
+	{
+		mat  = HLSndMaterialAt(hl_pm_map, hl_pm_org);
+		step = HLSndStepForMaterial(mat);
+
+		if (mat == HLTEX_DIRT)
+		{
+			if (walking)
+				fvol = 0.25;
+			else
+				fvol = 0.55;
+		}
+		else if (mat == HLTEX_VENT)
+		{
+			if (walking)
+				fvol = 0.4;
+			else
+				fvol = 0.7;
+		}
+		else
+		{
+			if (walking)
+				fvol = 0.2;
+			else
+				fvol = 0.5;
+		}
+
+		if (walking)
+			hl_step_time = 0.4;
+		else
+			hl_step_time = 0.3;
+	}
+
+	hl_step_time += flduck;
+
+	//"35% volume if ducking"
+	if (hl_ducking)
+		fvol *= 0.35;
+
+	hl_step_side = (hl_step_side + 1) & 3;
+	hl_step_kind = step;
+	hl_step_vol  = fvol;
+	hl_step_play = TRUE;
+}
+
+U0 HLPMUnDuck()
+{
+	CHLTrace	trace;
+	F64		new_origin[3];
+
+	HLVecCopy(hl_pm_org, new_origin);
+
+	if (hl_pm_onground != -1)
+		new_origin[2] += HLPHYS_DUCK_SHIFT;
+
+	HLPMTrace(new_origin, new_origin, &trace);
+
+	if (trace.start_solid)
+		return;
+
+	HLDuckSetHull(FALSE);
+
+	HLPMTrace(new_origin, new_origin, &trace);
+
+	if (trace.start_solid)
+	{
+		HLDuckSetHull(TRUE);
+		return;
+	}
+
+	hl_ducking      = FALSE;
+	hl_duck_pending = FALSE;
+	hl_view_ofs_z   = HLPHYS_VIEW_Z;
+	hl_duck_time    = 0.0;
+
+	HLVecCopy(new_origin, hl_pm_org);
+
+	HLPMCatagorizePosition;
+}
+
+U0 HLPMDuck()
+{
+	F64		time;
+	F64		duck_fraction;
+	F64		more;
+	Bool	pressed;
+	Bool	want;
+
+	pressed           = ToBool(hl_pm_duck_btn && !hl_duck_held_last);
+	hl_duck_held_last = hl_pm_duck_btn;
+
+	if (hl_ducking)
+		hl_pm_move *= HLPM_DUCK_MULT;
+
+	want = ToBool(hl_pm_duck_btn || hl_duck_pending || hl_ducking);
+
+	if (!want)
+		return;
+
+	if (!hl_pm_duck_btn)
+	{
+		HLPMUnDuck;
+		return;
+	}
+
+	if (pressed && !hl_ducking)
+	{
+		hl_duck_time    = HLPM_DUCK_TIMER;
+		hl_duck_pending = TRUE;
+	}
+
+	if (!hl_duck_pending)
+		return;
+
+	//time = max(0, 1 - flDuckTime/1000): seconds spent in the transition
+	time = HLPM_DUCK_TIMER - hl_duck_time;
+	if (time < 0.0)
+		time = 0.0;
+
+	if (hl_duck_time <= HLPM_DUCK_TIMER - HLPHYS_DUCK_TIME ||
+		hl_pm_onground == -1)
+	{
+		HLDuckSetHull(TRUE);
+		hl_view_ofs_z   = HLPHYS_DUCK_VIEW_Z;
+		hl_ducking      = TRUE;
+		hl_duck_pending = FALSE;
+
+		if (hl_pm_onground != -1)
+		{
+			hl_pm_org[2] -= HLPHYS_DUCK_SHIFT;
+
+			HLPMFixCrouchStuck(1.0);
+
+			HLPMCatagorizePosition;
+		}
+
+		return;
+	}
+
+	more          = HLPHYS_DUCK_MINS_Z - HLPHYS_MINS_Z;
+	duck_fraction = HLDuckSpline(time / HLPHYS_DUCK_TIME);
+
+	hl_view_ofs_z = (HLPHYS_DUCK_VIEW_Z - more) * duck_fraction +
+					HLPHYS_VIEW_Z * (1.0 - duck_fraction);
+}
+
+U0 HLPMCheckParameters()
+{
+	F64 spd = hl_pm_move;
+
+	if (spd < 0.0)
+		spd = -spd;
+
+	if (spd != 0.0 && spd > hl_pm_maxspeed)
+		hl_pm_move *= hl_pm_maxspeed / spd;
+}
+
+U0 HLPMReduceTimers()
+{
+	if (hl_step_time > 0.0)
+	{
+		hl_step_time -= hl_pm_frametime;
+		if (hl_step_time < 0.0)
+			hl_step_time = 0.0;
+	}
+
+	if (hl_duck_time > 0.0)
+	{
+		hl_duck_time -= hl_pm_frametime;
+		if (hl_duck_time < 0.0)
+			hl_duck_time = 0.0;
+	}
+}
+
+U0 HLPreventMegaBunny()
+{
+	F64 maxscaled = HLPHYS_BUNNY_FACTOR * hl_pm_maxspeed;
+	F64 spd;
+	F64 fraction;
+
+	if (maxscaled <= 0.0)
+		return;
+
+	spd = HLVecLength(hl_pm_vel);
+
+	if (spd <= maxscaled)
+		return;
+
+	fraction = (maxscaled / spd) * HLPHYS_BUNNY_SCALE;
+
+	HLVecScale(hl_pm_vel, fraction, hl_pm_vel);
+}
+
+U0 HLPMJump()
+{
+	if (HLPMInWaterJump())
+	{
+		hl_waterjump_time -= hl_pm_frametime;
+		if (hl_waterjump_time < 0.0)
+			hl_waterjump_time = 0.0;
+
+		return;
+	}
+
+	if (hl_pm_waterlevel >= 2)
+	{
+		hl_pm_onground = -1;
+
+		if (hl_pm_watertype == HLCONTENTS_WATER)
+			hl_pm_vel[2] = 100.0;
+		else if (hl_pm_watertype == HLCONTENTS_SLIME)
+			hl_pm_vel[2] = 80.0;
+		else
+			hl_pm_vel[2] = 50.0;
+
+		return;
+	}
+
+	if (hl_pm_onground == -1)
+	{
+		hl_jump_held = TRUE;
+		return;
+	}
+
+	if (hl_jump_held)
+		return;
+
+	hl_pm_onground = -1;
+
+	if (hl_conveyor_active)
+		HLVecAdd(hl_pm_vel, hl_conveyor_velocity, hl_pm_vel);
+
+	HLPreventMegaBunny;
+
+	//PM_Jump, pm_shared.c:2568.
+	HLSndJumpStep(hl_pm_map, hl_pm_org, 0);
+
+	//sqrt(2 * 800 * 45), exactly enough to clear 45 units, ducked or not
+	hl_pm_vel[2] = HLPHYS_JUMP;
+
+	HLPMFixupGravityVelocity;
+
+	hl_jump_held = TRUE;
+}
+
+U0 HLPMPlatformBaseVelocity()
+{
+	F64 w;
+	F64 rx;
+	F64 ry;
+
+	HLVecSet(hl_base_velocity, 0.0, 0.0, 0.0);
+	hl_platform_yaw_carry = 0.0;
+
+	if (hl_conveyor_active)
+		HLVecAdd(hl_base_velocity, hl_conveyor_velocity, hl_base_velocity);
+
+	if (!hl_platform_active)
+		return;
+
+	HLVecAdd(hl_base_velocity, hl_platform_velocity, hl_base_velocity);
+
+	if (!HLIsZeroF(hl_platform_avel_z))
+	{
+		w  = hl_platform_avel_z * HLDEG2RAD;
+		rx = hl_pm_org[0] - hl_platform_pivot[0];
+		ry = hl_pm_org[1] - hl_platform_pivot[1];
+
+		hl_base_velocity[0] -= w * ry;
+		hl_base_velocity[1] += w * rx;
+
+		hl_platform_yaw_carry = hl_platform_avel_z * hl_pm_frametime;
+	}
+}
+
+U0 HLPlayerMove(CHLMap *map, F64 *origin, F64 *velocity, F64 *wishdir,
+	F64 wishspeed, Bool jump, F64 dt, Bool *_on_ground, I64 water_level,
+	Bool waterjump, F64 *view_angles = NULL, I64 mover = 0,
+	Bool duck = FALSE)
+{
+	I64		saved_pass;
+	I64		ladder;
+
+	if (!map)
+		return;
+
+	saved_pass   = hl_move_pass;
+	hl_move_pass = mover;
+
+	hl_pm_map = map;
+	HLVecCopy(origin, hl_pm_org);
+	HLVecCopy(velocity, hl_pm_vel);
+	HLVecCopy(wishdir, hl_pm_wishdir);
+
+	hl_pm_move      = wishspeed;
+	hl_pm_frametime = dt;
+	hl_pm_maxspeed  = HLPHYS_MAXSPEED;
+	hl_pm_jump_btn  = jump;
+	hl_pm_duck_btn  = duck;
+	hl_pm_wj_extern = waterjump;
+	hl_pm_waterlevel = water_level;
+
+	hl_pm_have_view = FALSE;
+	if (view_angles)
+	{
+		HLVecCopy(view_angles, hl_pm_view);
+		hl_pm_have_view = TRUE;
+	}
+
+	HLPMCheckParameters;
+	HLPMReduceTimers;
+
+	HLPMPlatformBaseVelocity;
+
+	HLPMCheckStuck(map, hl_pm_org);
+
+	HLPMCatagorizePosition;
+
+	if (hl_pm_onground == -1)
+		hl_fall_velocity = -hl_pm_vel[2];
+
+	ladder = -1;
+	if (hl_pm_have_view)
+		ladder = HLLadderFind(map, hl_pm_org);
+
+	hl_ladder_ent = ladder;
+	hl_on_ladder  = ToBool(ladder >= 0);
+
+	HLPMUpdateStepSound;
+
+	HLPMDuck;
+
+	hl_pm_on_ladder = hl_on_ladder;
+
+	if (ladder >= 0)
+	{
+		HLPMLadderMove(ladder);
+
+		HLPMCheckWater;
+
+		hl_jump_held = jump;
+
+		hl_fall_velocity  = 0.0;
+		hl_fall_sound_vol = 0.0;
+		hl_fall_pain      = FALSE;
+
+		HLVecAdd(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+		HLPMFlyMove;
+		HLVecSub(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+
+		hl_pm_onground = -1;
+		goto qpm_done;
+	}
+
+	if (!HLPMInWater())
+		HLPMAddCorrectGravity;
+
+	if (HLPMInWaterJump())
+	{
+		HLPMWaterJump;
+		HLPMFlyMove;
+		HLPMCheckWater;
+
+		hl_pm_onground = -1;
+		goto qpm_done;
+	}
+
+	if (hl_pm_waterlevel >= 2)
+	{
+		if (hl_pm_waterlevel == 2)
+			HLPMCheckWaterJump;
+
+		if (hl_pm_vel[2] < 0.0 && hl_waterjump_time > 0.0)
+			hl_waterjump_time = 0.0;
+
+		if (jump)
+			HLPMJump;
+		else
+			hl_jump_held = FALSE;
+
+		HLPMWaterMove;
+
+		HLVecSub(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+
+		HLPMCatagorizePosition;
+
+		hl_fall_velocity  = 0.0;
+		hl_fall_sound_vol = 0.0;
+		hl_fall_pain      = FALSE;
+
+		goto qpm_done;
+	}
+
+	if (jump)
+		HLPMJump;
+	else
+		hl_jump_held = FALSE;
+
+	if (hl_pm_onground != -1)
+	{
+		hl_pm_vel[2] = 0.0;
+		HLPMFriction;
+	}
+
+	HLPMCheckVelocity;
+
+	if (hl_pm_onground != -1)
+		HLPMWalkMove;
+	else
+		HLPMAirMove;
+
+	HLPMCatagorizePosition;
+
+	HLVecSub(hl_pm_vel, hl_base_velocity, hl_pm_vel);
+	HLPMCheckVelocity;
+
+	if (!HLPMInWater())
+		HLPMFixupGravityVelocity;
+
+	if (hl_pm_onground != -1)
+		hl_pm_vel[2] = 0.0;
+
+	HLPMCheckFalling;
+
+qpm_done:
+	HLVecCopy(hl_pm_org, origin);
+	HLVecCopy(hl_pm_vel, velocity);
+
+	if (_on_ground)
+		*_on_ground = ToBool(hl_pm_onground != -1);
+
+	hl_move_pass = saved_pass;
+}

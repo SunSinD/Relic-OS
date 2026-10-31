@@ -1,0 +1,7682 @@
+/*	Zinc JS: a small JavaScript interpreter. Public Domain. Needs HTML.ZC.
+
+	All interpreter memory comes from a per-page arena freed by JsInterpFree.
+	No literal dollar signs allowed in this file (DolDoc source rule). */
+
+#define JS_MAX_SRC			2097152 // = HTTP_BODY_MAX
+#define JS_MAX_STEPS		200000000
+#define JS_MAX_SECS			20.0
+#define JS_TIME_CHECK		0xFFFF	// steps between clock reads
+#define JS_MAX_DEPTH		48
+#define JS_MAX_ARGS			16
+#define JS_WRITE_BUF		131072
+#define JS_TEXT_MAX			65536
+
+#define JV_UNDEF	0
+#define JV_NULL		1
+#define JV_BOOL		2
+#define JV_NUM		3
+#define JV_STR		4
+#define JV_FUNC		5
+#define JV_NATIVE	6
+#define JV_OBJ		7
+#define JV_ARR		8
+
+// JV_OBJ flavors, held in native_id
+#define JSO_PLAIN		0
+#define JSO_DOCUMENT	1
+#define JSO_LOCATION	2
+#define JSO_WINDOW		3
+#define JSO_ELEMENT		4
+#define JSO_STYLE		5
+#define JSO_XHR			6
+#define JSO_PROMISE		7
+#define JSO_CLASSLIST	8
+#define JSO_PROXY		9	// new Proxy(t, h); slots _ptarget / _phandler
+#define JSO_DATASET	10	// el.dataset: camelCase <-> data-* attributes
+#define JSO_CANVAS2D	11 // ctx from canvas.getContext("2d"); node = the canvas
+#define JSO_PROTO	12	// X.prototype; num holds the JV_* type it serves
+
+#define JSN_ALERT			1
+#define JSN_CONSOLE_LOG		2
+#define JSN_DOC_WRITE		3
+#define JSN_DOC_GETBYID		4
+#define JSN_PARSEINT		5
+#define JSN_PARSEFLOAT		6
+#define JSN_STRING			7
+#define JSN_NUMBER			8
+#define JSN_ISNAN			9
+#define JSN_DATE_NOW		10
+#define JSN_SETTIMEOUT		11
+#define JSN_MATH_FLOOR		12
+#define JSN_MATH_CEIL		13
+#define JSN_MATH_ROUND		14
+#define JSN_MATH_ABS		15
+#define JSN_MATH_SQRT		16
+#define JSN_MATH_POW		17
+#define JSN_MATH_RANDOM		18
+#define JSN_MATH_MAX		19
+#define JSN_MATH_MIN		20
+#define JSN_STR_CHARAT		30
+#define JSN_STR_INDEXOF		31
+#define JSN_STR_SUBSTRING	32
+#define JSN_STR_TOUPPER		33
+#define JSN_STR_TOLOWER		34
+#define JSN_STR_SLICE		35
+#define JSN_ARR_PUSH		40
+#define JSN_ARR_JOIN		41
+#define JSN_ARR_INDEXOF		42
+#define JSN_EL_GETATTR		50
+#define JSN_EL_SETATTR		51
+#define JSN_EL_ADDLISTEN	52
+#define JSN_EL_REMLISTEN	53
+#define JSN_SETINTERVAL		60
+#define JSN_CLEARTIMER		61
+#define JSN_XHR_NEW			62
+#define JSN_XHR_OPEN		63
+#define JSN_XHR_SEND		64
+#define JSN_XHR_SETREQHDR	65
+#define JSN_XHR_GETALLHDR	66
+#define JSN_XHR_GETHDR		67
+#define JSN_EVT_NOOP		68
+#define JSN_PROMISE_CTOR	70
+#define JSN_PROMISE_RESOLVE	71
+#define JSN_PROMISE_REJECT	72
+#define JSN_PROMISE_THEN	73
+#define JSN_PROMISE_CATCH	74
+#define JSN_PROMISE_FINALLY	75
+#define JSN_PROMISE_SRESOLVE 76
+#define JSN_FETCH			77
+#define JSN_RESP_TEXT		78
+#define JSN_RESP_JSON		79
+#define JSN_JSON_PARSE		80
+#define JSN_JSON_STR		81
+#define JSN_DOC_CREATE_EL	82
+#define JSN_DOC_CREATE_TX	83
+#define JSN_EL_APPEND		84
+#define JSN_EL_REMOVE_CH	85
+#define JSN_EL_REMOVE		86
+#define JSN_QSEL			87
+#define JSN_QSELALL			88
+#define JSN_CL_ADD			89
+#define JSN_CL_REMOVE		90
+#define JSN_CL_CONTAINS		91
+#define JSN_CL_TOGGLE		92
+#define JSN_STR_SPLIT		93
+#define JSN_STR_REPLACE		94
+#define JSN_STR_TRIM		95
+#define JSN_STR_INCLUDES	96
+#define JSN_STR_STARTS		97
+#define JSN_STR_ENDS		98
+#define JSN_STR_CHARCODE	99
+#define JSN_ARR_MAP			100
+#define JSN_ARR_FILTER		101
+#define JSN_ARR_FOREACH		102
+#define JSN_ARR_SLICE		103
+#define JSN_ARR_CONCAT		104
+#define JSN_ARR_INCLUDES	105
+#define JSN_ARR_POP			106
+#define JSN_ARR_SHIFT		107
+#define JSN_ARR_FIND		108
+#define JSN_OBJ_KEYS		109
+#define JSN_OBJ_ASSIGN		110
+#define JSN_ARR_ISARR		111
+#define JSN_LOC_ASSIGN		112
+#define JSN_LOC_RELOAD		113
+#define JSN_LS_GET			114
+#define JSN_LS_SET			115
+#define JSN_LS_REMOVE		116
+#define JSN_LS_CLEAR		117
+#define JSN_ARR_REDUCE		118
+#define JSN_ARR_REVERSE		119
+#define JSN_ARR_SORT		120
+#define JSN_STR_REPEAT		121
+#define JSN_STR_PADSTART	122
+#define JSN_STR_PADEND		123
+#define JSN_STR_SUBSTR		124
+#define JSN_RE_TEST			125 // stub: returns FALSE
+#define JSN_RE_EXEC			126 // stub: returns null
+#define JSN_ERROR_CTOR		127
+#define JSN_REGEXP_CTOR		128 // stub regex object
+#define JSN_MAP_CTOR		129
+#define JSN_MAP_GET			130
+#define JSN_MAP_SET			131
+#define JSN_MAP_HAS			132
+#define JSN_MAP_DEL			133
+#define JSN_MAP_FOREACH		134
+#define JSN_MAP_CLEAR		135	// shared by Set
+#define JSN_SET_CTOR		136
+#define JSN_SET_ADD			137
+#define JSN_SET_HAS			138
+#define JSN_SET_DEL			139
+#define JSN_SET_FOREACH		140
+#define JSN_OBSERVER_CTOR	141
+#define JSN_NOOP_UNDEF		142
+#define JSN_NOOP_ARR		143
+#define JSN_DATE_CTOR		144
+#define JSN_SYMBOL			145
+#define JSN_MATCHMEDIA		146
+#define JSN_GETCOMPUTED		147
+#define JSN_ABORT_CTOR		148
+#define JSN_EVENT_CTOR		149
+#define JSN_CSS_GETPROP		150
+#define JSN_DATE_GETTIME	151
+#define JSN_DATE_GETFULLYEAR 152
+#define JSN_DATE_GETMONTH	153
+#define JSN_DATE_GETDATE	154
+#define JSN_DATE_GETDAY		155
+#define JSN_DATE_GETHOURS	156
+#define JSN_DATE_GETMIN		157
+#define JSN_DATE_GETSEC		158
+#define JSN_DATE_TOISO		159
+#define JSN_AUDIO_CTOR		160
+#define JSN_AUDIO_PLAY		161
+#define JSN_AUDIO_PAUSE		162
+#define JSN_FN_CALL			163
+#define JSN_FN_APPLY		164
+#define JSN_FN_BIND			165
+#define JSN_FN_BOUND		166
+#define JSN_DOC_GETBYTAG	167
+#define JSN_DOC_GETBYCLASS	168
+#define JSN_DOC_GETBYNAME	169
+#define JSN_EL_CONTAINS		170
+#define JSN_EL_MATCHES		171
+#define JSN_EL_CLOSEST		172
+#define JSN_EL_HASATTR		173
+#define JSN_EL_RMATTR		174
+#define JSN_EL_CLONE		175
+#define JSN_EL_INSBEFORE	176
+#define JSN_EL_RECT			177
+#define JSN_OBJ_VALUES		178
+#define JSN_OBJ_ENTRIES		179
+#define JSN_OBJ_DEFINEPROP	180
+#define JSN_OBJ_DEFINEPROPS	181
+#define JSN_OBJ_CREATE		182
+#define JSN_OBJ_FREEZE		183 // no-op
+#define JSN_OBJ_GETPROTO	184
+#define JSN_OBJ_SETPROTO	185
+#define JSN_OBJ_GETDESC		186
+#define JSN_OBJ_FROMENTRIES	187
+#define JSN_OBJ_ISFROZEN	188
+#define JSN_IMAGE_CTOR		189
+#define JSN_NOOP_FALSE		190
+#define JSN_UAD_ENTROPY		191
+#define JSN_CRYPTO_RANDVALS	192
+#define JSN_CRYPTO_UUID		193
+#define JSN_STRUCT_CLONE	194
+#define JSN_USP_CTOR		195
+#define JSN_USP_GET			196
+#define JSN_USP_SET			197
+#define JSN_USP_HAS			198
+#define JSN_USP_TOSTR		199
+#define JSN_STR_MATCH		200
+#define JSN_STR_SEARCH		201
+#define JSN_STR_MATCHALL	202
+#define JSN_REFLECT_GET		203
+#define JSN_REFLECT_SET		204
+#define JSN_REFLECT_HAS		205
+#define JSN_REFLECT_DELETE	206
+#define JSN_REFLECT_APPLY	207
+#define JSN_REFLECT_CONSTRUCT 208
+#define JSN_TEXTENC_CTOR	209
+#define JSN_TEXTENC_ENCODE	210
+#define JSN_TEXTDEC_CTOR	211
+#define JSN_TEXTDEC_DECODE	212
+#define JSN_ARR_SOME		213
+#define JSN_ARR_EVERY		214
+#define JSN_ARR_FINDINDEX	215
+#define JSN_ARR_FILL		216
+#define JSN_ARR_AT			217
+#define JSN_ARR_SPLICE		218
+#define JSN_ARR_UNSHIFT		219
+#define JSN_ARR_FLAT		220
+#define JSN_ARR_FLATMAP		221
+#define JSN_ARR_LASTINDEXOF	222
+#define JSN_ARR_FINDLAST	223
+#define JSN_ARRAYBUFFER_CTOR 224
+#define JSN_U8ARR_CTOR		225
+#define JSN_I8ARR_CTOR		226
+#define JSN_U8C_CTOR		227
+#define JSN_U16ARR_CTOR		228
+#define JSN_I16ARR_CTOR		229
+#define JSN_U32ARR_CTOR		230
+#define JSN_I32ARR_CTOR		231
+#define JSN_F32ARR_CTOR		232
+#define JSN_F64ARR_CTOR		233
+#define JSN_TA_SET			234
+#define JSN_TA_SUBARRAY		235
+#define JSN_DATAVIEW_CTOR	236
+#define JSN_DV_GETU8		237
+#define JSN_DV_SETU8		238
+#define JSN_DV_GETU16		239
+#define JSN_DV_SETU16		240
+#define JSN_DV_GETU32		241
+#define JSN_DV_SETU32		242
+#define JSN_DV_GETF32		243 // getFloat32/getFloat64, approximated
+#define JSN_DV_SETF32		244
+#define JSN_SUBTLE_DIGEST	245
+#define JSN_PROXY_CTOR		246
+#define JSN_FORMDATA_CTOR	247
+#define JSN_FD_APPEND		248
+#define JSN_FD_GET			249
+#define JSN_BLOB_CTOR		250
+#define JSN_BLOB_TEXT		251
+#define JSN_BLOB_ARRBUF		252
+#define JSN_HEADERS_CTOR	253
+#define JSN_HDR_GET			254
+#define JSN_HDR_SET			255
+// 256-289 are reserved for JP_* punct codes; keep JSN ids clear of that range.
+#define JSN_HDR_HAS			290
+#define JSN_REQUEST_CTOR	291
+#define JSN_RESPONSE_CTOR	292
+// NOTE: JSN_RESP_JSON (79) / JSN_RESP_TEXT (78) already defined above; reused here.
+#define JSN_DOC_CREATE_EVENT 293
+#define JSN_EVT_INIT		294
+#define JSN_EL_DISPATCH		295
+#define JSN_PROMISE_SREJECT	296 // Promise.reject(v) static; the executor's reject fn is 72
+#define JSN_PROMISE_SALL	297
+#define JSN_PROMISE_SRACE	298
+#define JSN_PROMISE_SALLSET	299
+#define JSN_PROMISE_SANY	300
+// combinator reactions carry the shared counter as _cst and the slot index as _ci
+#define JSN_PROMISE_ALLSTEP	301
+#define JSN_PROMISE_ASOK	302
+#define JSN_PROMISE_ASERR	303
+#define JSN_PROMISE_ANYERR	304
+#define JSN_EVT_STOPPROP	305
+#define JSN_EVT_PREVENT	307
+#define JSN_CV_GETCTX		308
+#define JSN_CV_FILLRECT		309
+#define JSN_CV_CLEARRECT	310
+#define JSN_CV_STROKERECT	311
+#define JSN_CV_FILLTEXT		312
+#define JSN_CV_DRAWIMAGE	313
+#define JSN_CV_BEGINPATH	314
+#define JSN_CV_MOVETO		315
+#define JSN_CV_LINETO		316
+#define JSN_CV_STROKE		317
+#define JSN_CV_FILL			318
+#define JSN_CV_SAVE			319 // save/restore/translate/scale accepted, no-op
+#define JSN_CV_MEASURE		320
+#define JSN_CV_ARC			321
+#define JSN_DOC_CREATE_FRAG	306
+#define JSN_NUM_TOFIXED		322
+#define JSN_NUM_TOSTR		323
+#define JSN_NUM_TOLOCALE	324
+#define JSN_VALUEOF			325
+#define JSN_MATH_1ARG		326 // one-argument Math fn; _m selects which
+#define JSN_MATH_ATAN2		327
+#define JSN_MATH_HYPOT		328
+#define JSN_NUM_ISINT		329
+#define JSN_NUM_ISFINITE	330
+#define JSN_NUM_ISNAN		331 // no coercion, unlike global isNaN
+#define JSN_STR_FROMCHAR	332
+#define JSN_ARRAY_CTOR		333
+#define JSN_ARRAY_FROM		334
+#define JSN_ARRAY_OF		335
+#define JSN_ARR_ENTRIES		336 // _m selects entries/keys/values
+#define JSN_OBJ_HASOWN		337
+#define JSN_TOSTRING		338
+#define JSN_STR_AT			339
+#define JSN_STR_TRIMSIDE	340 // _m 1 = start, 2 = end
+#define JSN_STR_CONCAT		341
+#define JSN_URI_ENCODE		342
+#define JSN_URI_DECODE		343
+#define JSN_BTOA			344
+#define JSN_ATOB			345
+#define JSN_EL_CLICK		346
+#define JSN_CL_ITEM			347
+#define JSN_CL_REPLACE		348
+#define JSN_STR_LOCALECMP	349
+#define JSN_STYLE_SET		350
+#define JSN_CONSOLE_NOOP	351 // accepted, silent
+#define JSN_NOOP_TRUE		352
+#define JSN_XHR_ADDLISTEN	353
+#define JSN_XHR_REMLISTEN	354
+#define JSN_FN_TOSTR		355
+#define JSN_MAP_ENTRIES	356 // _m selects
+#define JSN_SET_ENTRIES	357 // _m selects
+#define JSN_OBJ_IS			358
+#define JSN_URL_CTOR		359
+#define JSN_EVAL			360
+#define JSN_BOOLEAN			361
+
+#define JT_EOF		0
+#define JT_NUM		1
+#define JT_STR		2
+#define JT_IDENT	3
+#define JT_PUNCT	4
+#define JT_REGEX	5	// /pattern/flags literal; str = pattern, num = flag bits
+
+/* multi-char puncts; single-char puncts use their ASCII code */
+#define JP_EQ2		256
+#define JP_NE		257
+#define JP_EQ3		258
+#define JP_NE3		259
+#define JP_LE		260
+#define JP_GE		261
+#define JP_AND		262
+#define JP_OR		263
+#define JP_INC		264
+#define JP_DEC		265
+#define JP_ADDEQ	266
+#define JP_SUBEQ	267
+#define JP_MULEQ	268
+#define JP_DIVEQ	269
+#define JP_MODEQ	270
+#define JP_ARROW	271
+#define JP_SPREAD	272	// ...
+#define JP_OPTCHAIN	273	// ?.
+#define JP_NULLISH	274	// ??
+#define JP_SHL		275	// <<
+#define JP_SHR		276	// >>
+#define JP_SHR3		277	// >>>
+#define JP_POW		278	// **
+#define JP_ANDEQ	279	// &&=
+#define JP_OREQ		280	// ||=
+#define JP_NULEQ	281	// ??=
+#define JP_BANDEQ	282	// &=
+#define JP_BOREQ	283	// |=
+#define JP_BXOREQ	284	// ^=
+#define JP_SHLEQ	285	// <<=
+#define JP_SHREQ	286	// >>=
+#define JP_POWEQ	287	// **=
+#define JP_IN		288	// `in`  keyword, at relational level
+#define JP_INSTOF	289	// `instanceof` keyword, at relational level
+
+#define JN_NUM		1
+#define JN_STR		2
+#define JN_IDENT	3
+#define JN_BIN		4
+#define JN_UN		5
+#define JN_ASSIGN	6
+#define JN_CALL		7
+#define JN_MEMBER	8
+#define JN_INDEX	9
+#define JN_COND		10
+#define JN_PREINC	11
+#define JN_POSTINC	12
+#define JN_ARRLIT	13
+#define JN_OBJLIT	14
+#define JN_PROP		15
+#define JN_VAR		16
+#define JN_VARDECL	17
+#define JN_IF		18
+#define JN_WHILE	19
+#define JN_FOR		20
+#define JN_BLOCK	21
+#define JN_FUNC		22	// op caches the body hoist scan: 0 unknown, 1 decls, 2 none
+#define JN_RETURN	23
+#define JN_BREAK	24
+#define JN_EXPR		25
+#define JN_NULLLIT	26
+#define JN_UNDEFLIT	27
+#define JN_FOROF	28	// for (x of/in it) body; op: 0 = of, 1 = in
+#define JN_TRY		29	// a = try, b = catch (str = var), c = finally
+#define JN_THROW	30
+#define JN_NEW		31
+#define JN_CLASS	32	// str = name, a = JN_PROP method chain
+#define JN_SPREAD	33 // a = expr
+#define JN_AWAIT	34
+#define JN_DESTRUCT	35	// const {a,b:c}=e / [x,y]=e; op: 0 obj 1 arr; a=init, b=idents
+#define JN_REGEX	36 // engine in JSRegex.ZC
+#define JN_SEQ		37
+#define JN_CONTINUE	38
+#define JN_DO		39
+#define JN_SWITCH	40	// a = discriminant, b = JN_CASE chain
+#define JN_CASE		41	// a = test expr (NULL = default), b = stmt chain
+#define JN_SUPER	42
+
+#define JF_NORMAL	0
+#define JF_RETURN	1
+#define JF_BREAK	2
+#define JF_THROW	3
+#define JF_CONTINUE	4	// cleared by the enclosing loop, propagates through blocks
+
+class CJsAllocHdr
+{
+	CJsAllocHdr *next;
+};
+
+class CJsProp
+{ // getter/setter are CJsVal* too, but CJsVal is declared below: slots are U64, cast at the use site
+	CJsProp *next;
+	U8		*name;
+	U64		 val;		// CJsVal*
+	U64		 getter;	// CJsVal* accessor `get name()`, 0 = none
+	U64		 setter;	// CJsVal* accessor `set name(v)`, 0 = none
+	Bool	 is_acc;	// TRUE: val is unused, read/write go through getter/setter
+};
+
+class CJsVal
+{
+	I64		 type;
+	F64		 num;
+	U8		*str;
+	CJsProp *props;		// JV_OBJ
+	CZNode	*node;		// JSO_ELEMENT / JSO_STYLE
+	U64		 func;		// CJsNode* for JV_FUNC
+	I64		 native_id;	// JSN_* for JV_NATIVE, JSO_* for JV_OBJ
+	CJsVal	**items;	// JV_ARR
+	I64		 count, cap;
+	U64		 fenv; // CJsEnv* captured at definition; U64 because CJsEnv is declared later in this file
+	CJsVal	*proto;
+};
+
+class CJsTimer
+{
+	CJsTimer *next;
+	I64		  id;
+	CJsVal	 *fn;		// callback (JV_FUNC/JV_NATIVE); NULL for is_xhr timers
+	CJsVal	 *this_val; // 'this' for the callback
+	F64		  due; // tS at which it fires
+	F64		  interval; // repeat period in seconds; 0 = one-shot
+	Bool	  active;
+	Bool	  is_xhr;	// fire the XHR object's onreadystatechange/onload instead
+};
+
+class CJsListener
+{
+	CJsListener *next;
+	CZNode		*node;
+	U8			*type; // "click", "input", ...; no "on" prefix
+	CJsVal		*fn;
+	Bool		 active;
+	Bool		 is_prop; // set via el.onX= (replaces prior); FALSE = addEventListener
+};
+
+class CJsMicro
+{
+	CJsMicro *next;
+	CJsVal	 *fn;
+	CJsVal	 *arg;
+	CJsVal	 *derived;
+	Bool	  has_arg;
+	Bool	  rejected; // fn == NULL: pass-through, settle derived with arg
+};
+
+class CJsNode
+{
+	I64		 type;
+	I64		 op;	// operator/punct code, or +1/-1 for inc/dec
+	F64		 num; // JN_NUM only
+	U8		*str;
+	CJsNode *a, *b, *c, *d, *next;
+};
+
+class CJsTok
+{
+	I64	 type;
+	F64	 num;
+	U8	*str;
+	I64	 punct;
+	I64	 src; // byte offset of this token in the source
+};
+
+class CJsEnv
+{
+	CJsEnv	*parent;
+	CJsProp *vars;
+};
+
+class CJsInterp
+{
+	CJsAllocHdr *allocs;
+	CJsEnv	*genv, *env;
+	CZNode	*dom_root;
+	U8		*url; // arena copy
+	U8		*navigate;
+	U8		*write_buf;
+	I64		 write_len;
+	Bool	 dom_dirty;
+	Bool	 evt_prevented;
+	I64		 steps, depth, flow;
+	F64		 t_deadline; // tS past which the running script is cut off
+	F64		 t_start;
+	CJsVal	*ret_val;
+	CJsVal	*doc_obj, *loc_obj, *win_obj;
+	U8		 err[144];
+	Bool	 has_err;
+	Bool	 parse_err;
+	CJsTok	*toks;
+	U8		*src_text;
+	I64		 tok_count, pos;
+	I64		 lex_end;		// bytes the lexer consumed; < StrLen(src) = stopped early
+	I64		 lex_cmt;		// of those, bytes inside comments
+	U8		*blk;
+	I64		 blk_used;
+	CJsTimer	*timers;
+	CJsListener	*listeners;
+	I64			 next_timer_id;
+	CJsVal		*exc;
+	CJsMicro	*micro_head, *micro_tail;
+};
+
+extern CJsNode *JsParseAssign(CJsInterp *ji);
+extern CJsNode *JsParseExpr(CJsInterp *ji);
+extern CJsNode *JsParseClass(CJsInterp *ji);
+extern CJsNode *JsParseStmt(CJsInterp *ji);
+extern CJsNode *JsParseFunc(CJsInterp *ji, Bool need_name);
+extern U0 JsMicroDrain(CJsInterp *ji);
+extern CJsVal  *JsEval(CJsInterp *ji, CJsNode *node);
+extern CJsVal  *JsCall(CJsInterp *ji, CJsVal *fn, CJsVal *this_val,
+					   CJsVal **args, I64 argc);
+extern CJsListener *JsListenerAdd(CJsInterp *ji, CZNode *node, U8 *type,
+								  CJsVal *fn, Bool is_prop);
+extern U0 JsStyleIngest(CJsInterp *ji, CZNode *node);
+extern F64 JsStr2F64(U8 *s);
+extern F64 JsStrToNumber(U8 *s);
+extern U0 JsPatBind(CJsInterp *ji, CJsNode *pat, CJsVal *val, Bool declare);
+extern U0 JsElemCollect(CJsInterp *ji, CZNode *root, I64 mode, U8 *key,
+						CJsVal *arr);
+
+
+I64 js_soft_errs  = 0;
+I64 js_parse_errs = 0;
+I64 js_script_n = 0;
+I64 js_undef_errs = 0;
+I64 js_tok_dropped = 0;
+
+#define JS_WARN_KEEP	32
+#define JS_WARN_LEN		192 // = JS_CON_COLS
+
+U8	js_warn_seen[JS_WARN_KEEP][JS_WARN_LEN];
+I64	js_warn_n = 0;
+
+U0 JsBudgetReset(CJsInterp *ji)
+{
+	ji->steps = 0;
+	ji->t_start = tS;
+	ji->t_deadline = tS + JS_MAX_SECS;
+}
+
+#define JS_ARENA_BLK	65536
+
+U8 *JsAlloc(CJsInterp *ji, I64 size)
+{
+	CJsAllocHdr *h;
+	U8			*r;
+
+	size = (size + 7) & (-8);
+	if (size > JS_ARENA_BLK - sizeof(CJsAllocHdr))
+	{
+		h = CAlloc(size + sizeof(CJsAllocHdr));
+		h->next = ji->allocs;
+		ji->allocs = h;
+		return h(U8 *) + sizeof(CJsAllocHdr);
+	}
+	if (!ji->blk || ji->blk_used + size > JS_ARENA_BLK)
+	{
+		h = CAlloc(JS_ARENA_BLK);
+		h->next = ji->allocs;
+		ji->allocs = h;
+		ji->blk = h(U8 *);
+		ji->blk_used = sizeof(CJsAllocHdr);
+	}
+	r = ji->blk + ji->blk_used;
+	ji->blk_used += size;
+
+	return r;
+}
+
+U0 JsPathCat(U8 *out, I64 max, U8 *s)
+{
+	I64 n = StrLen(out);
+
+	if (!s)
+		s = "?";
+	while (*s && n < max - 1)
+	{
+		out[n] = *s;
+		n++;
+		s++;
+	}
+	out[n] = 0;
+}
+
+U8 *JsStrDup(CJsInterp *ji, U8 *s)
+{
+	U8	*d;
+	I64	 len;
+
+	if (!s)
+		s = "";
+	len = StrLen(s);
+	d = JsAlloc(ji, len + 1);
+	MemCopy(d, s, len + 1);
+
+	return d;
+}
+
+
+#define JS_CON_LINES	160
+#define JS_CON_COLS		192
+
+U8	js_con[JS_CON_LINES][JS_CON_COLS];
+I64	js_con_head = 0;
+I64	js_con_n	= 0;
+
+U0 JsConsoleAdd(U8 *tag, U8 *msg)
+{
+	U8	*d;
+	I64	 i = 0;
+
+	if (!msg)
+		return;
+	d = js_con[js_con_head];
+	while (*tag && i < 6)
+	{
+		d[i] = *tag;
+		i++;
+		tag++;
+	}
+	if (i < JS_CON_COLS - 2)
+	{
+		d[i] = ' ';
+		i++;
+	}
+	while (*msg && i < JS_CON_COLS - 1)
+	{
+		if (*msg == '\n' || *msg == '\r' || *msg == '\t')
+			d[i] = ' ';
+		else
+			d[i] = *msg;
+		i++;
+		msg++;
+	}
+	d[i] = 0;
+	js_con_head++;
+	if (js_con_head >= JS_CON_LINES)
+		js_con_head = 0;
+	if (js_con_n < JS_CON_LINES)
+		js_con_n++;
+}
+
+U0 JsConsoleClear()
+{
+	js_con_head = 0;
+	js_con_n = 0;
+}
+
+U0 JsErr(CJsInterp *ji, U8 *msg)
+{
+	JsConsoleAdd("ERR", msg);
+	if (!ji->has_err)
+	{
+		StrPrint(ji->err, "JS: %s", msg);
+		ji->has_err = TRUE;
+	}
+}
+
+
+CJsVal *JsValNew(CJsInterp *ji, I64 type)
+{
+	CJsVal *v = JsAlloc(ji, sizeof(CJsVal))(CJsVal *);
+
+	v->type = type;
+
+	return v;
+}
+
+CJsVal *JsUndefV(CJsInterp *ji)	{ return JsValNew(ji, JV_UNDEF); }
+CJsVal *JsNullV(CJsInterp *ji)	{ return JsValNew(ji, JV_NULL); }
+
+CJsVal *JsNumV(CJsInterp *ji, F64 n)
+{
+	CJsVal *v = JsValNew(ji, JV_NUM);
+
+	v->num = n;
+
+	return v;
+}
+
+CJsVal *JsBoolV(CJsInterp *ji, Bool b)
+{
+	CJsVal *v = JsValNew(ji, JV_BOOL);
+
+	if (b)
+		v->num = 1;
+
+	return v;
+}
+
+CJsVal *JsStrV(CJsInterp *ji, U8 *s)
+{
+	CJsVal *v = JsValNew(ji, JV_STR);
+
+	v->str = JsStrDup(ji, s);
+
+	return v;
+}
+
+CJsVal *JsNativeV(CJsInterp *ji, I64 id)
+{
+	CJsVal *v = JsValNew(ji, JV_NATIVE);
+
+	v->native_id = id;
+
+	return v;
+}
+
+CJsVal *JsElemV(CJsInterp *ji, CZNode *node)
+{
+	CJsVal *v = JsValNew(ji, JV_OBJ);
+
+	v->native_id = JSO_ELEMENT;
+	v->node = node;
+
+	return v;
+}
+
+CJsVal *JsArrV(CJsInterp *ji)
+{
+	CJsVal *v = JsValNew(ji, JV_ARR);
+
+	v->cap = 8;
+	v->items = JsAlloc(ji, v->cap * sizeof(U64))(CJsVal **);
+
+	return v;
+}
+
+U0 JsArrPush(CJsInterp *ji, CJsVal *arr, CJsVal *item)
+{
+	CJsVal **grown;
+	I64		 i;
+
+	if (arr->count >= arr->cap)
+	{
+		arr->cap *= 2;
+		grown = JsAlloc(ji, arr->cap * sizeof(U64))(CJsVal **);
+		for (i = 0; i < arr->count; i++)
+			grown[i] = arr->items[i];
+		arr->items = grown;
+	}
+	arr->items[arr->count++] = item;
+}
+
+CJsVal *JsPropGet(CJsVal *obj, U8 *name)
+{
+	CJsProp *p;
+	I64		 depth = 0;
+
+	while (obj && depth < 8)
+	{
+		p = obj->props;
+		while (p)
+		{
+			if (!StrCompare(p->name, name))
+				return p->val(CJsVal *);
+			p = p->next;
+		}
+		obj = obj->proto;
+		depth++;
+	}
+
+	return NULL;
+}
+
+U0 JsPropSet(CJsInterp *ji, CJsVal *obj, U8 *name, CJsVal *val)
+{ // a new property goes on the END: Object.keys and for-in enumerate in insertion order
+	CJsProp *p = obj->props, *tail = NULL;
+
+	while (p)
+	{
+		if (!StrCompare(p->name, name))
+		{
+			p->val = val(U64);
+			return;
+		}
+		tail = p;
+		p = p->next;
+	}
+	p = JsAlloc(ji, sizeof(CJsProp))(CJsProp *);
+	p->name = JsStrDup(ji, name);
+	p->val	= val(U64);
+	p->next = NULL;
+	p->getter = 0;
+	p->setter = 0;
+	p->is_acc = FALSE;
+	if (tail)
+		tail->next = p;
+	else
+		obj->props = p;
+}
+
+CJsVal *JsNativeM(CJsInterp *ji, I64 id, I64 m)
+{ // one JSN id serves a family; JsCallNative reads _m off the `self` value, as JSN_FN_BOUND reads _t
+	CJsVal *fn = JsNativeV(ji, id);
+
+	JsPropSet(ji, fn, "_m", JsNumV(ji, m));
+
+	return fn;
+}
+
+
+CJsProp *JsAccessorFind(CJsVal *obj, U8 *name)
+{ // a data property shadows an inherited accessor: the first record wins whatever its kind
+	CJsProp *p;
+	I64		 depth = 0;
+
+	while (obj && depth < 8)
+	{
+		p = obj->props;
+		while (p)
+		{
+			if (!StrCompare(p->name, name))
+			{
+				if (p->is_acc)
+					return p;
+				return NULL;
+			}
+			p = p->next;
+		}
+		obj = obj->proto;
+		depth++;
+	}
+
+	return NULL;
+}
+
+U0 JsAccessorDefine(CJsInterp *ji, CJsVal *obj, U8 *name, CJsVal *getter,
+					CJsVal *setter)
+{ // define-or-merge: `get x()` then `set x(v)` land in ONE property
+	CJsProp *p = obj->props, *tail = NULL;
+
+	while (p)
+	{
+		if (!StrCompare(p->name, name))
+			break;
+		tail = p;
+		p = p->next;
+	}
+	if (!p)
+	{
+		p = JsAlloc(ji, sizeof(CJsProp))(CJsProp *);
+		p->name = JsStrDup(ji, name);
+		p->next = NULL;
+		p->getter = 0;
+		p->setter = 0;
+		if (tail)
+			tail->next = p;
+		else
+			obj->props = p;
+	}
+	else if (!p->is_acc)
+	{
+		p->getter = 0;
+		p->setter = 0;
+	}
+	p->val	  = 0;
+	p->is_acc = TRUE;
+	if (getter)
+		p->getter = getter(U64);
+	if (setter)
+		p->setter = setter(U64);
+}
+
+CJsVal *JsPropValue(CJsInterp *ji, CJsVal *obj, CJsProp *p)
+{
+	CJsVal *gargs[1];
+
+	gargs[0] = JsUndefV(ji);
+	if (p->is_acc)
+	{
+		if (p->getter)
+			return JsCall(ji, p->getter(CJsVal *), obj, gargs, 0);
+		return JsUndefV(ji);
+	}
+
+	return p->val(CJsVal *);
+}
+
+
+Bool JsToBool(CJsVal *v)
+{
+	switch (v->type)
+	{
+		case JV_UNDEF:
+		case JV_NULL:
+			return FALSE;
+		case JV_BOOL:
+		case JV_NUM:
+			return v->num != 0;
+		case JV_STR:
+			return *v->str != 0;
+	}
+
+	return TRUE;
+}
+
+F64 JsToNum(CJsVal *v)
+{
+	switch (v->type)
+	{
+		case JV_BOOL:
+		case JV_NUM:
+			return v->num;
+		case JV_STR:
+			return JsStrToNumber(v->str);
+	}
+
+	return 0;
+}
+
+#include "JSNum"	// JsF64ToStr: Grisu2 + ECMAScript Number::toString formatting
+
+U8 *JsNumToStr(CJsInterp *ji, F64 n)
+{
+	U8	buf[64]; // JsF64ToStr needs 40; longest real output is 25 bytes
+
+	// the kernel's %g is not the JS format (0.1 -> "1.00000000e-1") and prints no NaN/Infinity
+	JsF64ToStr(buf, n);
+
+	return JsStrDup(ji, buf);
+}
+
+I64 JsFuncArity(CJsVal *fn)
+{ // Function.length: the parameters before the first default or rest
+	CJsNode *param;
+	I64		 n = 0;
+
+	if (!fn || fn->type != JV_FUNC || !fn->func)
+		return 0;
+	param = fn->func(CJsNode *)->a;
+	while (param)
+	{
+		if (param->op == 1 || param->a)
+			return n;
+		n++;
+		param = param->next;
+	}
+
+	return n;
+}
+
+U0 JsFuncSrcText(CJsVal *fn, U8 *out, I64 max)
+{ // signature rebuilt from the AST, body stands in as [code]; only a real native prints "[native code]"
+	CJsNode *node, *param;
+	CJsVal	*nm;
+	Bool	 first = TRUE;
+
+	out[0] = 0;
+	JsPathCat(out, max, "function ");
+	if (!fn || fn->type == JV_NATIVE)
+	{
+		if (fn)
+		{
+			nm = JsPropGet(fn, "_name");
+			if (nm && nm->type == JV_STR)
+				JsPathCat(out, max, nm->str);
+		}
+		JsPathCat(out, max, "() { [native code] }");
+		return;
+	}
+	node = NULL;
+	if (fn->type == JV_FUNC && fn->func)
+		node = fn->func(CJsNode *);
+	if (node && node->str)
+		JsPathCat(out, max, node->str);
+	JsPathCat(out, max, "(");
+	if (node)
+	{
+		param = node->a;
+		while (param)
+		{
+			if (!first)
+				JsPathCat(out, max, ", ");
+			if (param->op == 2)
+				JsPathCat(out, max, "{}");
+			else
+			{
+				if (param->op == 1)
+					JsPathCat(out, max, "...");
+				if (param->str)
+					JsPathCat(out, max, param->str);
+				else
+					JsPathCat(out, max, "_");
+			}
+			first = FALSE;
+			param = param->next;
+		}
+	}
+	JsPathCat(out, max, ") { [code] }");
+}
+
+extern U8 *JsToStr(CJsInterp *ji, CJsVal *v);
+
+U8 *JsJoinElem(CJsInterp *ji, CJsVal *v)
+{ // join renders undefined and null elements as ""; array-to-string is defined as join(",")
+	if (!v || v->type == JV_UNDEF || v->type == JV_NULL)
+		return "";
+
+	return JsToStr(ji, v);
+}
+
+U8 *JsToStr(CJsInterp *ji, CJsVal *v)
+{
+	U8	   *out, *piece;
+	I64		i, len;
+	CJsVal *w;
+
+	switch (v->type)
+	{
+		case JV_UNDEF:	return "undefined";
+		case JV_NULL:	return "null";
+		case JV_BOOL:
+			if (v->num)
+				return "true";
+			return "false";
+		case JV_NUM:	return JsNumToStr(ji, v->num);
+		case JV_STR:	return v->str;
+		case JV_FUNC:
+		case JV_NATIVE:
+			out = JsAlloc(ji, 256);
+			JsFuncSrcText(v, out, 256);
+			return out;
+		case JV_ARR:
+			len = 1;
+			for (i = 0; i < v->count; i++)
+				len += StrLen(JsJoinElem(ji, v->items[i])) + 1;
+			out = JsAlloc(ji, len + 1);
+			*out = 0;
+			for (i = 0; i < v->count; i++)
+			{
+				if (i)
+					CatPrint(out, ",");
+				piece = JsJoinElem(ji, v->items[i]);
+				CatPrint(out, "%s", piece);
+			}
+			return out;
+		case JV_OBJ:
+			return "[object Object]";
+	}
+
+	return "[object Object]";
+}
+
+
+Bool JsIdentCh(I64 ch, Bool first)
+{
+	if (('a' <= ch <= 'z') || ('A' <= ch <= 'Z') || ch == '_' || ch == 0x24)
+		return TRUE;
+	if (!first && '0' <= ch <= '9')
+		return TRUE;
+
+	return FALSE;
+}
+
+#include "JSLex"
+
+
+CJsTok *JsTok(CJsInterp *ji)
+{ // clamped to the EOF slot
+	if (ji->pos >= ji->tok_count && ji->tok_count > 0)
+		return &ji->toks[ji->tok_count - 1];
+
+	return &ji->toks[ji->pos];
+}
+
+Bool JsIsPunct(CJsInterp *ji, I64 punct)
+{
+	return ji->toks[ji->pos].type == JT_PUNCT &&
+		   ji->toks[ji->pos].punct == punct;
+}
+
+Bool JsEatPunct(CJsInterp *ji, I64 punct)
+{
+	if (JsIsPunct(ji, punct))
+	{
+		ji->pos++;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+Bool JsIsKw(CJsInterp *ji, U8 *kw)
+{
+	return ji->toks[ji->pos].type == JT_IDENT &&
+		   !StrCompare(ji->toks[ji->pos].str, kw);
+}
+
+Bool JsEatKw(CJsInterp *ji, U8 *kw)
+{
+	if (JsIsKw(ji, kw))
+	{
+		ji->pos++;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+CJsNode *JsNode(CJsInterp *ji, I64 type)
+{
+	CJsNode *node = JsAlloc(ji, sizeof(CJsNode))(CJsNode *);
+
+	node->type = type;
+
+	return node;
+}
+
+
+
+// readable names for JP_EQ2(256)..JP_INSTOF(289)
+U8 *jp_desc[34] = {
+	"==", "!=", "===", "!==", "<=", ">=", "&&", "||", "++", "--",
+	"+=", "-=", "*=", "/=", "%=", "=>", "...", "?.", "??", "<<",
+	">>", ">>>", "**", "&&=", "||=", "??=", "&=", "|=", "^=", "<<=",
+	">>=", "**=", "in", "instanceof"
+};
+
+U0 JsScrub(U8 *s)
+{ // dollars are live DolDoc commands in the log
+	while (*s)
+	{
+		if (*s == 0x24 || *s < ' ')
+			*s = '?';
+		s++;
+	}
+}
+
+U0 JsSrcWindow(CJsInterp *ji, I64 pos, U8 *out)
+{ // raw source around token `pos`: 44 chars of lead-in, ">|<", 56 more. out >= 112
+	I64	 i, o = 0, off, back;
+
+	out[0] = 0;
+	if (!ji->src_text || pos < 0 || pos >= ji->tok_count)
+		return;
+	off	 = ji->toks[pos].src;
+	back = off;
+	if (back > 44)
+		back = 44;
+	for (i = off - back; i < off + 56 && ji->src_text[i]; i++)
+	{
+		if (i == off)
+		{
+			out[o++] = '>';
+			out[o++] = '|';
+			out[o++] = '<';
+		}
+		out[o++] = ji->src_text[i];
+	}
+	out[o] = 0;
+	JsScrub(out);
+}
+
+U0 JsTokDesc(CJsInterp *ji, I64 idx, U8 *out)
+{ // out >= 32 bytes (a JT_NUM prints as a full I64)
+	CJsTok *t;
+	I64		n;
+
+	out[0] = 0;
+	if (idx < 0 || idx >= ji->tok_count)
+		return;
+	t = &ji->toks[idx];
+	if (t->type == JT_IDENT || t->type == JT_STR)
+	{
+		n = StrLen(t->str);
+		if (n > 12)
+			n = 12;
+		MemCopy(out, t->str, n);
+		out[n] = 0;
+	}
+	else if (t->type == JT_NUM)
+		StrPrint(out, "%d", ToI64(t->num));
+	else if (t->type == JT_REGEX)
+		StrPrint(out, "/re/");
+	else if (t->punct < 256)
+		StrPrint(out, "%c", t->punct);
+	else if (t->punct >= JP_EQ2 && t->punct <= JP_INSTOF)
+		StrCopy(out, jp_desc[t->punct - JP_EQ2]);
+	else
+		StrPrint(out, "#%d", t->punct);
+}
+
+U0 JsParseErr(CJsInterp *ji, U8 *msg)
+{
+	U8	buf[224], tk[32];
+
+	ji->parse_err = TRUE;
+	if (++js_parse_errs > 12)
+		return;
+	JsTokDesc(ji, ji->pos - 1, tk);
+	StrPrint(buf, "%s @%d: after '%s' at '", msg, ji->pos, tk);
+	JsTokDesc(ji, ji->pos, tk);
+	CatPrint(buf, "%s'", tk);
+	JsScrub(buf);
+	JsConsoleAdd("parse", buf);
+	NetLog("JS: %s", buf);
+	JsSrcWindow(ji, ji->pos, buf);
+	JsConsoleAdd("parse", buf);
+	NetLog("JS:  src: %s", buf);
+}
+
+U0 JsParseResync(CJsInterp *ji)
+{ // stops BEFORE a closer belonging to the enclosing block
+	I64 dep = 0, from = ji->pos;
+
+	ji->parse_err = FALSE;
+	while (JsTok(ji)->type != JT_EOF)
+	{
+		if (JsIsPunct(ji, '(') || JsIsPunct(ji, '[') || JsIsPunct(ji, '{'))
+			dep++;
+		else if (JsIsPunct(ji, ')') || JsIsPunct(ji, ']') || JsIsPunct(ji, '}'))
+		{
+			if (!dep)
+				return;
+			dep--;
+		}
+		else if (!dep && JsIsPunct(ji, ';'))
+		{
+			ji->pos++;
+			js_tok_dropped += ji->pos - from;
+			return;
+		}
+		ji->pos++;
+	}
+	js_tok_dropped += ji->pos - from;
+}
+
+CJsNode *JsParseArgs(CJsInterp *ji)
+{ // '(' already eaten; returns arg list, eats ')'
+	CJsNode *head = NULL, *tail = NULL, *arg;
+	I64		 dep;
+
+	if (JsEatPunct(ji, ')'))
+		return NULL;
+	do
+	{
+		if (JsIsPunct(ji, ')'))
+			break;
+		if (JsEatPunct(ji, JP_SPREAD))
+		{
+			arg = JsNode(ji, JN_SPREAD);
+			arg->a = JsParseAssign(ji);
+		}
+		else
+			arg = JsParseAssign(ji);
+		if (!arg)
+			break;
+		if (tail)
+			tail->next = arg;
+		else
+			head = arg;
+		tail = arg;
+	}
+	while (JsEatPunct(ji, ','));
+	if (!JsEatPunct(ji, ')'))
+	{
+		dep = 1;
+		while (dep > 0 && JsTok(ji)->type != JT_EOF)
+		{
+			if (JsIsPunct(ji, '(') || JsIsPunct(ji, '[') || JsIsPunct(ji, '{'))
+				dep++;
+			else if (JsIsPunct(ji, ')') || JsIsPunct(ji, ']') || JsIsPunct(ji, '}'))
+				dep--;
+			ji->pos++;
+		}
+	}
+
+	return head;
+}
+
+CJsNode *JsParseClass(CJsInterp *ji)
+{ // "class" already eaten; callable from statement and expression positions
+	CJsNode *node = JsNode(ji, JN_CLASS), *item, *mtail = NULL;
+	CJsTok	*t;
+	I64		 acc, dep; // acc: 0 none, 1 get, 2 set
+	Bool	 stat; // `static` member: JN_CLASS puts it on the constructor
+
+	t = JsTok(ji);
+	if (t->type == JT_IDENT && StrCompare(t->str, "extends"))
+	{
+		node->str = t->str;
+		ji->pos++;
+	}
+	if (JsEatKw(ji, "extends"))
+		node->c = JsParseAssign(ji);
+	if (!JsEatPunct(ji, '{'))
+		return node;
+	while (!JsIsPunct(ji, '}') && JsTok(ji)->type != JT_EOF && !ji->parse_err)
+	{
+		if (JsEatPunct(ji, ';'))
+		{  }
+		else if (JsIsKw(ji, "static") && ji->toks[ji->pos + 1].type == JT_PUNCT &&
+				 ji->toks[ji->pos + 1].punct == '{')
+		{
+			ji->pos += 2;
+			dep = 1;
+			while (dep > 0 && JsTok(ji)->type != JT_EOF)
+			{
+				if (JsIsPunct(ji, '{'))
+					dep++;
+				else if (JsIsPunct(ji, '}'))
+					dep--;
+				ji->pos++;
+			}
+		}
+		else
+		{
+			acc = 0;
+			stat = FALSE;
+			while (JsTok(ji)->type == JT_IDENT &&
+				   (!StrCompare(JsTok(ji)->str, "static") ||
+					!StrCompare(JsTok(ji)->str, "async") ||
+					!StrCompare(JsTok(ji)->str, "get") ||
+					!StrCompare(JsTok(ji)->str, "set")) &&
+				   (ji->toks[ji->pos + 1].type == JT_IDENT ||
+					ji->toks[ji->pos + 1].type == JT_STR ||
+					(ji->toks[ji->pos + 1].type == JT_PUNCT &&
+					 (ji->toks[ji->pos + 1].punct == '[' ||
+					  ji->toks[ji->pos + 1].punct == '*'))))
+			{
+				if (!StrCompare(JsTok(ji)->str, "get"))
+					acc = 1;
+				else if (!StrCompare(JsTok(ji)->str, "set"))
+					acc = 2;
+				else if (!StrCompare(JsTok(ji)->str, "static"))
+					stat = TRUE;
+				ji->pos++;
+			}
+			JsEatPunct(ji, '*');
+			item = JsNode(ji, JN_PROP);
+			if (JsEatPunct(ji, '['))
+			{
+				JsParseAssign(ji);
+				if (!JsEatPunct(ji, ']'))
+					JsParseErr(ji, "expected ] in class member");
+				item->str = "_computed";
+			}
+			else
+			{
+				t = JsTok(ji);
+				if (t->type != JT_IDENT && t->type != JT_STR && t->type != JT_NUM)
+				{
+					JsParseErr(ji, "bad class member");
+					break;
+				}
+				ji->pos++;
+				if (t->type == JT_NUM)
+					item->str = "_num";
+				else
+					item->str = t->str;
+			}
+			item->op = acc; // 1 get / 2 set
+			if (stat)
+				item->op += 4; // op 4/5/6: member of the constructor
+			if (JsIsPunct(ji, '('))
+				item->a = JsParseFunc(ji, FALSE);
+			else
+			{
+				if (JsEatPunct(ji, '='))
+					item->a = JsParseAssign(ji);
+				JsEatPunct(ji, ';');
+			}
+			if (mtail)
+				mtail->next = item;
+			else
+				node->a = item;
+			mtail = item;
+		}
+	}
+	JsEatPunct(ji, '}');
+
+	return node;
+}
+
+CJsNode *JsParsePrimary(CJsInterp *ji)
+{
+	CJsTok	*t = JsTok(ji);
+	CJsNode *node, *item, *tail, *supcall, *dflt, *wrap;
+	U8		 numkey[24], embuf[224], emtk[32];
+	I64		 emk, emk2, open_pos;
+	I64		 acc; // 0 none, 1 get, 2 set
+
+	if (t->type == JT_NUM)
+	{
+		ji->pos++;
+		node = JsNode(ji, JN_NUM);
+		node->num = t->num;
+		return node;
+	}
+	if (t->type == JT_STR)
+	{
+		ji->pos++;
+		node = JsNode(ji, JN_STR);
+		node->str = t->str;
+		return node;
+	}
+	if (t->type == JT_REGEX)
+	{
+		ji->pos++;
+		node = JsNode(ji, JN_REGEX);
+		node->str = t->str;
+		node->op  = t->num; // flag bits
+		return node;
+	}
+	if (t->type == JT_IDENT)
+	{
+		if (JsIsKw(ji, "class"))
+		{
+			ji->pos++;
+			return JsParseClass(ji);
+		}
+		if (JsIsKw(ji, "function"))
+		{
+			ji->pos++;
+			return JsParseFunc(ji, FALSE);
+		}
+		if (JsEatKw(ji, "new"))
+		{
+			if (JsIsPunct(ji, '.'))
+			{
+				ji->pos++;
+				if (JsTok(ji)->type == JT_IDENT)
+					ji->pos++;
+				return JsNode(ji, JN_UNDEFLIT);
+			}
+			node = JsNode(ji, JN_NEW);
+			node->a = JsParsePrimary(ji);
+			while (node->a && !ji->parse_err)
+			{
+				if (JsEatPunct(ji, '.'))
+				{
+					t = JsTok(ji);
+					if (t->type != JT_IDENT)
+					{
+						JsParseErr(ji, "expected name after .");
+						return node;
+					}
+					ji->pos++;
+					wrap = JsNode(ji, JN_MEMBER);
+					wrap->a	  = node->a;
+					wrap->str = t->str;
+					node->a = wrap;
+				}
+				else if (JsEatPunct(ji, '['))
+				{
+					wrap = JsNode(ji, JN_INDEX);
+					wrap->a = node->a;
+					wrap->b = JsParseExpr(ji);
+					if (!JsEatPunct(ji, ']'))
+						JsParseErr(ji, "expected ] in new");
+					node->a = wrap;
+				}
+				else
+					break;
+			}
+			if (JsEatPunct(ji, '('))
+			{
+				supcall = JsNode(ji, JN_CALL);
+				supcall->a = node;
+				supcall->b = JsParseArgs(ji);
+				return supcall;
+			}
+			return node;
+		}
+		if (JsEatKw(ji, "true"))
+		{
+			node = JsNode(ji, JN_NUM);
+			node->num = 1;
+			node->str = "bool";
+			return node;
+		}
+		if (JsEatKw(ji, "false"))
+		{
+			node = JsNode(ji, JN_NUM);
+			node->str = "bool";
+			return node;
+		}
+		if (JsEatKw(ji, "null"))
+			return JsNode(ji, JN_NULLLIT);
+		if (JsEatKw(ji, "undefined"))
+			return JsNode(ji, JN_UNDEFLIT);
+		if (JsIsKw(ji, "super"))
+		{
+			ji->pos++;
+			node = JsNode(ji, JN_SUPER);
+			if (JsEatPunct(ji, '('))
+			{
+				supcall = JsNode(ji, JN_CALL);
+				supcall->a = node;
+				supcall->b = JsParseArgs(ji);
+				return supcall;
+			}
+			return node;
+		}
+		ji->pos++;
+		node = JsNode(ji, JN_IDENT);
+		node->str = t->str;
+		return node;
+	}
+	if (JsIsKw(ji, "this"))
+	{
+		ji->pos++;
+		node = JsNode(ji, JN_IDENT);
+		node->str = "this";
+		return node;
+	}
+	if (JsEatPunct(ji, '('))
+	{
+		open_pos = ji->pos - 1;
+		node = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+		{
+			if (++js_parse_errs <= 12)
+			{
+				StrPrint(embuf, "paren@%d: no ) at '", ji->pos);
+				JsTokDesc(ji, ji->pos, emtk);
+				CatPrint(embuf, "%s' after '", emtk);
+				JsTokDesc(ji, ji->pos - 1, emtk);
+				CatPrint(embuf, "%s'", emtk);
+				JsScrub(embuf);
+				JsConsoleAdd("parse", embuf);
+				NetLog("JS: %s", embuf);
+				JsSrcWindow(ji, open_pos, embuf);
+				JsConsoleAdd("parse", embuf);
+				NetLog("JS:  open( at: %s", embuf);
+				JsSrcWindow(ji, ji->pos, embuf);
+				JsConsoleAdd("parse", embuf);
+				NetLog("JS:  stop@: %s", embuf);
+			}
+			emk = 1;
+			emk2 = ji->pos;
+			while (emk > 0 && JsTok(ji)->type != JT_EOF)
+			{
+				if (JsIsPunct(ji, '(') || JsIsPunct(ji, '[') || JsIsPunct(ji, '{'))
+					emk++;
+				else if (JsIsPunct(ji, ')') || JsIsPunct(ji, ']') ||
+						 JsIsPunct(ji, '}'))
+					emk--;
+				ji->pos++;
+			}
+			js_tok_dropped += ji->pos - emk2;
+		}
+		return node;
+	}
+	if (JsEatPunct(ji, '['))
+	{
+		node = JsNode(ji, JN_ARRLIT);
+		tail = NULL;
+		if (!JsEatPunct(ji, ']'))
+		{
+			do
+			{
+				if (JsIsPunct(ji, ']'))
+					break;
+				if (JsIsPunct(ji, ','))
+					item = JsNode(ji, JN_UNDEFLIT);
+				else if (JsEatPunct(ji, JP_SPREAD))
+				{
+					item = JsNode(ji, JN_SPREAD);
+					item->a = JsParseAssign(ji);
+				}
+				else
+					item = JsParseAssign(ji);
+				if (!item)
+					break;
+				if (tail)
+					tail->next = item;
+				else
+					node->a = item;
+				tail = item;
+			}
+			while (JsEatPunct(ji, ','));
+			if (!JsEatPunct(ji, ']'))
+			{
+				emk = 1;
+				while (emk > 0 && JsTok(ji)->type != JT_EOF)
+				{
+					if (JsIsPunct(ji, '{') || JsIsPunct(ji, '[') || JsIsPunct(ji, '('))
+						emk++;
+					else if (JsIsPunct(ji, '}') || JsIsPunct(ji, ']') ||
+							 JsIsPunct(ji, ')'))
+						emk--;
+					ji->pos++;
+				}
+			}
+		}
+		return node;
+	}
+	if (JsEatPunct(ji, '{'))
+	{
+		node = JsNode(ji, JN_OBJLIT);
+		tail = NULL;
+		if (!JsEatPunct(ji, '}'))
+		{
+			do
+			{
+				if (JsIsPunct(ji, '}'))
+					break;
+				acc = 0;
+				while (JsTok(ji)->type == JT_IDENT &&
+					   (!StrCompare(JsTok(ji)->str, "get") ||
+						!StrCompare(JsTok(ji)->str, "set") ||
+						!StrCompare(JsTok(ji)->str, "async")) &&
+					   (ji->toks[ji->pos + 1].type == JT_IDENT ||
+						ji->toks[ji->pos + 1].type == JT_STR ||
+						(ji->toks[ji->pos + 1].type == JT_PUNCT &&
+						 (ji->toks[ji->pos + 1].punct == '[' ||
+						  ji->toks[ji->pos + 1].punct == '*'))))
+				{
+					if (!StrCompare(JsTok(ji)->str, "get"))
+						acc = 1;
+					else if (!StrCompare(JsTok(ji)->str, "set"))
+						acc = 2;
+					ji->pos++;
+				}
+				JsEatPunct(ji, '*');
+				if (JsEatPunct(ji, JP_SPREAD))
+				{
+					item = JsNode(ji, JN_SPREAD);
+					item->a = JsParseAssign(ji);
+				}
+				else if (JsEatPunct(ji, '['))
+				{
+					item = JsNode(ji, JN_PROP);
+					item->b = JsParseAssign(ji);
+					if (!JsEatPunct(ji, ']'))
+						JsParseErr(ji, "expected ] in computed key");
+					if (JsEatPunct(ji, ':'))
+						item->a = JsParseAssign(ji);
+					else if (JsIsPunct(ji, '('))
+						item->a = JsParseFunc(ji, FALSE);
+					else
+						JsParseErr(ji, "expected : after computed key");
+				}
+				else
+				{
+					t = JsTok(ji);
+					if (t->type == JT_NUM)
+					{
+						ji->pos++;
+						item = JsNode(ji, JN_PROP);
+						StrPrint(numkey, "%d", ToI64(t->num));
+						item->str = JsStrDup(ji, numkey);
+					}
+					else if (t->type == JT_IDENT || t->type == JT_STR)
+					{
+						ji->pos++;
+						item = JsNode(ji, JN_PROP);
+						item->str = t->str;
+					}
+					else
+					{
+						JsParseErr(ji, "bad object key");
+						break;
+					}
+					if (JsEatPunct(ji, ':'))
+						item->a = JsParseAssign(ji);
+					else if (JsIsPunct(ji, '('))
+						item->a = JsParseFunc(ji, FALSE);
+					else
+					{
+						item->a = JsNode(ji, JN_IDENT);
+						item->a->str = item->str;
+						if (JsEatPunct(ji, '='))
+						{
+							dflt = JsNode(ji, JN_ASSIGN);
+							dflt->op = '=';
+							dflt->a = item->a;
+							dflt->b = JsParseAssign(ji);
+							item->a = dflt;
+						}
+					}
+				}
+				// op 1/2 = get/set accessor
+				if (acc && item->type == JN_PROP && item->a &&
+					item->a->type == JN_FUNC)
+					item->op = acc;
+				if (tail)
+					tail->next = item;
+				else
+					node->a = item;
+				tail = item;
+			}
+			while (JsEatPunct(ji, ','));
+			if (!JsEatPunct(ji, '}'))
+			{
+				emk = 1;
+				while (emk > 0 && JsTok(ji)->type != JT_EOF)
+				{
+					if (JsIsPunct(ji, '{') || JsIsPunct(ji, '[') || JsIsPunct(ji, '('))
+						emk++;
+					else if (JsIsPunct(ji, '}') || JsIsPunct(ji, ']') ||
+							 JsIsPunct(ji, ')'))
+						emk--;
+					ji->pos++;
+				}
+			}
+		}
+		return node;
+	}
+
+	if (++js_parse_errs <= 12)
+	{
+		StrPrint(embuf, "skip@%d:", ji->pos);
+		emk = ji->pos - 5;
+		if (emk < 0)
+			emk = 0;
+		while (emk <= ji->pos + 4 && StrLen(embuf) < 150)
+		{
+			JsTokDesc(ji, emk, emtk);
+			if (emk == ji->pos)
+				CatPrint(embuf, " >%s<", emtk);
+			else
+				CatPrint(embuf, " %s", emtk);
+			emk++;
+		}
+		JsScrub(embuf);
+		JsConsoleAdd("parse", embuf);
+		NetLog("JS: %s", embuf);
+		JsSrcWindow(ji, ji->pos, embuf);
+		JsConsoleAdd("parse", embuf);
+		NetLog("JS:  src: %s", embuf);
+	}
+	ji->pos++;
+
+	return NULL;
+}
+
+CJsNode *JsParsePostfix(CJsInterp *ji)
+{
+	CJsNode *node = JsParsePrimary(ji), *wrap;
+	CJsTok	*t;
+	Bool	 going = TRUE;
+	I64		 dep;
+
+	while (node && going && !ji->parse_err)
+	{
+		if (JsEatPunct(ji, JP_OPTCHAIN))
+		{ // a?.b approximated as a.b
+			t = JsTok(ji);
+			if (t->type == JT_IDENT)
+			{
+				ji->pos++;
+				wrap = JsNode(ji, JN_MEMBER);
+				wrap->a	  = node;
+				wrap->str = t->str;
+				node = wrap;
+			}
+		}
+		else if (JsEatPunct(ji, '.'))
+		{
+			t = JsTok(ji);
+			if (t->type != JT_IDENT)
+			{
+				JsParseErr(ji, "expected name after .");
+				return node;
+			}
+			ji->pos++;
+			wrap = JsNode(ji, JN_MEMBER);
+			wrap->a	  = node;
+			wrap->str = t->str;
+			node = wrap;
+		}
+		else if (JsEatPunct(ji, '['))
+		{
+			wrap = JsNode(ji, JN_INDEX);
+			wrap->a = node;
+			wrap->b = JsParseExpr(ji);
+			if (!JsEatPunct(ji, ']'))
+			{
+				dep = 1;
+				while (dep > 0 && JsTok(ji)->type != JT_EOF)
+				{
+					if (JsIsPunct(ji, '{') || JsIsPunct(ji, '[') || JsIsPunct(ji, '('))
+						dep++;
+					else if (JsIsPunct(ji, '}') || JsIsPunct(ji, ']') ||
+							 JsIsPunct(ji, ')'))
+						dep--;
+					ji->pos++;
+				}
+			}
+			node = wrap;
+		}
+		else if (JsEatPunct(ji, '('))
+		{
+			wrap = JsNode(ji, JN_CALL);
+			wrap->a = node;
+			wrap->b = JsParseArgs(ji);
+			node = wrap;
+		}
+		else if (JsIsPunct(ji, JP_INC) || JsIsPunct(ji, JP_DEC))
+		{
+			wrap = JsNode(ji, JN_POSTINC);
+			if (JsTok(ji)->punct == JP_INC)
+				wrap->op = 1;
+			else
+				wrap->op = -1;
+			ji->pos++;
+			wrap->a = node;
+			node = wrap;
+		}
+		else
+			going = FALSE;
+	}
+
+	return node;
+}
+
+CJsNode *JsParseUnary(CJsInterp *ji)
+{ // the 256KB task stack does not survive pathological nesting
+	CJsNode *node;
+
+	if (ji->depth > 80)
+	{
+		JsParseErr(ji, "expression too deep");
+		ji->pos++;
+		return NULL;
+	}
+	if (JsIsKw(ji, "async"))
+	{ // async is transparent: fetch and XHR run synchronously underneath
+		CJsTok *t2 = &ji->toks[ji->pos + 1];
+
+		if (t2->type == JT_IDENT ||
+			(t2->type == JT_PUNCT && t2->punct == '('))
+			ji->pos++;
+	}
+	if (JsEatKw(ji, "await"))
+	{
+		node = JsNode(ji, JN_AWAIT);
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatPunct(ji, '!'))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = '!';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatPunct(ji, '~'))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = '~';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatPunct(ji, '-'))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = '-';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatPunct(ji, '+'))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = 'p';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "void"))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = 'v';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "delete"))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = 'd';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "typeof"))
+	{
+		node = JsNode(ji, JN_UN);
+		node->op = 't';
+		node->a = JsParseUnary(ji);
+		return node;
+	}
+	if (JsIsPunct(ji, JP_INC) || JsIsPunct(ji, JP_DEC))
+	{
+		node = JsNode(ji, JN_PREINC);
+		if (JsTok(ji)->punct == JP_INC)
+			node->op = 1;
+		else
+			node->op = -1;
+		ji->pos++;
+		node->a = JsParsePostfix(ji);
+		return node;
+	}
+
+	return JsParsePostfix(ji);
+}
+
+CJsNode *JsParseBinLevel(CJsInterp *ji, I64 level)
+{ // JS precedence, high to low: 0: **   1: * / %   2: + -   3: << >> >>>   4: rel
+  // (< > <= >= in instanceof)   5: eq   6: &   7: ^   8: |   9: &&   10: ||   11: ??
+	CJsNode *node, *wrap;
+	I64		 op;
+	Bool	 going = TRUE;
+
+	if (level == 0)
+		node = JsParseUnary(ji);
+	else
+		node = JsParseBinLevel(ji, level - 1);
+
+	while (node && going && !ji->parse_err)
+	{
+		op = -1;
+		if (level == 4 && JsTok(ji)->type == JT_IDENT)
+		{
+			if (!StrCompare(JsTok(ji)->str, "instanceof"))
+				op = JP_INSTOF;
+			else if (!StrCompare(JsTok(ji)->str, "in"))
+				op = JP_IN;
+		}
+		if (op < 0 && JsTok(ji)->type == JT_PUNCT)
+		{
+			op = JsTok(ji)->punct;
+			switch (level)
+			{
+				case 0:
+					if (op != JP_POW)
+						op = -1;
+					break;
+				case 1:
+					if (op != '*' && op != '/' && op != '%')
+						op = -1;
+					break;
+				case 2:
+					if (op != '+' && op != '-')
+						op = -1;
+					break;
+				case 3:
+					if (op != JP_SHL && op != JP_SHR && op != JP_SHR3)
+						op = -1;
+					break;
+				case 4:
+					if (op != '<' && op != '>' && op != JP_LE && op != JP_GE)
+						op = -1;
+					break;
+				case 5:
+					if (op != JP_EQ2 && op != JP_NE && op != JP_EQ3 && op != JP_NE3)
+						op = -1;
+					break;
+				case 6:
+					if (op != '&')
+						op = -1;
+					break;
+				case 7:
+					if (op != '^')
+						op = -1;
+					break;
+				case 8:
+					if (op != '|')
+						op = -1;
+					break;
+				case 9:
+					if (op != JP_AND)
+						op = -1;
+					break;
+				case 10:
+					if (op != JP_OR)
+						op = -1;
+					break;
+				case 11:
+					if (op != JP_NULLISH)
+						op = -1;
+					break;
+			}
+		}
+		if (op < 0)
+			going = FALSE;
+		else
+		{
+			ji->pos++;
+			wrap = JsNode(ji, JN_BIN);
+			wrap->op = op;
+			wrap->a = node;
+			if (level == 0)
+				wrap->b = JsParseUnary(ji);
+			else
+				wrap->b = JsParseBinLevel(ji, level - 1);
+			node = wrap;
+		}
+	}
+
+	return node;
+}
+
+CJsNode *JsParseCond(CJsInterp *ji)
+{
+	CJsNode *node = JsParseBinLevel(ji, 11), *wrap;
+
+	if (node && JsEatPunct(ji, '?'))
+	{
+		wrap = JsNode(ji, JN_COND);
+		wrap->a = node;
+		wrap->b = JsParseAssign(ji);
+		if (!JsEatPunct(ji, ':'))
+			JsParseErr(ji, "expected : in ?:");
+		wrap->c = JsParseAssign(ji);
+		node = wrap;
+	}
+
+	return node;
+}
+
+CJsNode *JsParseAssign(CJsInterp *ji)
+{
+	CJsNode *node, *wrap, *fn, *param, *ptail, *ret, *blk;
+	I64		 op = -1, k, j, dep;
+	Bool	 arrow = FALSE, plist = FALSE, is_rest;
+
+	if (JsIsKw(ji, "yield"))
+	{ // generators run eagerly, no suspension: yield x produces x
+		ji->pos++;
+		JsEatPunct(ji, '*');
+		node = JsNode(ji, JN_UN);
+		node->op = 'y';
+		if (!JsIsPunct(ji, ';') && !JsIsPunct(ji, ')') && !JsIsPunct(ji, '}') &&
+			!JsIsPunct(ji, ',') && !JsIsPunct(ji, ']') && JsTok(ji)->type != JT_EOF)
+			node->a = JsParseAssign(ji);
+		return node;
+	}
+
+	if (JsIsKw(ji, "async") && ji->pos + 2 < ji->tok_count &&
+		(ji->toks[ji->pos + 1].punct == '(' ||
+		 (ji->toks[ji->pos + 1].type == JT_IDENT &&
+		  ji->toks[ji->pos + 2].type == JT_PUNCT &&
+		  ji->toks[ji->pos + 2].punct == JP_ARROW)))
+		ji->pos++;
+
+	k = ji->pos;
+	if (k + 1 < ji->tok_count &&
+		ji->toks[k].type == JT_IDENT && ji->toks[k + 1].type == JT_PUNCT &&
+		ji->toks[k + 1].punct == JP_ARROW)
+		arrow = TRUE;
+	else if (ji->toks[k].type == JT_PUNCT && ji->toks[k].punct == '(')
+	{ // any balanced ( ... ) immediately followed by => is an arrow
+		j = k + 1;
+		dep = 1;
+		while (j < ji->tok_count && dep > 0)
+		{
+			if (ji->toks[j].type == JT_PUNCT)
+			{
+				if (ji->toks[j].punct == '(' || ji->toks[j].punct == '[' ||
+					ji->toks[j].punct == '{')
+					dep++;
+				else if (ji->toks[j].punct == ')' || ji->toks[j].punct == ']' ||
+						 ji->toks[j].punct == '}')
+					dep--;
+			}
+			j++;
+		}
+		if (dep == 0 && j < ji->tok_count && ji->toks[j].type == JT_PUNCT &&
+			ji->toks[j].punct == JP_ARROW)
+		{
+			arrow = TRUE;
+			plist = TRUE;
+		}
+	}
+	if (arrow)
+	{
+		fn = JsNode(ji, JN_FUNC);
+		ptail = NULL;
+		if (plist)
+		{
+			ji->pos = k + 1;
+			while (!JsIsPunct(ji, ')') && JsTok(ji)->type != JT_EOF)
+			{
+				is_rest = JsEatPunct(ji, JP_SPREAD);
+				if (JsIsPunct(ji, '{') || JsIsPunct(ji, '['))
+				{ // op 2, pattern in b
+					param = JsNode(ji, JN_IDENT);
+					param->op = 2;
+					param->b  = JsParsePrimary(ji);
+					if (JsEatPunct(ji, '='))
+						param->a = JsParseAssign(ji);
+					if (ptail)
+						ptail->next = param;
+					else
+						fn->a = param;
+					ptail = param;
+				}
+				else if (JsTok(ji)->type == JT_IDENT)
+				{
+					param = JsNode(ji, JN_IDENT);
+					param->str = JsTok(ji)->str;
+					ji->pos++;
+					if (is_rest)
+						param->op = 1; // rest marker
+					else if (JsEatPunct(ji, '='))
+						param->a = JsParseAssign(ji);
+					if (ptail)
+						ptail->next = param;
+					else
+						fn->a = param;
+					ptail = param;
+				}
+				else
+					ji->pos++;
+				if (!JsEatPunct(ji, ','))
+					break;
+			}
+			JsEatPunct(ji, ')');
+		}
+		else
+		{
+			param = JsNode(ji, JN_IDENT);
+			param->str = ji->toks[k].str;
+			fn->a = param;
+			ji->pos = k + 1;
+		}
+		JsEatPunct(ji, JP_ARROW);
+		if (JsIsPunct(ji, '{'))
+			fn->b = JsParseStmt(ji);
+		else
+		{
+			ret = JsNode(ji, JN_RETURN);
+			ji->depth++;
+			ret->a = JsParseAssign(ji);
+			ji->depth--;
+			blk = JsNode(ji, JN_BLOCK);
+			blk->a = ret;
+			fn->b = blk;
+		}
+		return fn;
+	}
+
+	ji->depth++;
+	node = JsParseCond(ji);
+	ji->depth--;
+	if (!node)
+		return NULL;
+	op = JsTok(ji)->punct;
+	if (JsTok(ji)->type != JT_PUNCT ||
+		(op != '=' && op != JP_ADDEQ && op != JP_SUBEQ && op != JP_MULEQ &&
+		 op != JP_DIVEQ && op != JP_MODEQ && op != JP_POWEQ && op != JP_BANDEQ &&
+		 op != JP_BOREQ && op != JP_BXOREQ && op != JP_SHLEQ && op != JP_SHREQ &&
+		 op != JP_ANDEQ && op != JP_OREQ && op != JP_NULEQ))
+		op = -1;
+
+	if (op >= 0)
+	{
+		if (node->type != JN_IDENT && node->type != JN_MEMBER &&
+			node->type != JN_INDEX && node->type != JN_ARRLIT &&
+			node->type != JN_OBJLIT)
+		{
+			ji->pos++;
+			JsParseAssign(ji);
+			return node;
+		}
+		ji->pos++;
+		wrap = JsNode(ji, JN_ASSIGN);
+		wrap->op = op;
+		wrap->a = node;
+		wrap->b = JsParseAssign(ji);
+		node = wrap;
+	}
+
+	return node;
+}
+
+CJsNode *JsParseBlock(CJsInterp *ji)
+{ // '{' already eaten
+	CJsNode *node = JsNode(ji, JN_BLOCK), *stmt, *tail = NULL;
+	I64		 before;
+
+	while (!JsIsPunct(ji, '}') && JsTok(ji)->type != JT_EOF && !ji->has_err)
+	{
+		before = ji->pos;
+		stmt = JsParseStmt(ji);
+		if (ji->parse_err)
+			JsParseResync(ji);
+		if (stmt)
+		{
+			if (tail)
+				tail->next = stmt;
+			else
+				node->a = stmt;
+			tail = stmt;
+		}
+		if (ji->pos == before)
+			ji->pos++;
+	}
+	JsEatPunct(ji, '}');
+
+	return node;
+}
+
+CJsNode *JsParseFunc(CJsInterp *ji, Bool need_name)
+{ // "function" already eaten
+	CJsNode *node = JsNode(ji, JN_FUNC), *param, *tail = NULL;
+	CJsTok	*t;
+	Bool	 is_rest;
+
+	JsEatPunct(ji, '*');
+	t = JsTok(ji);
+	if (t->type == JT_IDENT)
+	{
+		node->str = t->str;
+		ji->pos++;
+	}
+	else if (need_name)
+	{
+		JsParseErr(ji, "function needs a name");
+		return NULL;
+	}
+
+	if (!JsEatPunct(ji, '('))
+	{
+		JsParseErr(ji, "expected ( after function");
+		return node;
+	}
+	if (!JsEatPunct(ji, ')'))
+	{
+		do
+		{
+			if (JsIsPunct(ji, ')'))
+				break;
+			is_rest = JsEatPunct(ji, JP_SPREAD);
+			if (JsIsPunct(ji, '{') || JsIsPunct(ji, '['))
+			{ // op 2 tells JsCall to run JsPatBind on the pattern
+				param = JsNode(ji, JN_IDENT);
+				param->op = 2;
+				param->b  = JsParsePrimary(ji);
+				if (JsEatPunct(ji, '='))
+					param->a = JsParseAssign(ji);
+				if (tail)
+					tail->next = param;
+				else
+					node->a = param;
+				tail = param;
+			}
+			else
+			{
+				t = JsTok(ji);
+				if (t->type != JT_IDENT)
+				{
+					JsParseErr(ji, "bad parameter");
+					return node;
+				}
+				ji->pos++;
+				param = JsNode(ji, JN_IDENT);
+				param->str = t->str;
+				if (is_rest)
+					param->op = 1; // rest marker
+				else if (JsEatPunct(ji, '='))
+					param->a = JsParseAssign(ji);
+				if (tail)
+					tail->next = param;
+				else
+					node->a = param;
+				tail = param;
+			}
+		}
+		while (JsEatPunct(ji, ','));
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after params");
+	}
+	if (!JsEatPunct(ji, '{'))
+	{
+		JsParseErr(ji, "expected { in function");
+		return node;
+	}
+	node->b = JsParseBlock(ji);
+
+	return node;
+}
+
+CJsNode *JsParseExpr(CJsInterp *ji)
+{
+	CJsNode *node = JsParseAssign(ji), *seq, *tail;
+
+	if (!JsIsPunct(ji, ','))
+		return node;
+	seq = JsNode(ji, JN_SEQ);
+	seq->a = node;
+	tail = node;
+	while (JsEatPunct(ji, ','))
+	{
+		node = JsParseAssign(ji);
+		if (!node)
+			break;
+		tail->next = node;
+		tail = node;
+	}
+
+	return seq;
+}
+
+CJsNode *JsParseVar(CJsInterp *ji)
+{ // var/let/const already eaten
+	CJsNode *node = JsNode(ji, JN_VAR), *decl, *tail = NULL;
+	CJsTok	*t;
+
+	do
+	{
+		t = JsTok(ji);
+		if (t->type == JT_PUNCT && (t->punct == '{' || t->punct == '['))
+		{
+			decl = JsNode(ji, JN_DESTRUCT);
+			decl->b = JsParsePrimary(ji);
+			if (JsEatPunct(ji, '='))
+				decl->a = JsParseAssign(ji);
+		}
+		else
+		{
+			if (t->type != JT_IDENT)
+			{
+				JsParseErr(ji, "bad var name");
+				return node;
+			}
+			ji->pos++;
+			decl = JsNode(ji, JN_VARDECL);
+			decl->str = t->str;
+			if (JsEatPunct(ji, '='))
+				decl->a = JsParseAssign(ji);
+		}
+		if (tail)
+			tail->next = decl;
+		else
+			node->a = decl;
+		tail = decl;
+	}
+	while (JsEatPunct(ji, ','));
+	JsEatPunct(ji, ';');
+
+	return node;
+}
+
+CJsNode *JsParseStmt(CJsInterp *ji)
+{
+	CJsNode *node, *item, *mtail, *ctail, *stmt2;
+	CJsTok	*t;
+	I64		 k, kp, dep;
+	Bool	 blk;
+
+	if (JsEatPunct(ji, ';'))
+		return NULL;
+	if (JsEatPunct(ji, '{'))
+		return JsParseBlock(ji);
+	if (JsIsKw(ji, "async") &&
+		ji->toks[ji->pos + 1].type == JT_IDENT &&
+		!StrCompare(ji->toks[ji->pos + 1].str, "function"))
+		ji->pos++;
+	if (JsEatKw(ji, "function"))
+		return JsParseFunc(ji, TRUE);
+	if (JsEatKw(ji, "var") || JsEatKw(ji, "let") || JsEatKw(ji, "const"))
+		return JsParseVar(ji);
+	if (JsEatKw(ji, "throw"))
+	{
+		node = JsNode(ji, JN_THROW);
+		node->a = JsParseExpr(ji);
+		JsEatPunct(ji, ';');
+		return node;
+	}
+	if (JsEatKw(ji, "try"))
+	{
+		node = JsNode(ji, JN_TRY);
+		node->a = JsParseStmt(ji);
+		if (JsEatKw(ji, "catch"))
+		{
+			if (JsEatPunct(ji, '('))
+			{
+				t = JsTok(ji);
+				if (t->type == JT_IDENT)
+				{
+					node->str = t->str;
+					ji->pos++;
+				}
+				JsEatPunct(ji, ')');
+			}
+			node->b = JsParseStmt(ji);
+		}
+		if (JsEatKw(ji, "finally"))
+			node->c = JsParseStmt(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "class"))
+		return JsParseClass(ji);
+	if (JsEatKw(ji, "if"))
+	{
+		node = JsNode(ji, JN_IF);
+		if (!JsEatPunct(ji, '('))
+			JsParseErr(ji, "expected ( after if");
+		node->a = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after if");
+		node->b = JsParseStmt(ji);
+		if (JsEatKw(ji, "else"))
+			node->c = JsParseStmt(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "while"))
+	{
+		node = JsNode(ji, JN_WHILE);
+		if (!JsEatPunct(ji, '('))
+			JsParseErr(ji, "expected ( after while");
+		node->a = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after while");
+		node->b = JsParseStmt(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "for"))
+	{
+		node = JsNode(ji, JN_FOR);
+		JsEatKw(ji, "await");
+		if (!JsEatPunct(ji, '('))
+			JsParseErr(ji, "expected ( after for");
+		k = ji->pos;
+		if (ji->toks[k].type == JT_IDENT &&
+			(!StrCompare(ji->toks[k].str, "var") ||
+			 !StrCompare(ji->toks[k].str, "let") ||
+			 !StrCompare(ji->toks[k].str, "const")))
+			k++;
+		kp = k;
+		if (ji->toks[k].type == JT_PUNCT &&
+			(ji->toks[k].punct == '[' || ji->toks[k].punct == '{'))
+		{
+			dep = 0;
+			do
+			{
+				if (ji->toks[k].type == JT_PUNCT &&
+					(ji->toks[k].punct == '[' || ji->toks[k].punct == '{'))
+					dep++;
+				else if (ji->toks[k].type == JT_PUNCT &&
+						 (ji->toks[k].punct == ']' || ji->toks[k].punct == '}'))
+					dep--;
+				k++;
+			}
+			while (dep > 0 && ji->toks[k].type != JT_EOF);
+		}
+		else if (ji->toks[k].type == JT_IDENT)
+			k++;
+		if (ji->toks[k].type == JT_IDENT &&
+			(!StrCompare(ji->toks[k].str, "of") ||
+			 !StrCompare(ji->toks[k].str, "in")))
+		{
+			node->type = JN_FOROF;
+			node->str = "_forof";
+			if (ji->toks[kp].type == JT_IDENT)
+				node->str = ji->toks[kp].str;
+			else
+			{
+				ji->pos = kp;
+				node->b = JsParsePrimary(ji);
+				if (ji->pos != k)
+					node->b = NULL;
+			}
+			if (!StrCompare(ji->toks[k].str, "in"))
+				node->op = 1;
+			ji->pos = k + 1;
+			// for-in is `for (lhs in Expression)`, so `for (k in a, b)` enumerates b; for-of takes an AssignmentExpression, so the comma is left for the caller
+			if (node->op)
+				node->a = JsParseExpr(ji);
+			else
+				node->a = JsParseAssign(ji);
+			if (!JsEatPunct(ji, ')'))
+				JsParseErr(ji, "expected ) after for-of");
+			node->d = JsParseStmt(ji);
+			return node;
+		}
+		if (!JsIsPunct(ji, ';'))
+		{
+			if (JsIsKw(ji, "var") || JsIsKw(ji, "let") || JsIsKw(ji, "const"))
+			{ // let/const in a for-init get a FRESH binding per iteration, var does not; flagged in JN_VAR's op
+				blk = JsIsKw(ji, "let") || JsIsKw(ji, "const");
+				ji->pos++;
+				node->a = JsParseVar(ji);
+				if (node->a && blk)
+					node->a->op = 1;
+			}
+			else
+			{
+				node->a = JsNode(ji, JN_EXPR);
+				node->a->a = JsParseExpr(ji);
+				JsEatPunct(ji, ';');
+			}
+		}
+		else
+			JsEatPunct(ji, ';');
+		if (!JsIsPunct(ji, ';'))
+			node->b = JsParseExpr(ji);
+		JsEatPunct(ji, ';');
+		if (!JsIsPunct(ji, ')'))
+			node->c = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after for");
+		node->d = JsParseStmt(ji);
+		return node;
+	}
+	if (JsEatKw(ji, "return"))
+	{
+		node = JsNode(ji, JN_RETURN);
+		if (!JsIsPunct(ji, ';') && !JsIsPunct(ji, '}') &&
+			JsTok(ji)->type != JT_EOF)
+			node->a = JsParseExpr(ji);
+		JsEatPunct(ji, ';');
+		return node;
+	}
+	if (JsEatKw(ji, "break"))
+	{
+		if (JsTok(ji)->type == JT_IDENT)
+			ji->pos++; // labeled break approximated as innermost break
+		JsEatPunct(ji, ';');
+		return JsNode(ji, JN_BREAK);
+	}
+	if (JsEatKw(ji, "continue"))
+	{
+		if (JsTok(ji)->type == JT_IDENT)
+			ji->pos++; // labeled continue approximated as innermost continue
+		JsEatPunct(ji, ';');
+		return JsNode(ji, JN_CONTINUE);
+	}
+	if (JsEatKw(ji, "do"))
+	{
+		node = JsNode(ji, JN_DO);
+		node->a = JsParseStmt(ji);
+		if (!JsEatKw(ji, "while") || !JsEatPunct(ji, '('))
+			JsParseErr(ji, "expected while ( after do body");
+		node->b = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after do-while");
+		JsEatPunct(ji, ';');
+		return node;
+	}
+	if (JsEatKw(ji, "switch"))
+	{
+		node = JsNode(ji, JN_SWITCH);
+		if (!JsEatPunct(ji, '('))
+			JsParseErr(ji, "expected ( after switch");
+		node->a = JsParseExpr(ji);
+		if (!JsEatPunct(ji, ')'))
+			JsParseErr(ji, "expected ) after switch");
+		if (!JsEatPunct(ji, '{'))
+			JsParseErr(ji, "expected { after switch");
+		mtail = NULL;
+		while (!ji->parse_err && !JsEatPunct(ji, '}') && JsTok(ji)->type != JT_EOF)
+		{
+			item = JsNode(ji, JN_CASE);
+			if (JsEatKw(ji, "default"))
+				item->a = NULL;
+			else if (JsEatKw(ji, "case"))
+				item->a = JsParseExpr(ji);
+			else
+			{
+				JsParseErr(ji, "expected case/default in switch");
+				return node;
+			}
+			if (!JsEatPunct(ji, ':'))
+				JsParseErr(ji, "expected : after case");
+			ctail = NULL;
+			while (!ji->parse_err && !JsIsKw(ji, "case") && !JsIsKw(ji, "default") &&
+				   !JsIsPunct(ji, '}') && JsTok(ji)->type != JT_EOF)
+			{
+				stmt2 = JsParseStmt(ji);
+				if (stmt2)
+				{
+					if (ctail)
+						ctail->next = stmt2;
+					else
+						item->b = stmt2;
+					ctail = stmt2;
+				}
+			}
+			if (mtail)
+				mtail->next = item;
+			else
+				node->b = item;
+			mtail = item;
+		}
+		return node;
+	}
+
+	if (JsTok(ji)->type == JT_IDENT &&
+		ji->toks[ji->pos + 1].type == JT_PUNCT &&
+		ji->toks[ji->pos + 1].punct == ':')
+	{
+		ji->pos += 2;
+		return JsParseStmt(ji);
+	}
+
+	node = JsNode(ji, JN_EXPR);
+	node->a = JsParseExpr(ji);
+	JsEatPunct(ji, ';');
+
+	return node;
+}
+
+
+CJsVal *JsEnvGet(CJsInterp *ji, U8 *name)
+{
+	CJsEnv	*env = ji->env;
+	CJsProp *p;
+
+	while (env)
+	{
+		p = env->vars;
+		while (p)
+		{
+			if (!StrCompare(p->name, name))
+				return p->val(CJsVal *);
+			p = p->next;
+		}
+		env = env->parent;
+	}
+
+	return NULL;
+}
+
+U0 JsEnvDeclare(CJsInterp *ji, CJsEnv *env, U8 *name, CJsVal *val)
+{
+	CJsProp *p = env->vars;
+
+	while (p)
+	{
+		if (!StrCompare(p->name, name))
+		{
+			p->val = val(U64);
+			return;
+		}
+		p = p->next;
+	}
+	p = JsAlloc(ji, sizeof(CJsProp))(CJsProp *);
+	p->name = JsStrDup(ji, name);
+	p->val	= val(U64);
+	p->next = env->vars;
+	env->vars = p;
+}
+
+CJsEnv *JsEnvPerIter(CJsInterp *ji, CJsEnv *src)
+{ // ECMAScript CreatePerIterationEnvironment: fresh env holding a COPY of src's own bindings, sharing src's parent
+	CJsEnv	*e = JsAlloc(ji, sizeof(CJsEnv))(CJsEnv *);
+	CJsProp *p, *q, *tail = NULL;
+
+	e->parent = src->parent;
+	e->vars = NULL;
+	p = src->vars;
+	while (p)
+	{
+		q = JsAlloc(ji, sizeof(CJsProp))(CJsProp *);
+		q->name = p->name; // arena-owned, safe to share
+		q->val	= p->val;
+		q->next = NULL;
+		if (tail)
+			tail->next = q;
+		else
+			e->vars = q;
+		tail = q;
+		p = p->next;
+	}
+
+	return e;
+}
+
+U0 JsEnvSet(CJsInterp *ji, U8 *name, CJsVal *val)
+{
+	CJsEnv	*env = ji->env;
+	CJsProp *p;
+
+	while (env)
+	{
+		p = env->vars;
+		while (p)
+		{
+			if (!StrCompare(p->name, name))
+			{
+				p->val = val(U64);
+				return;
+			}
+			p = p->next;
+		}
+		env = env->parent;
+	}
+	JsEnvDeclare(ji, ji->genv, name, val);
+}
+
+
+CZNode *JsDocBody(CJsInterp *ji)
+{
+	CZNode *body = ZDomFindTag(ji->dom_root, "body");
+
+	if (!body)
+		body = ji->dom_root;
+
+	return body;
+}
+
+U0 JsWriteAppend(CJsInterp *ji, U8 *s)
+{
+	I64 len = StrLen(s);
+
+	if (ji->write_len + len >= JS_WRITE_BUF)
+		return;
+	MemCopy(ji->write_buf + ji->write_len, s, len);
+	ji->write_len += len;
+}
+
+U0 JsFlushWrites(CJsInterp *ji)
+{
+	if (!ji->write_len)
+		return;
+	ji->write_buf[ji->write_len] = 0;
+	ZHtmlParseInto(JsDocBody(ji), ji->write_buf);
+	ji->write_len = 0;
+	ji->dom_dirty = TRUE;
+}
+
+U8 *JsEscDollars(CJsInterp *ji, U8 *s)
+{ // double each dollar byte for DolDoc printers
+	U8	*out = JsAlloc(ji, StrLen(s) * 2 + 1), *d = out;
+
+	while (*s)
+	{
+		if (*s == 0x24)
+			*d++ = 0x24;
+		*d++ = *s++;
+	}
+	*d = 0;
+
+	return out;
+}
+
+#define JSLOG_NETLOG	0
+#define JSLOG_TERM		1
+#define JSLOG_CAPTURE	2
+
+I64	 js_log_mode	= JSLOG_NETLOG;
+U8	*js_log_cap		= NULL;
+I64	 js_log_cap_max	= 0;
+
+U0 JsLogEmit(CJsInterp *ji, U8 *msg)
+{
+	JsConsoleAdd("log", msg);
+	switch (js_log_mode)
+	{
+		case JSLOG_TERM:
+			// DolDoc: dollars must be doubled
+			"%s\n", JsEscDollars(ji, msg);
+			break;
+		case JSLOG_CAPTURE:
+			if (js_log_cap &&
+				StrLen(js_log_cap) + StrLen(msg) + 2 < js_log_cap_max)
+				CatPrint(js_log_cap, "%s\n", msg);
+			break;
+		default:
+			NetLog("JS log: %s", msg);
+			break;
+	}
+}
+
+U0 JsCamelToKebab(U8 *src, U8 *dst, I64 max)
+{
+	I64 n = 0;
+
+	while (*src && n < max - 2)
+	{
+		if ('A' <= *src <= 'Z')
+		{
+			dst[n++] = '-';
+			dst[n++] = *src + 0x20;
+		}
+		else
+			dst[n++] = *src;
+		src++;
+	}
+	dst[n] = 0;
+}
+
+U0 JsTextContentSet(CJsInterp *ji, CZNode *node, U8 *s)
+{
+	CZNode *text_node;
+
+	ZNodeFreeChildren(node);
+	text_node = ZNodeNew(ZH_TEXT, node);
+	if (text_node)
+		text_node->text = StrNew(s);
+	ji->dom_dirty = TRUE;
+}
+
+#include "JSRegex"
+
+
+U8 *JsCookieGet(CJsInterp *ji)
+{ // MAlloc'ed
+	CHttpUrl u;
+
+	if (ji->url && HttpUrlParse(ji->url, &u) >= 0)
+		return HttpDocCookieGet(&u);
+	return StrNew("");
+}
+
+U0 JsCookieSet(CJsInterp *ji, U8 *s)
+{
+	CHttpUrl u;
+
+	if (ji->url && HttpUrlParse(ji->url, &u) >= 0)
+		HttpDocCookieSet(&u, s);
+}
+
+U0 JsUrlPart(U8 *url, I64 part, U8 *out)
+{ // WHATWG component of an absolute URL. part: 0 protocol ("https:"), 1 host with port, 2 hostname, 3 port, 4 pathname, 5 search, 6 hash, 7 origin. out >= 512
+	U8	*p, *hs, *he, *pa, *q, *h, *pc, *a, *b;
+	I64	 n;
+	Bool scheme = FALSE;
+
+	out[0] = 0;
+	if (!url)
+		return;
+	p = url;
+	while (*p && *p != ':' && *p != '/' && *p != '?' && *p != '#')
+		p++;
+	hs = url;
+	he = url;
+	pa = url;
+	if (*p == ':')
+	{
+		scheme = TRUE;
+		hs = p + 1;
+		if (hs[0] == '/' && hs[1] == '/')
+			hs += 2;
+		he = hs;
+		while (*he && *he != '/' && *he != '?' && *he != '#')
+			he++;
+		pa = he;
+	}
+	q = pa;
+	while (*q && *q != '?' && *q != '#')
+		q++;
+	h = q;
+	while (*h && *h != '#')
+		h++;
+	pc = hs;
+	while (pc < he && *pc != ':')
+		pc++;
+	a = url;
+	b = url;
+	switch (part)
+	{
+		case 0:
+			if (scheme)
+				b = p + 1;
+			break;
+		case 1:
+			a = hs;
+			b = he;
+			break;
+		case 2:
+			a = hs;
+			b = pc;
+			break;
+		case 3:
+			a = pc;
+			b = he;
+			if (a < b)
+				a++;
+			break;
+		case 4:
+			a = pa;
+			b = q;
+			break;
+		case 5:
+			a = q;
+			b = h;
+			break;
+		case 6:
+			a = h;
+			b = h + StrLen(h);
+			break;
+		case 7:
+			if (scheme)
+				b = he;
+			break;
+	}
+	n = 0;
+	while (a < b && n < 500)
+	{
+		out[n] = *a;
+		n++;
+		a++;
+	}
+	out[n] = 0;
+	if (part == 4 && !out[0])
+		StrCopy(out, "/");
+}
+
+Bool JsStyleProp(U8 *style, U8 *key, U8 *out, I64 max)
+{ // last declaration wins
+	U8	*p = style, *ks, *ke, *vs;
+	I64	 n, klen = StrLen(key);
+	Bool found = FALSE;
+
+	while (*p)
+	{
+		while (*p == ';' || *p == ' ' || *p == '\t')
+			p++;
+		if (!*p)
+			break;
+		ks = p;
+		while (*p && *p != ':' && *p != ';')
+			p++;
+		ke = p;
+		while (ke > ks && ke[-1] == ' ')
+			ke--;
+		if (*p == ':')
+		{
+			p++;
+			while (*p == ' ')
+				p++;
+			vs = p;
+			while (*p && *p != ';')
+				p++;
+			if (ke - ks == klen && !MemCompare(ks, key, klen))
+			{
+				n = p - vs;
+				if (n > max - 1)
+					n = max - 1;
+				MemCopy(out, vs, n);
+				while (n > 0 && out[n - 1] == ' ')
+					n--;
+				out[n] = 0;
+				found = TRUE;
+			}
+		}
+	}
+
+	return found;
+}
+
+CJsVal *JsUrlAbs(CJsInterp *ji, U8 *rel)
+{
+	CJsVal	 *v;
+	CHttpUrl  base;
+	U8		 *abs = NULL;
+
+	if (!rel || !*rel)
+		return JsStrV(ji, "");
+	if (ji->url && HttpUrlParse(ji->url, &base) >= 0)
+		abs = HttpUrlResolve(&base, rel);
+	if (!abs)
+		return JsStrV(ji, rel);
+	v = JsStrV(ji, abs);
+	Free(abs);
+
+	return v;
+}
+
+CJsVal *JsProtoStandin(CJsInterp *ji, I64 type)
+{
+	if (type == JV_ARR)
+		return JsArrV(ji);
+	if (type == JV_STR)
+		return JsStrV(ji, "");
+	if (type == JV_NUM)
+		return JsNumV(ji, 0);
+	if (type == JV_BOOL)
+		return JsBoolV(ji, FALSE);
+	if (type == JV_NATIVE)
+		return JsNativeV(ji, JSN_EVT_NOOP);
+
+	return JsValNew(ji, JV_OBJ);
+}
+
+U0 JsProtoAttach(CJsInterp *ji, CJsVal *ctor, I64 type)
+{
+	CJsVal *proto;
+
+	if (!ctor)
+		return;
+	proto = JsValNew(ji, JV_OBJ);
+	proto->native_id = JSO_PROTO;
+	proto->num = type;
+	JsPropSet(ji, proto, "constructor", ctor);
+	JsPropSet(ji, ctor, "prototype", proto);
+}
+
+CJsVal *JsUrlNew(CJsInterp *ji, U8 *href, U8 *base)
+{
+	CJsVal	 *v;
+	CHttpUrl  bu;
+	U8		 *abs = NULL;
+	U8		  buf[600];
+
+	if (!href)
+		href = "";
+	if (!base || !*base)
+		base = ji->url;
+	if (base && HttpUrlParse(base, &bu) >= 0)
+		abs = HttpUrlResolve(&bu, href);
+	if (!abs)
+		abs = StrNew(href);
+	v = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, v, "href", JsStrV(ji, abs));
+	JsUrlPart(abs, 0, buf);
+	JsPropSet(ji, v, "protocol", JsStrV(ji, buf));
+	JsUrlPart(abs, 1, buf);
+	JsPropSet(ji, v, "host", JsStrV(ji, buf));
+	JsUrlPart(abs, 2, buf);
+	JsPropSet(ji, v, "hostname", JsStrV(ji, buf));
+	JsUrlPart(abs, 3, buf);
+	JsPropSet(ji, v, "port", JsStrV(ji, buf));
+	JsUrlPart(abs, 4, buf);
+	JsPropSet(ji, v, "pathname", JsStrV(ji, buf));
+	JsUrlPart(abs, 5, buf);
+	JsPropSet(ji, v, "search", JsStrV(ji, buf));
+	JsUrlPart(abs, 6, buf);
+	JsPropSet(ji, v, "hash", JsStrV(ji, buf));
+	JsUrlPart(abs, 7, buf);
+	JsPropSet(ji, v, "origin", JsStrV(ji, buf));
+	Free(abs);
+
+	return v;
+}
+
+CJsVal *JsMemberGet(CJsInterp *ji, CJsVal *obj, U8 *name)
+{
+	CJsVal *v, *trap, *tgt;
+	CJsProp *acc;
+	CJsVal *targs[2];
+	CZNode *node, *snode, *scur;
+	U8	   *attr;
+	U8		buf[1024];
+	U8		dkebab[64], dkey[80];
+	I64		len;
+
+	// Proxy and accessors hook the JS-visible path only, never JsPropGet
+	if (obj->type == JV_OBJ && obj->native_id == JSO_PROXY)
+	{
+		tgt = JsPropGet(obj, "_ptarget")(CJsVal *);
+		v	= JsPropGet(obj, "_phandler")(CJsVal *);
+		if (v)
+			trap = JsPropGet(v, "get")(CJsVal *);
+		else
+			trap = NULL;
+		if (!tgt)
+			return JsUndefV(ji);
+		if (trap && (trap->type == JV_FUNC || trap->type == JV_NATIVE))
+		{
+			targs[0] = tgt;
+			targs[1] = JsStrV(ji, name);
+			return JsCall(ji, trap, v, targs, 2);
+		}
+		return JsMemberGet(ji, tgt, name);
+	}
+	if (obj->type == JV_OBJ || obj->type == JV_ARR ||
+		obj->type == JV_FUNC || obj->type == JV_NATIVE)
+	{
+		acc = JsAccessorFind(obj, name);
+		if (acc && acc->getter)
+			return JsCall(ji, acc->getter(CJsVal *), obj, NULL, 0);
+		if (acc)
+			return JsUndefV(ji);
+	}
+
+	switch (obj->type)
+	{
+		case JV_UNDEF:
+		case JV_NULL:
+			// returns undefined where real JS throws
+			return JsUndefV(ji);
+		case JV_NUM:
+		case JV_BOOL:
+			if (!StrCompare(name, "toFixed"))	return JsNativeV(ji, JSN_NUM_TOFIXED);
+			if (!StrCompare(name, "toString"))	return JsNativeV(ji, JSN_NUM_TOSTR);
+			if (!StrCompare(name, "toLocaleString"))
+				return JsNativeV(ji, JSN_NUM_TOLOCALE);
+			if (!StrCompare(name, "valueOf"))	return JsNativeV(ji, JSN_VALUEOF);
+			return JsUndefV(ji);
+		case JV_STR:
+			if (!StrCompare(name, "length"))
+				return JsNumV(ji, StrLen(obj->str));
+			if (!StrCompare(name, "charAt"))		return JsNativeV(ji, JSN_STR_CHARAT);
+			if (!StrCompare(name, "repeat"))		return JsNativeV(ji, JSN_STR_REPEAT);
+			if (!StrCompare(name, "padStart"))	return JsNativeV(ji, JSN_STR_PADSTART);
+			if (!StrCompare(name, "padEnd"))		return JsNativeV(ji, JSN_STR_PADEND);
+			if (!StrCompare(name, "substr"))		return JsNativeV(ji, JSN_STR_SUBSTR);
+			if (!StrCompare(name, "indexOf"))		return JsNativeV(ji, JSN_STR_INDEXOF);
+			if (!StrCompare(name, "substring"))		return JsNativeV(ji, JSN_STR_SUBSTRING);
+			if (!StrCompare(name, "slice"))			return JsNativeV(ji, JSN_STR_SLICE);
+			if (!StrCompare(name, "toUpperCase"))	return JsNativeV(ji, JSN_STR_TOUPPER);
+			if (!StrCompare(name, "toLowerCase"))	return JsNativeV(ji, JSN_STR_TOLOWER);
+			if (!StrCompare(name, "split"))			return JsNativeV(ji, JSN_STR_SPLIT);
+			if (!StrCompare(name, "replace"))		return JsNativeV(ji, JSN_STR_REPLACE);
+			if (!StrCompare(name, "replaceAll"))	return JsNativeV(ji, JSN_STR_REPLACE);
+			if (!StrCompare(name, "match"))			return JsNativeV(ji, JSN_STR_MATCH);
+			if (!StrCompare(name, "matchAll"))		return JsNativeV(ji, JSN_STR_MATCHALL);
+			if (!StrCompare(name, "search"))		return JsNativeV(ji, JSN_STR_SEARCH);
+			if (!StrCompare(name, "trim"))			return JsNativeV(ji, JSN_STR_TRIM);
+			if (!StrCompare(name, "includes"))		return JsNativeV(ji, JSN_STR_INCLUDES);
+			if (!StrCompare(name, "startsWith"))	return JsNativeV(ji, JSN_STR_STARTS);
+			if (!StrCompare(name, "endsWith"))		return JsNativeV(ji, JSN_STR_ENDS);
+			if (!StrCompare(name, "charCodeAt"))	return JsNativeV(ji, JSN_STR_CHARCODE);
+			if (!StrCompare(name, "codePointAt"))	return JsNativeV(ji, JSN_STR_CHARCODE);
+			if (!StrCompare(name, "at"))			return JsNativeV(ji, JSN_STR_AT);
+			if (!StrCompare(name, "concat"))		return JsNativeV(ji, JSN_STR_CONCAT);
+			if (!StrCompare(name, "localeCompare"))	return JsNativeV(ji, JSN_STR_LOCALECMP);
+			if (!StrCompare(name, "trimStart") || !StrCompare(name, "trimLeft"))
+				return JsNativeM(ji, JSN_STR_TRIMSIDE, 1);
+			if (!StrCompare(name, "trimEnd") || !StrCompare(name, "trimRight"))
+				return JsNativeM(ji, JSN_STR_TRIMSIDE, 2);
+			if (!StrCompare(name, "toLocaleUpperCase"))
+				return JsNativeV(ji, JSN_STR_TOUPPER);
+			if (!StrCompare(name, "toLocaleLowerCase"))
+				return JsNativeV(ji, JSN_STR_TOLOWER);
+			if (!StrCompare(name, "toString") || !StrCompare(name, "valueOf") ||
+				!StrCompare(name, "normalize"))
+				return JsNativeV(ji, JSN_VALUEOF);
+			return JsUndefV(ji);
+		case JV_ARR:
+			if (!StrCompare(name, "length"))
+				return JsNumV(ji, obj->count);
+			if (!StrCompare(name, "push"))		return JsNativeV(ji, JSN_ARR_PUSH);
+			if (!StrCompare(name, "join"))		return JsNativeV(ji, JSN_ARR_JOIN);
+			if (!StrCompare(name, "reduce"))	return JsNativeV(ji, JSN_ARR_REDUCE);
+			if (!StrCompare(name, "reverse"))	return JsNativeV(ji, JSN_ARR_REVERSE);
+			if (!StrCompare(name, "sort"))		return JsNativeV(ji, JSN_ARR_SORT);
+			if (!StrCompare(name, "indexOf"))	return JsNativeV(ji, JSN_ARR_INDEXOF);
+			if (!StrCompare(name, "map"))		return JsNativeV(ji, JSN_ARR_MAP);
+			if (!StrCompare(name, "filter"))	return JsNativeV(ji, JSN_ARR_FILTER);
+			if (!StrCompare(name, "forEach"))	return JsNativeV(ji, JSN_ARR_FOREACH);
+			if (!StrCompare(name, "find"))		return JsNativeV(ji, JSN_ARR_FIND);
+			if (!StrCompare(name, "slice"))		return JsNativeV(ji, JSN_ARR_SLICE);
+			if (!StrCompare(name, "concat"))	return JsNativeV(ji, JSN_ARR_CONCAT);
+			if (!StrCompare(name, "includes"))	return JsNativeV(ji, JSN_ARR_INCLUDES);
+			if (!StrCompare(name, "pop"))		return JsNativeV(ji, JSN_ARR_POP);
+			if (!StrCompare(name, "shift"))		return JsNativeV(ji, JSN_ARR_SHIFT);
+			if (!StrCompare(name, "some"))		return JsNativeV(ji, JSN_ARR_SOME);
+			if (!StrCompare(name, "every"))		return JsNativeV(ji, JSN_ARR_EVERY);
+			if (!StrCompare(name, "findIndex"))	return JsNativeV(ji, JSN_ARR_FINDINDEX);
+			if (!StrCompare(name, "findLast"))	return JsNativeV(ji, JSN_ARR_FINDLAST);
+			if (!StrCompare(name, "fill"))		return JsNativeV(ji, JSN_ARR_FILL);
+			if (!StrCompare(name, "at"))		return JsNativeV(ji, JSN_ARR_AT);
+			if (!StrCompare(name, "splice"))	return JsNativeV(ji, JSN_ARR_SPLICE);
+			if (!StrCompare(name, "unshift"))	return JsNativeV(ji, JSN_ARR_UNSHIFT);
+			if (!StrCompare(name, "flat"))		return JsNativeV(ji, JSN_ARR_FLAT);
+			if (!StrCompare(name, "flatMap"))	return JsNativeV(ji, JSN_ARR_FLATMAP);
+			if (!StrCompare(name, "lastIndexOf")) return JsNativeV(ji, JSN_ARR_LASTINDEXOF);
+			if (!StrCompare(name, "entries"))	return JsNativeM(ji, JSN_ARR_ENTRIES, 0);
+			if (!StrCompare(name, "keys"))		return JsNativeM(ji, JSN_ARR_ENTRIES, 1);
+			if (!StrCompare(name, "values"))	return JsNativeM(ji, JSN_ARR_ENTRIES, 2);
+			if (!StrCompare(name, "toString"))	return JsNativeV(ji, JSN_TOSTRING);
+			if (!StrCompare(name, "hasOwnProperty"))
+				return JsNativeV(ji, JSN_OBJ_HASOWN);
+			if (!StrCompare(name, "subarray"))	return JsNativeV(ji, JSN_TA_SUBARRAY);
+			if (!StrCompare(name, "set") && JsPropGet(obj, "BYTES_PER_ELEMENT"))
+				return JsNativeV(ji, JSN_TA_SET);
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JV_NATIVE:
+			if (obj->native_id == JSN_DATE_CTOR && !StrCompare(name, "now"))
+				return JsNativeV(ji, JSN_DATE_NOW);
+			if (obj->native_id == JSN_SYMBOL &&
+				(!StrCompare(name, "iterator") || !StrCompare(name, "asyncIterator")))
+				return JsStrV(ji, "@@iterator");
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "resolve"))
+				return JsNativeV(ji, JSN_PROMISE_SRESOLVE);
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "reject"))
+				return JsNativeV(ji, JSN_PROMISE_SREJECT);
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "all"))
+				return JsNativeV(ji, JSN_PROMISE_SALL);
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "race"))
+				return JsNativeV(ji, JSN_PROMISE_SRACE);
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "allSettled"))
+				return JsNativeV(ji, JSN_PROMISE_SALLSET);
+			if (obj->native_id == JSN_PROMISE_CTOR && !StrCompare(name, "any"))
+				return JsNativeV(ji, JSN_PROMISE_SANY);
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			if (!StrCompare(name, "call"))	return JsNativeV(ji, JSN_FN_CALL);
+			if (!StrCompare(name, "apply"))	return JsNativeV(ji, JSN_FN_APPLY);
+			if (!StrCompare(name, "bind"))	return JsNativeV(ji, JSN_FN_BIND);
+			if (!StrCompare(name, "name"))
+			{
+				v = JsPropGet(obj, "_name");
+				if (v)
+					return v;
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "length"))
+				return JsNumV(ji, 0);
+			if (!StrCompare(name, "toString") ||
+				!StrCompare(name, "toLocaleString"))
+				return JsNativeV(ji, JSN_FN_TOSTR);
+			if (!StrCompare(name, "valueOf"))
+				return JsNativeV(ji, JSN_VALUEOF);
+			if (!StrCompare(name, "hasOwnProperty") ||
+				!StrCompare(name, "propertyIsEnumerable"))
+				return JsNativeV(ji, JSN_OBJ_HASOWN);
+			return JsUndefV(ji);
+		case JV_FUNC:
+			if (!StrCompare(name, "call"))	return JsNativeV(ji, JSN_FN_CALL);
+			if (!StrCompare(name, "apply"))	return JsNativeV(ji, JSN_FN_APPLY);
+			if (!StrCompare(name, "bind"))	return JsNativeV(ji, JSN_FN_BIND);
+			if (!StrCompare(name, "length"))
+				return JsNumV(ji, JsFuncArity(obj));
+			if (!StrCompare(name, "name"))
+			{
+				if (obj->func && obj->func(CJsNode *)->str)
+					return JsStrV(ji, obj->func(CJsNode *)->str);
+				return JsStrV(ji, "");
+			}
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			if (!StrCompare(name, "toString") ||
+				!StrCompare(name, "toLocaleString"))
+				return JsNativeV(ji, JSN_FN_TOSTR);
+			if (!StrCompare(name, "valueOf"))
+				return JsNativeV(ji, JSN_VALUEOF);
+			if (!StrCompare(name, "hasOwnProperty") ||
+				!StrCompare(name, "propertyIsEnumerable"))
+				return JsNativeV(ji, JSN_OBJ_HASOWN);
+			return JsUndefV(ji);
+		case JV_OBJ:
+			break;
+		default:
+			return JsUndefV(ji);
+	}
+
+	switch (obj->native_id)
+	{
+		case JSO_PROTO:
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			return JsMemberGet(ji, JsProtoStandin(ji, ToI64(obj->num)), name);
+		case JSO_CANVAS2D:
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JSO_DATASET:
+			node = obj->node;
+			JsCamelToKebab(name, dkebab, 60);
+			StrPrint(dkey, "data-%s", dkebab);
+			attr = ZNodeAttr(node, dkey);
+			if (attr)
+				return JsStrV(ji, attr);
+			return JsUndefV(ji);
+		case JSO_DOCUMENT:
+			if (!StrCompare(name, "title"))
+			{
+				node = ZDomFindTag(ji->dom_root, "title");
+				if (node && node->text)
+					return JsStrV(ji, node->text);
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "body"))
+				return JsElemV(ji, JsDocBody(ji));
+			if (!StrCompare(name, "location"))
+				return ji->loc_obj;
+			if (!StrCompare(name, "URL"))
+				return JsStrV(ji, ji->url);
+			if (!StrCompare(name, "cookie"))
+			{
+				attr = JsCookieGet(ji);
+				v	 = JsStrV(ji, attr);
+				Free(attr);
+				return v;
+			}
+			if (!StrCompare(name, "write") || !StrCompare(name, "writeln"))
+				return JsNativeV(ji, JSN_DOC_WRITE);
+			if (!StrCompare(name, "getElementById"))
+				return JsNativeV(ji, JSN_DOC_GETBYID);
+			if (!StrCompare(name, "getElementsByTagName"))
+				return JsNativeV(ji, JSN_DOC_GETBYTAG);
+			if (!StrCompare(name, "getElementsByClassName"))
+				return JsNativeV(ji, JSN_DOC_GETBYCLASS);
+			if (!StrCompare(name, "getElementsByName"))
+				return JsNativeV(ji, JSN_DOC_GETBYNAME);
+			if (!StrCompare(name, "createElement"))
+				return JsNativeV(ji, JSN_DOC_CREATE_EL);
+			if (!StrCompare(name, "createEvent"))
+				return JsNativeV(ji, JSN_DOC_CREATE_EVENT);
+			if (!StrCompare(name, "createTextNode"))
+				return JsNativeV(ji, JSN_DOC_CREATE_TX);
+			if (!StrCompare(name, "createDocumentFragment"))
+				return JsNativeV(ji, JSN_DOC_CREATE_FRAG);
+			if (!StrCompare(name, "querySelector"))
+				return JsNativeV(ji, JSN_QSEL);
+			if (!StrCompare(name, "querySelectorAll"))
+				return JsNativeV(ji, JSN_QSELALL);
+			if (!StrCompare(name, "head"))
+			{
+				node = ZDomFindTag(ji->dom_root, "head");
+				if (node)
+					return JsElemV(ji, node);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "documentElement"))
+			{
+				node = ZDomFindTag(ji->dom_root, "html");
+				if (node)
+					return JsElemV(ji, node);
+				return JsElemV(ji, ji->dom_root);
+			}
+			if (!StrCompare(name, "addEventListener"))
+				return JsNativeV(ji, JSN_EL_ADDLISTEN);
+			if (!StrCompare(name, "removeEventListener"))
+				return JsNativeV(ji, JSN_EL_REMLISTEN);
+			if (!StrCompare(name, "readyState"))
+				return JsStrV(ji, "complete");
+			if (!StrCompare(name, "characterSet") || !StrCompare(name, "charset"))
+				return JsStrV(ji, "UTF-8");
+			if (!StrCompare(name, "referrer"))
+				return JsStrV(ji, "");
+			if (!StrCompare(name, "visibilityState"))
+				return JsStrV(ji, "visible");
+			if (!StrCompare(name, "hidden"))
+				return JsBoolV(ji, FALSE);
+			if (!StrCompare(name, "activeElement"))
+				return JsElemV(ji, JsDocBody(ji));
+			if (!StrCompare(name, "defaultView"))
+				return ji->win_obj;
+			if (!StrCompare(name, "currentScript") || !StrCompare(name, "doctype"))
+				return JsNullV(ji);
+			if (!StrCompare(name, "forms") || !StrCompare(name, "images") ||
+				!StrCompare(name, "links") || !StrCompare(name, "scripts"))
+			{
+				v = JsArrV(ji);
+				attr = "script";
+				if (!StrCompare(name, "forms"))
+					attr = "form";
+				else if (!StrCompare(name, "images"))
+					attr = "img";
+				else if (!StrCompare(name, "links"))
+					attr = "a";
+				JsElemCollect(ji, ji->dom_root, 0, attr, v);
+				return v;
+			}
+			return JsUndefV(ji);
+		case JSO_LOCATION:
+			if (!StrCompare(name, "href"))
+				return JsStrV(ji, ji->url);
+			len = -1;
+			if (!StrCompare(name, "protocol"))		len = 0;
+			else if (!StrCompare(name, "host"))		len = 1;
+			else if (!StrCompare(name, "hostname"))	len = 2;
+			else if (!StrCompare(name, "port"))		len = 3;
+			else if (!StrCompare(name, "pathname"))	len = 4;
+			else if (!StrCompare(name, "search"))	len = 5;
+			else if (!StrCompare(name, "hash"))		len = 6;
+			else if (!StrCompare(name, "origin"))	len = 7;
+			if (len >= 0)
+			{
+				JsUrlPart(ji->url, len, buf);
+				return JsStrV(ji, buf);
+			}
+			if (!StrCompare(name, "assign") || !StrCompare(name, "replace"))
+				return JsNativeV(ji, JSN_LOC_ASSIGN);
+			if (!StrCompare(name, "reload"))
+				return JsNativeV(ji, JSN_LOC_RELOAD);
+			return JsUndefV(ji);
+		case JSO_WINDOW:
+			if (!StrCompare(name, "location"))
+				return ji->loc_obj;
+			if (!StrCompare(name, "document"))
+				return ji->doc_obj;
+			if (!StrCompare(name, "addEventListener"))
+				return JsNativeV(ji, JSN_EL_ADDLISTEN);
+			if (!StrCompare(name, "removeEventListener"))
+				return JsNativeV(ji, JSN_EL_REMLISTEN);
+			v = JsEnvGet(ji, name);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JSO_ELEMENT:
+			node = obj->node;
+			if (!StrCompare(name, "innerHTML") || !StrCompare(name, "textContent") ||
+				!StrCompare(name, "innerText"))
+			{
+				attr = MAlloc(JS_TEXT_MAX + 8);
+				len = 0;
+				ZNodeTextCollect(node, attr, JS_TEXT_MAX, &len);
+				v = JsStrV(ji, attr);
+				Free(attr);
+				return v;
+			}
+			if (!StrCompare(name, "value"))
+			{
+				if (node->value)
+					return JsStrV(ji, node->value);
+				attr = ZNodeAttr(node, "value");
+				if (attr)
+					return JsStrV(ji, attr);
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "checked"))
+				return JsBoolV(ji, node->checked);
+			if (!StrCompare(name, "id"))
+			{
+				attr = ZNodeAttr(node, "id");
+				if (attr)
+					return JsStrV(ji, attr);
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "className"))
+			{
+				attr = ZNodeAttr(node, "class");
+				if (attr)
+					return JsStrV(ji, attr);
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "tagName"))
+			{
+				len = 0;
+				while (node->tag[len] && len < 15)
+				{
+					buf[len] = ToUpper(node->tag[len]);
+					len++;
+				}
+				buf[len] = 0;
+				return JsStrV(ji, buf);
+			}
+			if (!StrCompare(name, "style"))
+			{
+				v = JsValNew(ji, JV_OBJ);
+				v->native_id = JSO_STYLE;
+				v->node = node;
+				return v;
+			}
+			if (!StrCompare(name, "getAttribute"))
+				return JsNativeV(ji, JSN_EL_GETATTR);
+			if (!StrCompare(name, "setAttribute"))
+				return JsNativeV(ji, JSN_EL_SETATTR);
+			if (!StrCompare(obj->node->tag, "canvas"))
+			{
+				if (!StrCompare(name, "getContext"))
+					return JsNativeV(ji, JSN_CV_GETCTX);
+				// width/height report the backing store size
+				if (!StrCompare(name, "width") || !StrCompare(name, "height"))
+				{
+					if (obj->node->canvas_dc)
+					{
+						if (!StrCompare(name, "width"))
+							return JsNumV(ji, obj->node->canvas_dc(CDC *)->width);
+						return JsNumV(ji, obj->node->canvas_dc(CDC *)->height);
+					}
+					attr = ZNodeAttr(obj->node, name);
+					if (attr)
+						return JsNumV(ji, Str2I64(attr));
+					if (!StrCompare(name, "width"))
+						return JsNumV(ji, 300);
+					return JsNumV(ji, 150);
+				}
+			}
+			if (!StrCompare(name, "addEventListener"))
+				return JsNativeV(ji, JSN_EL_ADDLISTEN);
+			if (!StrCompare(name, "removeEventListener"))
+				return JsNativeV(ji, JSN_EL_REMLISTEN);
+			if (!StrCompare(name, "appendChild"))
+				return JsNativeV(ji, JSN_EL_APPEND);
+			if (!StrCompare(name, "removeChild"))
+				return JsNativeV(ji, JSN_EL_REMOVE_CH);
+			if (!StrCompare(name, "remove"))
+				return JsNativeV(ji, JSN_EL_REMOVE);
+			if (!StrCompare(name, "dispatchEvent"))
+				return JsNativeV(ji, JSN_EL_DISPATCH);
+			if (!StrCompare(name, "querySelector"))
+				return JsNativeV(ji, JSN_QSEL);
+			if (!StrCompare(name, "querySelectorAll"))
+				return JsNativeV(ji, JSN_QSELALL);
+			if (!StrCompare(name, "getElementsByTagName"))
+				return JsNativeV(ji, JSN_DOC_GETBYTAG);
+			if (!StrCompare(name, "getElementsByClassName"))
+				return JsNativeV(ji, JSN_DOC_GETBYCLASS);
+			if (!StrCompare(name, "contains"))
+				return JsNativeV(ji, JSN_EL_CONTAINS);
+			if (!StrCompare(name, "matches"))
+				return JsNativeV(ji, JSN_EL_MATCHES);
+			if (!StrCompare(name, "closest"))
+				return JsNativeV(ji, JSN_EL_CLOSEST);
+			if (!StrCompare(name, "hasAttribute"))
+				return JsNativeV(ji, JSN_EL_HASATTR);
+			if (!StrCompare(name, "removeAttribute"))
+				return JsNativeV(ji, JSN_EL_RMATTR);
+			if (!StrCompare(name, "cloneNode"))
+				return JsNativeV(ji, JSN_EL_CLONE);
+			if (!StrCompare(name, "insertBefore"))
+				return JsNativeV(ji, JSN_EL_INSBEFORE);
+			if (!StrCompare(name, "getBoundingClientRect"))
+				return JsNativeV(ji, JSN_EL_RECT);
+			if (!StrCompare(name, "classList"))
+			{
+				v = JsValNew(ji, JV_OBJ);
+				v->native_id = JSO_CLASSLIST;
+				v->node = node;
+				return v;
+			}
+			if (!StrCompare(name, "parentNode") ||
+				!StrCompare(name, "parentElement"))
+			{
+				if (node->parent)
+					return JsElemV(ji, node->parent);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "firstChild"))
+			{
+				if (node->first_child)
+					return JsElemV(ji, node->first_child);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "lastChild"))
+			{
+				if (node->last_child)
+					return JsElemV(ji, node->last_child);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "nextSibling") ||
+				!StrCompare(name, "nextElementSibling"))
+			{
+				snode = node->next;
+				if (!StrCompare(name, "nextElementSibling"))
+					while (snode && snode->type != ZH_ELEM)
+						snode = snode->next;
+				if (snode)
+					return JsElemV(ji, snode);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "previousSibling") ||
+				!StrCompare(name, "previousElementSibling"))
+			{
+				snode = NULL;
+				if (node->parent)
+				{
+					scur = node->parent->first_child;
+					while (scur && scur != node)
+					{
+						if (StrCompare(name, "previousElementSibling") ||
+							scur->type == ZH_ELEM)
+							snode = scur;
+						scur = scur->next;
+					}
+				}
+				if (snode)
+					return JsElemV(ji, snode);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "children"))
+			{
+				v = JsArrV(ji);
+				node = node->first_child;
+				while (node)
+				{
+					if (node->type == ZH_ELEM)
+						JsArrPush(ji, v, JsElemV(ji, node));
+					node = node->next;
+				}
+				return v;
+			}
+			if (!StrCompare(name, "childNodes"))
+			{
+				v = JsArrV(ji);
+				node = node->first_child;
+				while (node)
+				{
+					JsArrPush(ji, v, JsElemV(ji, node));
+					node = node->next;
+				}
+				return v;
+			}
+			if (!StrCompare(name, "dataset"))
+			{
+				v = JsValNew(ji, JV_OBJ);
+				v->native_id = JSO_DATASET;
+				v->node = node;
+				return v;
+			}
+			if (!StrCompare(name, "firstElementChild") ||
+				!StrCompare(name, "lastElementChild"))
+			{
+				snode = NULL;
+				scur = node->first_child;
+				while (scur)
+				{
+					if (scur->type == ZH_ELEM)
+					{
+						snode = scur;
+						if (!StrCompare(name, "firstElementChild"))
+							break;
+					}
+					scur = scur->next;
+				}
+				if (snode)
+					return JsElemV(ji, snode);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "childElementCount"))
+			{
+				len = 0;
+				scur = node->first_child;
+				while (scur)
+				{
+					if (scur->type == ZH_ELEM)
+						len++;
+					scur = scur->next;
+				}
+				return JsNumV(ji, len);
+			}
+			if (!StrCompare(name, "nodeType"))
+			{
+				if (node->type == ZH_TEXT)
+					return JsNumV(ji, 3);
+				return JsNumV(ji, 1);
+			}
+			if (!StrCompare(name, "nodeName"))
+			{
+				if (node->type == ZH_TEXT)
+					return JsStrV(ji, "#text");
+				len = 0;
+				while (node->tag[len] && len < 15)
+				{
+					buf[len] = ToUpper(node->tag[len]);
+					len++;
+				}
+				buf[len] = 0;
+				return JsStrV(ji, buf);
+			}
+			if (!StrCompare(name, "nodeValue"))
+			{
+				if (node->text)
+					return JsStrV(ji, node->text);
+				return JsNullV(ji);
+			}
+			if (!StrCompare(name, "click"))
+				return JsNativeV(ji, JSN_EL_CLICK);
+			if (!StrCompare(name, "focus") || !StrCompare(name, "blur") ||
+				!StrCompare(name, "select") || !StrCompare(name, "scrollIntoView") ||
+				!StrCompare(name, "setAttributeNS") || !StrCompare(name, "normalize"))
+				return JsNativeV(ji, JSN_NOOP_UNDEF);
+			if (!StrCompare(name, "offsetWidth") || !StrCompare(name, "offsetHeight") ||
+				!StrCompare(name, "offsetTop") || !StrCompare(name, "offsetLeft") ||
+				!StrCompare(name, "clientWidth") || !StrCompare(name, "clientHeight") ||
+				!StrCompare(name, "clientTop") || !StrCompare(name, "clientLeft") ||
+				!StrCompare(name, "scrollTop") || !StrCompare(name, "scrollLeft") ||
+				!StrCompare(name, "scrollWidth") || !StrCompare(name, "scrollHeight"))
+				return JsNumV(ji, 0);
+			if (!StrCompare(name, "offsetParent"))
+				return JsNullV(ji);
+			len = -1;
+			if (!StrCompare(name, "src") || !StrCompare(name, "href") ||
+				!StrCompare(name, "action"))
+				len = 1;
+			else if (!StrCompare(name, "alt") || !StrCompare(name, "title") ||
+					 !StrCompare(name, "name") || !StrCompare(name, "rel") ||
+					 !StrCompare(name, "placeholder") ||
+					 !StrCompare(name, "target") || !StrCompare(name, "lang") ||
+					 !StrCompare(name, "dir") || !StrCompare(name, "content") ||
+					 !StrCompare(name, "media") || !StrCompare(name, "charset") ||
+					 !StrCompare(name, "enctype"))
+				len = 0;
+			if (len >= 0)
+			{
+				attr = ZNodeAttr(node, name);
+				if ((!attr || !*attr) && ji->url &&
+					!StrCompare(name, "action") && !StrCompare(node->tag, "form"))
+					return JsStrV(ji, ji->url);
+				if (!attr)
+					return JsStrV(ji, "");
+				if (len)
+					return JsUrlAbs(ji, attr);
+				return JsStrV(ji, attr);
+			}
+			if (!StrCompare(name, "type") || !StrCompare(name, "method"))
+			{
+				attr = ZNodeAttr(node, name);
+				if (attr)
+					return JsStrV(ji, attr);
+				if (!StrCompare(name, "method"))
+				{
+					if (!StrCompare(node->tag, "form"))
+						return JsStrV(ji, "get");
+					return JsStrV(ji, "");
+				}
+				if (!StrCompare(node->tag, "input"))
+					return JsStrV(ji, "text");
+				if (!StrCompare(node->tag, "button"))
+					return JsStrV(ji, "submit");
+				return JsStrV(ji, "");
+			}
+			attr = ZNodeAttr(node, name);
+			if (attr)
+				return JsStrV(ji, attr);
+			return JsUndefV(ji);
+		case JSO_STYLE:
+			JsCamelToKebab(name, dkebab, 60);
+			attr = NULL;
+			if (obj->node)
+				attr = ZNodeAttr(obj->node, "style");
+			if (attr && JsStyleProp(attr, dkebab, buf, 512))
+				return JsStrV(ji, buf);
+			if (!StrCompare(name, "cssText"))
+			{
+				if (attr)
+					return JsStrV(ji, attr);
+				return JsStrV(ji, "");
+			}
+			if (!StrCompare(name, "setProperty"))
+				return JsNativeV(ji, JSN_STYLE_SET);
+			if (!StrCompare(name, "removeProperty") || !StrCompare(name, "item"))
+				return JsNativeV(ji, JSN_NOOP_UNDEF);
+			if (!StrCompare(name, "getPropertyValue"))
+				return JsNativeV(ji, JSN_CSS_GETPROP);
+			return JsStrV(ji, ""); // an unset CSS property reads as "", not undefined
+		case JSO_XHR:
+			if (!StrCompare(name, "open"))
+				return JsNativeV(ji, JSN_XHR_OPEN);
+			if (!StrCompare(name, "send"))
+				return JsNativeV(ji, JSN_XHR_SEND);
+			if (!StrCompare(name, "addEventListener"))
+				return JsNativeV(ji, JSN_XHR_ADDLISTEN);
+			if (!StrCompare(name, "removeEventListener"))
+				return JsNativeV(ji, JSN_XHR_REMLISTEN);
+			if (!StrCompare(name, "abort") ||
+				!StrCompare(name, "overrideMimeType"))
+				return JsNativeV(ji, JSN_NOOP_UNDEF);
+			if (!StrCompare(name, "dispatchEvent"))
+				return JsNativeV(ji, JSN_NOOP_TRUE);
+			if (!StrCompare(name, "setRequestHeader"))
+				return JsNativeV(ji, JSN_XHR_SETREQHDR);
+			if (!StrCompare(name, "getAllResponseHeaders"))
+				return JsNativeV(ji, JSN_XHR_GETALLHDR);
+			if (!StrCompare(name, "getResponseHeader"))
+				return JsNativeV(ji, JSN_XHR_GETHDR);
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JSO_PROMISE:
+			if (!StrCompare(name, "then"))
+				return JsNativeV(ji, JSN_PROMISE_THEN);
+			if (!StrCompare(name, "catch"))
+				return JsNativeV(ji, JSN_PROMISE_CATCH);
+			if (!StrCompare(name, "finally"))
+				return JsNativeV(ji, JSN_PROMISE_FINALLY);
+			v = JsPropGet(obj, name);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JSO_CLASSLIST:
+			if (!StrCompare(name, "add"))
+				return JsNativeV(ji, JSN_CL_ADD);
+			if (!StrCompare(name, "remove"))
+				return JsNativeV(ji, JSN_CL_REMOVE);
+			if (!StrCompare(name, "toggle"))
+				return JsNativeV(ji, JSN_CL_TOGGLE);
+			if (!StrCompare(name, "contains"))
+				return JsNativeV(ji, JSN_CL_CONTAINS);
+			if (!StrCompare(name, "replace"))
+				return JsNativeV(ji, JSN_CL_REPLACE);
+			if (!StrCompare(name, "item"))
+				return JsNativeV(ji, JSN_CL_ITEM);
+			if (!StrCompare(name, "value") || !StrCompare(name, "length"))
+			{
+				attr = ZNodeAttr(obj->node, "class");
+				if (!attr)
+					attr = "";
+				if (!StrCompare(name, "value"))
+					return JsStrV(ji, attr);
+				len = 0;
+				while (*attr)
+				{
+					while (*attr == ' ' || *attr == '\t')
+						attr++;
+					if (*attr)
+						len++;
+					while (*attr && *attr != ' ' && *attr != '\t')
+						attr++;
+				}
+				return JsNumV(ji, len);
+			}
+			return JsUndefV(ji);
+	}
+
+	v = JsPropGet(obj, name);
+	if (v)
+		return v;
+	if (!StrCompare(name, "hasOwnProperty") ||
+		!StrCompare(name, "propertyIsEnumerable"))
+		return JsNativeV(ji, JSN_OBJ_HASOWN);
+	if (!StrCompare(name, "toString") || !StrCompare(name, "toLocaleString"))
+		return JsNativeV(ji, JSN_TOSTRING);
+	if (!StrCompare(name, "valueOf"))
+		return JsNativeV(ji, JSN_VALUEOF);
+
+	return JsUndefV(ji);
+}
+
+U0 JsMemberSet(CJsInterp *ji, CJsVal *obj, U8 *name, CJsVal *val)
+{
+	CZNode *node;
+	CJsVal *trap, *hnd, *tgt;
+	CJsProp *acc;
+	CJsVal *targs[3];
+	U8	   *s;
+	U8		kebab[64], style_buf[512];
+
+	if (obj->type == JV_FUNC || obj->type == JV_NATIVE)
+	{
+		acc = JsAccessorFind(obj, name);
+		if (acc)
+		{
+			if (acc->setter)
+			{
+				targs[0] = val;
+				JsCall(ji, acc->setter(CJsVal *), obj, targs, 1);
+			}
+			return;
+		}
+		JsPropSet(ji, obj, name, val);
+		return;
+	}
+	if (obj->type != JV_OBJ)
+		return;
+
+	if (obj->native_id == JSO_PROXY)
+	{
+		tgt = JsPropGet(obj, "_ptarget")(CJsVal *);
+		hnd = JsPropGet(obj, "_phandler")(CJsVal *);
+		trap = NULL;
+		if (hnd)
+			trap = JsPropGet(hnd, "set")(CJsVal *);
+		if (!tgt)
+			return;
+		if (trap && (trap->type == JV_FUNC || trap->type == JV_NATIVE))
+		{
+			targs[0] = tgt;
+			targs[1] = JsStrV(ji, name);
+			targs[2] = val;
+			JsCall(ji, trap, hnd, targs, 3);
+			return;
+		}
+		JsMemberSet(ji, tgt, name, val);
+		return;
+	}
+	if (obj->node && !StrCompare(obj->node->tag, "canvas") &&
+		(!StrCompare(name, "width") || !StrCompare(name, "height")))
+	{ // resizing a canvas DROPS its contents, per spec
+		ZNodeAttrSet(obj->node, name, JsToStr(ji, val));
+		if (obj->node->canvas_dc)
+		{
+			DCDel(obj->node->canvas_dc(CDC *));
+			obj->node->canvas_dc = NULL;
+		}
+		ji->dom_dirty = TRUE;
+		return;
+	}
+	acc = JsAccessorFind(obj, name);
+	if (acc)
+	{
+		if (acc->setter)
+		{
+			targs[0] = val;
+			JsCall(ji, acc->setter(CJsVal *), obj, targs, 1);
+		}
+		return;
+	}
+
+	switch (obj->native_id)
+	{
+		case JSO_DOCUMENT:
+			if (!StrCompare(name, "title"))
+			{
+				node = ZDomFindTag(ji->dom_root, "title");
+				if (node)
+				{
+					Free(node->text);
+					node->text = StrNew(JsToStr(ji, val));
+					ji->dom_dirty = TRUE;
+				}
+			}
+			else if (!StrCompare(name, "cookie"))
+				JsCookieSet(ji, JsToStr(ji, val));
+			return;
+		case JSO_LOCATION:
+			if (!StrCompare(name, "href"))
+				ji->navigate = JsStrDup(ji, JsToStr(ji, val));
+			return;
+		case JSO_WINDOW:
+			if (!StrCompare(name, "location"))
+				ji->navigate = JsStrDup(ji, JsToStr(ji, val));
+			else
+				JsEnvDeclare(ji, ji->genv, name, val);
+			return;
+		case JSO_ELEMENT:
+			node = obj->node;
+			if (!StrCompare(name, "innerHTML"))
+			{
+				ZNodeFreeChildren(node);
+				ZHtmlParseInto(node, JsToStr(ji, val));
+				ji->dom_dirty = TRUE;
+			}
+			else if (!StrCompare(name, "textContent") || !StrCompare(name, "innerText"))
+			{
+				JsTextContentSet(ji, node, JsToStr(ji, val));
+				JsStyleIngest(ji, node);
+			}
+			else if (!StrCompare(name, "value"))
+			{
+				Free(node->value);
+				node->value = StrNew(JsToStr(ji, val));
+				ji->dom_dirty = TRUE;
+			}
+			else if (!StrCompare(name, "checked"))
+			{
+				node->checked = JsToBool(val);
+				ji->dom_dirty = TRUE;
+			}
+			else if (!StrCompare(name, "className"))
+			{
+				ZNodeAttrSet(node, "class", JsToStr(ji, val));
+				ji->dom_dirty = TRUE;
+			}
+			else if (name[0] == 'o' && name[1] == 'n' && name[2] &&
+					 (val->type == JV_FUNC || val->type == JV_NATIVE))
+				JsListenerAdd(ji, node, name + 2, val, TRUE);
+			else
+			{
+				ZNodeAttrSet(node, name, JsToStr(ji, val));
+				ji->dom_dirty = TRUE;
+			}
+			return;
+		case JSO_DATASET:
+			node = obj->node;
+			JsCamelToKebab(name, kebab, 60);
+			StrPrint(style_buf, "data-%s", kebab);
+			ZNodeAttrSet(node, style_buf, JsToStr(ji, val));
+			ji->dom_dirty = TRUE;
+			return;
+		case JSO_STYLE:
+			node = obj->node;
+			JsCamelToKebab(name, kebab, 64);
+			s = ZNodeAttr(node, "style");
+			if (s && StrLen(s) + StrLen(JsToStr(ji, val)) < 380)
+				StrPrint(style_buf, "%s;%s:%s", s, kebab, JsToStr(ji, val));
+			else if (StrLen(JsToStr(ji, val)) < 380)
+				StrPrint(style_buf, "%s:%s", kebab, JsToStr(ji, val));
+			else
+				return;
+			ZNodeAttrSet(node, "style", style_buf);
+			ji->dom_dirty = TRUE;
+			return;
+	}
+
+	JsPropSet(ji, obj, name, val);
+}
+
+
+Bool JsStrictEq(CJsVal *a, CJsVal *b)
+{
+	if (a->type != b->type)
+		return FALSE;
+	switch (a->type)
+	{
+		case JV_UNDEF:
+		case JV_NULL:
+			return TRUE;
+		case JV_BOOL:
+		case JV_NUM:
+			return a->num == b->num;
+		case JV_STR:
+			return !StrCompare(a->str, b->str);
+		case JV_OBJ:
+			if (a->node && b->node)
+				return a->node == b->node;
+	}
+
+	return a == b;
+}
+
+Bool JsLooseEq(CJsVal *a, CJsVal *b)
+{
+	Bool a_nullish = (a->type == JV_UNDEF || a->type == JV_NULL);
+	Bool b_nullish = (b->type == JV_UNDEF || b->type == JV_NULL);
+
+	if (a_nullish || b_nullish)
+		return a_nullish && b_nullish;
+	if (a->type == b->type)
+		return JsStrictEq(a, b);
+
+	return JsToNum(a) == JsToNum(b);
+}
+
+F64 JsFmod(F64 a, F64 b)
+{
+	if (JsNumIsZero(b))
+		return JsNumNaN; // x % 0 is NaN in JS, not 0
+
+	return a - b * Trunc(a / b);
+}
+
+
+CJsVal *JsEvalBin(CJsInterp *ji, I64 op, CJsVal *a, CJsVal *b)
+{
+	U8		*sa, *sb, *cat;
+	I64		 cmp, depth;
+	F64		 na, nb;
+	CJsVal	*pr, *w;
+
+	if (op == '+')
+	{
+		if (a->type == JV_STR || b->type == JV_STR)
+		{
+			sa = JsToStr(ji, a);
+			sb = JsToStr(ji, b);
+			cmp	  = StrLen(sa);
+			depth = StrLen(sb);
+			cat = JsAlloc(ji, cmp + depth + 8);
+			MemCopy(cat, sa, cmp);
+			MemCopy(cat + cmp, sb, depth + 1);
+			return JsStrV(ji, cat);
+		}
+		return JsNumV(ji, JsToNum(a) + JsToNum(b));
+	}
+	if (op == '-')
+		return JsNumV(ji, JsToNum(a) - JsToNum(b));
+	if (op == '*')
+		return JsNumV(ji, JsToNum(a) * JsToNum(b));
+	if (op == '/')
+	{
+		na = JsToNum(a);
+		nb = JsToNum(b);
+		if (JsNumIsZero(nb))
+		{
+			if (JsNumIsNaN(na) || JsNumIsZero(na))
+				return JsNumV(ji, JsNumNaN);
+			if (na < 0.0)
+				return JsNumV(ji, JsNumNInf);
+			return JsNumV(ji, JsNumInf);
+		}
+		return JsNumV(ji, na / nb);
+	}
+	if (op == '%')
+		return JsNumV(ji, JsFmod(JsToNum(a), JsToNum(b)));
+	if (op == JP_POW)
+		return JsNumV(ji, Pow(JsToNum(a), JsToNum(b)));
+	if (op == JP_IN)
+	{
+		if (b && b->type == JV_OBJ)
+			return JsBoolV(ji, JsPropGet(b, JsToStr(ji, a)) != NULL);
+		return JsBoolV(ji, FALSE);
+	}
+	if (op == JP_INSTOF)
+	{ // instanceof approximated via the prototype chain
+		if (a && a->type == JV_ARR)
+			return JsBoolV(ji, FALSE);
+		if (a && a->type == JV_OBJ && b && (b->type == JV_FUNC || b->type == JV_NATIVE))
+		{
+			pr = JsPropGet(b, "prototype");
+			w = a->proto;
+			depth = 0;
+			while (w && depth < 20)
+			{
+				if (w == pr)
+					return JsBoolV(ji, TRUE);
+				w = w->proto;
+				depth++;
+			}
+		}
+		return JsBoolV(ji, FALSE);
+	}
+	if (op == '&')
+		return JsNumV(ji, ToI64(JsToNum(a)) & ToI64(JsToNum(b)));
+	if (op == '|')
+		return JsNumV(ji, ToI64(JsToNum(a)) | ToI64(JsToNum(b)));
+	if (op == '^')
+		return JsNumV(ji, ToI64(JsToNum(a)) ^ ToI64(JsToNum(b)));
+	if (op == JP_SHL)
+		return JsNumV(ji, ToI64(JsToNum(a)) << (ToI64(JsToNum(b)) & 31));
+	if (op == JP_SHR)
+		return JsNumV(ji, ToI64(JsToNum(a)) >> (ToI64(JsToNum(b)) & 31));
+	if (op == JP_SHR3) // unsigned 32-bit shift
+		return JsNumV(ji, (ToI64(JsToNum(a)) & 0xFFFFFFFF) >> (ToI64(JsToNum(b)) & 31));
+	if (op == JP_EQ2)
+		return JsBoolV(ji, JsLooseEq(a, b));
+	if (op == JP_NE)
+		return JsBoolV(ji, !JsLooseEq(a, b));
+	if (op == JP_EQ3)
+		return JsBoolV(ji, JsStrictEq(a, b));
+	if (op == JP_NE3)
+		return JsBoolV(ji, !JsStrictEq(a, b));
+
+	if (a->type == JV_STR && b->type == JV_STR)
+	{
+		cmp = StrCompare(a->str, b->str);
+		na = cmp;
+		nb = 0;
+	}
+	else
+	{
+		na = JsToNum(a);
+		nb = JsToNum(b);
+	}
+	if (op == '<')
+		return JsBoolV(ji, na < nb);
+	if (op == '>')
+		return JsBoolV(ji, na > nb);
+	if (op == JP_LE)
+		return JsBoolV(ji, na <= nb);
+	if (op == JP_GE)
+		return JsBoolV(ji, na >= nb);
+
+	JsErr(ji, "bad operator");
+
+	return JsUndefV(ji);
+}
+
+U0 JsAssignTo(CJsInterp *ji, CJsNode *target, CJsVal *val)
+{
+	CJsVal	*obj, *idx;
+	I64		 i;
+
+	if (!target)
+		return;
+	switch (target->type)
+	{
+		case JN_IDENT:
+			JsEnvSet(ji, target->str, val);
+			break;
+		case JN_MEMBER:
+			obj = JsEval(ji, target->a);
+			JsMemberSet(ji, obj, target->str, val);
+			break;
+		case JN_INDEX:
+			obj = JsEval(ji, target->a);
+			idx = JsEval(ji, target->b);
+			if (obj->type == JV_ARR)
+			{
+				i = JsToNum(idx);
+				if (0 <= i < 4096)
+				{
+					while (obj->count <= i)
+						JsArrPush(ji, obj, JsUndefV(ji));
+					obj->items[i] = val;
+				}
+			}
+			else if (obj->type == JV_OBJ)
+				JsMemberSet(ji, obj, JsToStr(ji, idx), val);
+			break;
+		case JN_ARRLIT:
+		case JN_OBJLIT:
+			JsPatBind(ji, target, val, FALSE);
+			break;
+	}
+}
+
+U8 *JsCtorName(CJsNode *n)
+{
+	CJsNode *c;
+	I64		 depth = 0;
+
+	while (n && n->type == JN_SEQ && n->a && depth < 8)
+	{
+		c = n->a;
+		while (c->next)
+			c = c->next;
+		n = c;
+		depth++;
+	}
+	if (n && (n->type == JN_IDENT || n->type == JN_MEMBER) && n->str)
+		return n->str;
+	if (n && n->type == JN_FUNC)
+		return "(fn)";
+	return "(expr)";
+}
+
+U8 *JsTypeTag(CJsVal *v)
+{
+	if (!v)
+		return "NOVAL";
+	switch [v->type]
+	{
+		case JV_UNDEF:	return "UNDEF";
+		case JV_NULL:	return "NULL";
+		case JV_BOOL:	return "BOOL";
+		case JV_NUM:	return "NUM";
+		case JV_STR:	return "STR";
+		case JV_FUNC:	return "FUNC";
+		case JV_NATIVE:	return "NATIVE";
+		case JV_OBJ:	return "OBJ";
+		case JV_ARR:	return "ARR";
+	}
+	return "?";
+}
+
+U8 *JsNidName(I64 nid)
+{
+	switch [nid]
+	{
+		case JSO_PLAIN:		return "plain";
+		case JSO_DOCUMENT:	return "document";
+		case JSO_LOCATION:	return "location";
+		case JSO_WINDOW:	return "window";
+		case JSO_ELEMENT:	return "element";
+		case JSO_STYLE:		return "style";
+		case JSO_XHR:		return "xhr";
+		case JSO_PROMISE:	return "promise";
+		case JSO_CLASSLIST:	return "classlist";
+		case JSO_PROXY:		return "proxy";
+		case JSO_DATASET:	return "dataset";
+		case JSO_CANVAS2D:	return "canvas2d";
+		case JSO_PROTO:		return "prototype";
+	}
+	return "?";
+}
+
+U0 JsValTag(CJsVal *v, U8 *out)
+{ // out holds 32 bytes
+	if (v && v->type == JV_OBJ)
+		StrPrint(out, "OBJ/%s", JsNidName(v->native_id));
+	else
+		StrCopy(out, JsTypeTag(v));
+}
+
+CJsNode *JsExprRoot(CJsNode *n)
+{
+	I64 depth = 0;
+
+	while (n && depth < 8 &&
+		   (n->type == JN_MEMBER || n->type == JN_INDEX ||
+			n->type == JN_CALL || n->type == JN_NEW))
+	{
+		n = n->a;
+		depth++;
+	}
+
+	return n;
+}
+
+U0 JsExprPath(CJsNode *n, U8 *out, I64 max)
+{
+	CJsNode *chain[6];
+	I64		 n_seg = 0, i;
+
+	out[0] = 0;
+	while (n && n_seg < 6)
+	{
+		chain[n_seg] = n;
+		n_seg++;
+		if (n->type == JN_MEMBER || n->type == JN_INDEX ||
+			n->type == JN_CALL || n->type == JN_NEW)
+			n = n->a;
+		else
+			n = NULL;
+	}
+	if (!n_seg)
+	{
+		JsPathCat(out, max, "?");
+		return;
+	}
+	i = n_seg - 1;
+	while (i >= 0)
+	{
+		n = chain[i];
+		if (n->type == JN_MEMBER)
+		{
+			JsPathCat(out, max, ".");
+			JsPathCat(out, max, n->str);
+		}
+		else if (n->type == JN_INDEX)
+			JsPathCat(out, max, "[]");
+		else if (n->type == JN_CALL)
+			JsPathCat(out, max, "()");
+		else if (n->type == JN_NEW)
+			JsPathCat(out, max, "new ");
+		else if (n->type == JN_IDENT)
+			JsPathCat(out, max, n->str);
+		else if (n->type == JN_SUPER)
+			JsPathCat(out, max, "super");
+		else
+			JsPathCat(out, max, "(expr)");
+		i--;
+	}
+}
+
+Bool JsWarnFirst(U8 *msg)
+{
+	I64 i, k;
+
+	i = 0;
+	while (i < js_warn_n)
+	{
+		if (!StrCompare(js_warn_seen[i], msg))
+			return FALSE;
+		i++;
+	}
+	if (js_warn_n < JS_WARN_KEEP)
+	{
+		k = 0;
+		while (msg[k] && k < JS_WARN_LEN - 1)
+		{
+			js_warn_seen[js_warn_n][k] = msg[k];
+			k++;
+		}
+		js_warn_seen[js_warn_n][k] = 0;
+		js_warn_n++;
+	}
+
+	return TRUE;
+}
+
+U0 JsWhy(CJsInterp *ji, CJsNode *tgt, CJsVal *v, U8 *out)
+{
+	CJsVal *ctor, *proto;
+	U8	   *how = "expr";
+	U8		cf, pf, tag[32];
+
+	if (tgt && tgt->type == JN_IDENT)
+	{
+		how = "ident";
+		if (!JsEnvGet(ji, tgt->str))
+		{
+			StrCopy(out, "ident unbound");
+			return;
+		}
+	}
+	else if (tgt && tgt->type == JN_MEMBER)
+		how = "member";
+	else if (tgt && tgt->type == JN_INDEX)
+		how = "index";
+	else if (tgt && tgt->type == JN_CALL)
+		how = "callres";
+	else if (tgt && tgt->type == JN_SEQ)
+		how = "seq";
+	else if (tgt && tgt->type == JN_FUNC)
+		how = "fnexpr";
+	else if (tgt && tgt->type == JN_COND)
+		how = "cond";
+	if (v && v->type == JV_OBJ)
+	{
+		cf = '-';
+		pf = '-';
+		ctor  = JsPropGet(v, "constructor");
+		proto = JsPropGet(v, "prototype");
+		if (ctor && (ctor->type == JV_FUNC || ctor->type == JV_NATIVE))
+			cf = 'f';
+		else if (ctor)
+			cf = 'x';
+		if (proto && proto->type == JV_OBJ)
+			pf = 'o';
+		else if (proto)
+			pf = 'x';
+		StrPrint(out, "%s OBJ/%s ctor=%c proto=%c",
+				 how, JsNidName(v->native_id), cf, pf);
+		return;
+	}
+	JsValTag(v, tag);
+	StrPrint(out, "%s %s", how, tag);
+}
+
+U0 JsNotCallableWarn(CJsInterp *ji, U8 *kind, CJsNode *tgt, U8 *name,
+					 CJsVal *v, CJsVal *base)
+{
+	U8 buf[JS_WARN_LEN], why[96], tag[32];
+
+	JsWhy(ji, tgt, v, why);
+	buf[0] = 0;
+	JsPathCat(buf, JS_WARN_LEN, kind);
+	JsPathCat(buf, JS_WARN_LEN, " '");
+	JsPathCat(buf, JS_WARN_LEN, name);
+	JsPathCat(buf, JS_WARN_LEN, "': ");
+	JsPathCat(buf, JS_WARN_LEN, why);
+	if (base)
+	{
+		JsValTag(base, tag);
+		JsPathCat(buf, JS_WARN_LEN, " base=");
+		JsPathCat(buf, JS_WARN_LEN, tag);
+	}
+	why[0] = 0;
+	if (tgt && (tgt->type == JN_MEMBER || tgt->type == JN_INDEX))
+		JsExprPath(tgt->a, why, 72);
+	else if (tgt && (tgt->type == JN_CALL || tgt->type == JN_NEW))
+		JsExprPath(tgt, why, 72);
+	if (why[0])
+	{
+		JsPathCat(buf, JS_WARN_LEN, " src=");
+		JsPathCat(buf, JS_WARN_LEN, why);
+		tgt = JsExprRoot(tgt);
+		if (tgt && tgt->type == JN_IDENT && !JsEnvGet(ji, tgt->str))
+			JsPathCat(buf, JS_WARN_LEN, " !rootunbound");
+	}
+	JsScrub(buf);
+	if (!JsWarnFirst(buf))
+		return;
+	if (base && (base->type == JV_UNDEF || base->type == JV_NULL))
+	{
+		if (++js_undef_errs > 8)
+			return;
+	}
+	else if (++js_soft_errs > 24)
+		return;
+	JsConsoleAdd("warn", buf);
+	NetLog("JS: %s", buf);
+}
+
+U0 JsArgClipWarn(U8 *name)
+{ // arguments past JS_MAX_ARGS are dropped, not passed as undefined
+	U8 buf[JS_WARN_LEN], head[32];
+
+	StrPrint(head, "args clipped at %d: ", JS_MAX_ARGS);
+	buf[0] = 0;
+	JsPathCat(buf, JS_WARN_LEN, head);
+	JsPathCat(buf, JS_WARN_LEN, name);
+	JsScrub(buf);
+	if (!JsWarnFirst(buf))
+		return;
+	if (++js_soft_errs > 24)
+		return;
+	JsConsoleAdd("warn", buf);
+	NetLog("JS: %s", buf);
+}
+
+Bool JsArrMethod(U8 *nm)
+{
+	return !StrCompare(nm, "slice") || !StrCompare(nm, "map") ||
+		   !StrCompare(nm, "filter") || !StrCompare(nm, "concat") ||
+		   !StrCompare(nm, "splice") || !StrCompare(nm, "sort") ||
+		   !StrCompare(nm, "reverse") || !StrCompare(nm, "flat") ||
+		   !StrCompare(nm, "flatMap") || !StrCompare(nm, "split") ||
+		   !StrCompare(nm, "keys") || !StrCompare(nm, "values") ||
+		   !StrCompare(nm, "entries") || !StrCompare(nm, "from") ||
+		   !StrCompare(nm, "fill");
+}
+
+CJsNode *JsSynthSuperCtor(CJsInterp *ji)
+{ // AST for the implicit derived constructor: constructor(...%a) { super(...%a); }
+	CJsNode *fnode, *param, *body, *stmt, *call, *arg, *id;
+
+	fnode = JsNode(ji, JN_FUNC);
+	param = JsNode(ji, JN_IDENT);
+	body  = JsNode(ji, JN_BLOCK);
+	stmt  = JsNode(ji, JN_EXPR);
+	call  = JsNode(ji, JN_CALL);
+	arg	  = JsNode(ji, JN_SPREAD);
+	id	  = JsNode(ji, JN_IDENT);
+	param->str = "%a";
+	param->op  = 1; // rest parameter
+	id->str	   = "%a";
+	arg->a	   = id;
+	call->a	   = JsNode(ji, JN_SUPER);
+	call->b	   = arg;
+	stmt->a	   = call;
+	body->a	   = stmt;
+	fnode->a   = param;
+	fnode->b   = body;
+
+	return fnode;
+}
+
+CJsVal *JsConstruct(CJsInterp *ji, CJsVal *fn, CJsVal **args, I64 argc,
+					CJsNode *tgt, U8 *name)
+{
+	CJsVal *obj, *pr, *r;
+
+	if (fn && fn->type == JV_NATIVE && fn->native_id == JSN_FN_BOUND)
+	{
+		pr = JsPropGet(fn, "_t");
+		if (pr)
+			return JsConstruct(ji, pr, args, argc, tgt, name);
+	}
+	if (!fn || (fn->type != JV_FUNC && fn->type != JV_NATIVE))
+	{ // `new <non-constructor>` yields a fresh empty object where real JS throws
+		JsNotCallableWarn(ji, "new", tgt, name, fn, NULL);
+		return JsValNew(ji, JV_OBJ);
+	}
+	obj = JsValNew(ji, JV_OBJ);
+	pr = JsPropGet(fn, "prototype");
+	if (pr && pr->type == JV_OBJ)
+		obj->proto = pr;
+	r = JsCall(ji, fn, obj, args, argc);
+	if (r && (r->type == JV_OBJ || r->type == JV_ARR))
+		return r;
+	return obj;
+}
+
+// Symbol.iterator evaluates to the string "@@iterator", so [Symbol.iterator] lands as an ordinary property
+
+#define JS_MAX_ITER		100000 // per-loop cap
+
+Bool JsIterCallable(CJsVal *v)
+{ // JsIsCallable is defined further down and ZealC compiles in one pass
+	return v && (v->type == JV_FUNC || v->type == JV_NATIVE);
+}
+
+CJsVal *JsIterOpen(CJsInterp *ji, CJsVal *v)
+{
+	CJsVal *fn, *it;
+
+	if (!v || ji->has_err)
+		return NULL;
+	if (v->type != JV_OBJ && v->type != JV_FUNC && v->type != JV_NATIVE)
+		return NULL;
+	fn = JsMemberGet(ji, v, "@@iterator");
+	if (!JsIterCallable(fn))
+		return NULL;
+	it = JsCall(ji, fn, v, NULL, 0);
+	if (!it || ji->has_err)
+		return NULL;
+	if (it->type != JV_OBJ && it->type != JV_FUNC && it->type != JV_NATIVE)
+		return NULL;
+	return it;
+}
+
+Bool JsIterStep(CJsInterp *ji, CJsVal *it, CJsVal **out)
+{
+	CJsVal *nx, *res, *dn;
+
+	*out = NULL;
+	if (!it || ji->has_err)
+		return FALSE;
+	ji->steps++;
+	if (ji->steps > JS_MAX_STEPS)
+	{
+		JsErr(ji, "script ran too long");
+		return FALSE;
+	}
+	nx = JsMemberGet(ji, it, "next");
+	if (!JsIterCallable(nx))
+		return FALSE;
+	res = JsCall(ji, nx, it, NULL, 0);
+	if (!res || ji->has_err)
+		return FALSE;
+	if (res->type != JV_OBJ && res->type != JV_FUNC && res->type != JV_NATIVE)
+		return FALSE; // spec would throw; the loop stops instead
+	dn = JsMemberGet(ji, res, "done");
+	if (dn && JsToBool(dn))
+		return FALSE;
+	*out = JsMemberGet(ji, res, "value");
+	if (!*out)
+		*out = JsUndefV(ji);
+	return TRUE;
+}
+
+Bool JsSpreadInto(CJsInterp *ji, CJsVal *src, CJsVal *dst)
+{
+	CJsVal *it, *el;
+	I64		i;
+	U8		one[2];
+
+	if (!src || !dst)
+		return FALSE;
+	if (src->type == JV_ARR)
+	{
+		for (i = 0; i < src->count; i++)
+			JsArrPush(ji, dst, src->items[i]);
+		return TRUE;
+	}
+	if (src->type == JV_STR)
+	{
+		for (i = 0; src->str[i]; i++)
+		{
+			one[0] = src->str[i];
+			one[1] = 0;
+			JsArrPush(ji, dst, JsStrV(ji, one));
+		}
+		return TRUE;
+	}
+	it = JsIterOpen(ji, src);
+	if (!it)
+		return FALSE;
+	i = 0;
+	while (i < JS_MAX_ITER && !ji->has_err)
+	{
+		if (!JsIterStep(ji, it, &el))
+			break;
+		JsArrPush(ji, dst, el);
+		i++;
+	}
+	return TRUE;
+}
+
+
+Bool JsPatNamed(CJsNode *pat, U8 *name)
+{
+	CJsNode *el = pat->a;
+
+	while (el)
+	{
+		if (el->type == JN_PROP && el->str && !StrCompare(el->str, name))
+			return TRUE;
+		el = el->next;
+	}
+
+	return FALSE;
+}
+
+U0 JsPatElem(CJsInterp *ji, CJsNode *tgt, CJsVal *sub, Bool declare)
+{
+	CJsNode *dflt = NULL;
+
+	if (!tgt || !sub || ji->has_err)
+		return;
+	if (tgt->type == JN_ASSIGN)
+	{
+		dflt = tgt->b;
+		tgt	 = tgt->a;
+	}
+	if (dflt && sub->type == JV_UNDEF)
+		sub = JsEval(ji, dflt);
+	if (tgt->type == JN_UNDEFLIT)
+		return;
+	if (tgt->type == JN_ARRLIT || tgt->type == JN_OBJLIT)
+		JsPatBind(ji, tgt, sub, declare);
+	else if (declare && tgt->type == JN_IDENT)
+		JsEnvDeclare(ji, ji->env, tgt->str, sub);
+	else
+		JsAssignTo(ji, tgt, sub);
+}
+
+U0 JsPatBind(CJsInterp *ji, CJsNode *pat, CJsVal *val, Bool declare)
+{
+	CJsNode *el;
+	CJsVal	*src, *sub, *rest;
+	CJsProp *p;
+	I64		 i;
+
+	if (!pat || !val || ji->has_err)
+		return;
+	if (pat->type == JN_ARRLIT)
+	{
+		src = val;
+		if (val->type != JV_ARR)
+		{
+			src = JsArrV(ji);
+			JsSpreadInto(ji, val, src);
+		}
+		i	= 0;
+		el	= pat->a;
+		while (el && !ji->has_err)
+		{
+			if (el->type == JN_SPREAD)
+			{ // rest takes everything left and ends the pattern
+				rest = JsArrV(ji);
+				while (i < src->count)
+				{
+					JsArrPush(ji, rest, src->items[i]);
+					i++;
+				}
+				JsPatElem(ji, el->a, rest, declare);
+				return;
+			}
+			sub = JsUndefV(ji);
+			if (i < src->count)
+				sub = src->items[i];
+			JsPatElem(ji, el, sub, declare);
+			i++;
+			el = el->next;
+		}
+		return;
+	}
+	if (pat->type != JN_OBJLIT)
+		return;
+	el = pat->a;
+	while (el && !ji->has_err)
+	{
+		if (el->type == JN_SPREAD)
+		{
+			rest = JsValNew(ji, JV_OBJ);
+			if (val->type == JV_OBJ)
+			{
+				p = val->props;
+				while (p)
+				{
+					if (!JsPatNamed(pat, p->name))
+						JsPropSet(ji, rest, p->name, JsPropValue(ji, val, p));
+					p = p->next;
+				}
+			}
+			JsPatElem(ji, el->a, rest, declare);
+		}
+		else if (el->type == JN_PROP)
+		{
+			sub = JsUndefV(ji);
+			if (el->str)
+				sub = JsMemberGet(ji, val, el->str);
+			else if (el->b)
+				sub = JsMemberGet(ji, val, JsToStr(ji, JsEval(ji, el->b)));
+			JsPatElem(ji, el->a, sub, declare);
+		}
+		el = el->next;
+	}
+}
+
+U0 JsForBind(CJsInterp *ji, CJsNode *node, CJsVal *v)
+{
+	if (node->b)
+		JsPatBind(ji, node->b, v, TRUE);
+	else
+		JsEnvDeclare(ji, ji->env, node->str, v);
+}
+
+CJsVal *JsEval(CJsInterp *ji, CJsNode *node)
+{
+	CJsVal	*v, *obj, *fn, *cur, *sv, *fproto, *iarr;
+	CJsEnv	*saved_env, *loop_env;
+	Bool	 per_iter;
+	CJsVal	*argv[JS_MAX_ARGS];
+	CJsNode *child, *item, *stmp;
+	CJsProp *prp;
+	I64		 i, argc, op, k;
+	U8		 one[2];
+
+	if (!node || ji->has_err)
+		return JsUndefV(ji);
+	ji->steps++;
+	if (ji->steps > JS_MAX_STEPS)
+	{
+		JsErr(ji, "script ran too long");
+		return JsUndefV(ji);
+	}
+	if (!(ji->steps & JS_TIME_CHECK))
+	{
+		Yield;
+		if (tS > ji->t_deadline)
+		{
+			JsErr(ji, "script ran too long (wall clock)");
+			return JsUndefV(ji);
+		}
+	}
+
+	switch (node->type)
+	{
+		case JN_NUM:
+			if (node->str)
+				return JsBoolV(ji, node->num != 0);
+			return JsNumV(ji, node->num);
+		case JN_STR:
+			return JsStrV(ji, node->str);
+		case JN_NULLLIT:
+			return JsNullV(ji);
+		case JN_UNDEFLIT:
+			return JsUndefV(ji);
+		case JN_IDENT:
+			v = JsEnvGet(ji, node->str);
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JN_SUPER:
+			v = JsEnvGet(ji, "%superproto");
+			if (v)
+				return v;
+			return JsUndefV(ji);
+		case JN_SEQ:
+			v = JsUndefV(ji);
+			child = node->a;
+			while (child && !ji->has_err && ji->flow == JF_NORMAL)
+			{
+				v = JsEval(ji, child);
+				child = child->next;
+			}
+			return v;
+		case JN_REGEX:
+			v = JsValNew(ji, JV_OBJ);
+			JsPropSet(ji, v, "source", JsStrV(ji, node->str));
+			JsPropSet(ji, v, "global", JsBoolV(ji, node->op & 1));
+			JsPropSet(ji, v, "ignoreCase", JsBoolV(ji, node->op & 2));
+			JsPropSet(ji, v, "multiline", JsBoolV(ji, node->op & 4));
+			JsPropSet(ji, v, "dotAll", JsBoolV(ji, node->op & 8));
+			JsPropSet(ji, v, "lastIndex", JsNumV(ji, 0));
+			JsPropSet(ji, v, "test", JsNativeV(ji, JSN_RE_TEST));
+			JsPropSet(ji, v, "exec", JsNativeV(ji, JSN_RE_EXEC));
+			return v;
+		case JN_ARRLIT:
+			v = JsArrV(ji);
+			child = node->a;
+			while (child)
+			{
+				if (child->type == JN_SPREAD)
+				{
+					sv = JsEval(ji, child->a);
+					if (sv && !JsSpreadInto(ji, sv, v))
+						JsArrPush(ji, v, sv);
+				}
+				else
+					JsArrPush(ji, v, JsEval(ji, child));
+				child = child->next;
+			}
+			return v;
+		case JN_OBJLIT:
+			v = JsValNew(ji, JV_OBJ);
+			child = node->a;
+			while (child)
+			{
+				if (child->type == JN_SPREAD)
+				{
+					sv = JsEval(ji, child->a);
+					if (sv && sv->type == JV_OBJ)
+					{
+						prp = sv->props;
+						while (prp)
+						{
+							JsPropSet(ji, v, prp->name, prp->val(CJsVal *));
+							prp = prp->next;
+						}
+					}
+				}
+				else if (!child->str && child->b)
+					JsPropSet(ji, v, JsToStr(ji, JsEval(ji, child->b)),
+							  JsEval(ji, child->a));
+				else if (child->op == 1)
+					JsAccessorDefine(ji, v, child->str, JsEval(ji, child->a),
+									 NULL);
+				else if (child->op == 2)
+					JsAccessorDefine(ji, v, child->str, NULL,
+									 JsEval(ji, child->a));
+				else
+					JsPropSet(ji, v, child->str, JsEval(ji, child->a));
+				child = child->next;
+			}
+			return v;
+		case JN_MEMBER:
+			obj = JsEval(ji, node->a);
+			return JsMemberGet(ji, obj, node->str);
+		case JN_INDEX:
+			obj = JsEval(ji, node->a);
+			v	= JsEval(ji, node->b);
+			if (obj->type == JV_ARR)
+			{
+				i = JsToNum(v);
+				if (0 <= i < obj->count)
+					return obj->items[i];
+				return JsUndefV(ji);
+			}
+			if (obj->type == JV_STR)
+			{
+				i = JsToNum(v);
+				if (0 <= i < StrLen(obj->str))
+				{
+					one[0] = obj->str[i];
+					one[1] = 0;
+					return JsStrV(ji, one);
+				}
+				return JsUndefV(ji);
+			}
+			if (obj->type == JV_OBJ)
+				return JsMemberGet(ji, obj, JsToStr(ji, v));
+			return JsUndefV(ji);
+		case JN_BIN:
+			op = node->op;
+			if (op == JP_AND)
+			{
+				v = JsEval(ji, node->a);
+				if (!JsToBool(v))
+					return v;
+				return JsEval(ji, node->b);
+			}
+			if (op == JP_OR)
+			{
+				v = JsEval(ji, node->a);
+				if (JsToBool(v))
+					return v;
+				return JsEval(ji, node->b);
+			}
+			if (op == JP_NULLISH)
+			{
+				v = JsEval(ji, node->a);
+				if (v && v->type != JV_UNDEF && v->type != JV_NULL)
+					return v;
+				return JsEval(ji, node->b);
+			}
+			v	= JsEval(ji, node->a);
+			obj = JsEval(ji, node->b);
+			return JsEvalBin(ji, op, v, obj);
+		case JN_UN:
+			op = node->op;
+			if (op == 'd')
+			{
+				if (node->a && node->a->type == JN_MEMBER)
+				{
+					obj = JsEval(ji, node->a->a);
+					if (obj && obj->type == JV_OBJ)
+						JsPropSet(ji, obj, node->a->str, JsUndefV(ji));
+				}
+				else if (node->a && node->a->type == JN_INDEX)
+				{
+					obj = JsEval(ji, node->a->a);
+					if (obj && obj->type == JV_OBJ)
+						JsPropSet(ji, obj, JsToStr(ji, JsEval(ji, node->a->b)),
+								  JsUndefV(ji));
+				}
+				return JsBoolV(ji, TRUE);
+			}
+			v = JsEval(ji, node->a);
+			if (op == 'y')
+				return v;
+			if (op == 'v')
+				return JsUndefV(ji);
+			if (op == 'p')
+				return JsNumV(ji, JsToNum(v));
+			if (op == '!')
+				return JsBoolV(ji, !JsToBool(v));
+			if (op == '-')
+				return JsNumV(ji, -JsToNum(v));
+			if (op == '~')
+				return JsNumV(ji, ~ToI64(JsToNum(v)));
+			switch (v->type)
+			{
+				case JV_UNDEF:	return JsStrV(ji, "undefined");
+				case JV_BOOL:	return JsStrV(ji, "boolean");
+				case JV_NUM:	return JsStrV(ji, "number");
+				case JV_STR:	return JsStrV(ji, "string");
+				case JV_FUNC:
+				case JV_NATIVE:	return JsStrV(ji, "function");
+			}
+			return JsStrV(ji, "object");
+		case JN_COND:
+			if (JsToBool(JsEval(ji, node->a)))
+				return JsEval(ji, node->b);
+			return JsEval(ji, node->c);
+		case JN_ASSIGN:
+			op = node->op;
+			if (op == '=')
+			{
+				v = JsEval(ji, node->b);
+				JsAssignTo(ji, node->a, v);
+				return v;
+			}
+			cur = JsEval(ji, node->a);
+			if (op == JP_ANDEQ)
+			{
+				if (!JsToBool(cur))
+					return cur;
+				v = JsEval(ji, node->b);
+				JsAssignTo(ji, node->a, v);
+				return v;
+			}
+			if (op == JP_OREQ)
+			{
+				if (JsToBool(cur))
+					return cur;
+				v = JsEval(ji, node->b);
+				JsAssignTo(ji, node->a, v);
+				return v;
+			}
+			if (op == JP_NULEQ)
+			{
+				if (cur && cur->type != JV_UNDEF && cur->type != JV_NULL)
+					return cur;
+				v = JsEval(ji, node->b);
+				JsAssignTo(ji, node->a, v);
+				return v;
+			}
+			v = JsEval(ji, node->b);
+			if (op == JP_ADDEQ)		v = JsEvalBin(ji, '+', cur, v);
+			else if (op == JP_SUBEQ)	v = JsEvalBin(ji, '-', cur, v);
+			else if (op == JP_MULEQ)	v = JsEvalBin(ji, '*', cur, v);
+			else if (op == JP_DIVEQ)	v = JsEvalBin(ji, '/', cur, v);
+			else if (op == JP_MODEQ)	v = JsEvalBin(ji, '%', cur, v);
+			else if (op == JP_POWEQ)	v = JsEvalBin(ji, JP_POW, cur, v);
+			else if (op == JP_BANDEQ)	v = JsEvalBin(ji, '&', cur, v);
+			else if (op == JP_BOREQ)	v = JsEvalBin(ji, '|', cur, v);
+			else if (op == JP_BXOREQ)	v = JsEvalBin(ji, '^', cur, v);
+			else if (op == JP_SHLEQ)	v = JsEvalBin(ji, JP_SHL, cur, v);
+			else if (op == JP_SHREQ)	v = JsEvalBin(ji, JP_SHR, cur, v);
+			JsAssignTo(ji, node->a, v);
+			return v;
+		case JN_PREINC:
+			cur = JsEval(ji, node->a);
+			v = JsNumV(ji, JsToNum(cur) + node->op);
+			JsAssignTo(ji, node->a, v);
+			return v;
+		case JN_POSTINC:
+			cur = JsEval(ji, node->a);
+			v = JsNumV(ji, JsToNum(cur));
+			JsAssignTo(ji, node->a, JsNumV(ji, v->num + node->op));
+			return v;
+		case JN_CALL:
+			if (node->a && node->a->type == JN_NEW)
+			{
+				fn = JsEval(ji, node->a->a);
+				argc = 0;
+				child = node->b;
+				while (child && argc < JS_MAX_ARGS)
+				{
+					if (child->type == JN_SPREAD)
+					{
+						sv = JsEval(ji, child->a);
+						if (sv && sv->type == JV_ARR)
+						{
+							for (k = 0; k < sv->count && argc < JS_MAX_ARGS; k++)
+								argv[argc++] = sv->items[k];
+						}
+						else if (sv)
+						{
+							iarr = JsArrV(ji);
+							if (JsSpreadInto(ji, sv, iarr))
+							{
+								for (k = 0; k < iarr->count && argc < JS_MAX_ARGS; k++)
+									argv[argc++] = iarr->items[k];
+							}
+							else
+								argv[argc++] = sv;
+						}
+					}
+					else
+					{
+						sv = JsEval(ji, child);
+						argv[argc++] = sv;
+					}
+					child = child->next;
+				}
+				if (child)
+					JsArgClipWarn(JsCtorName(node->a->a));
+				return JsConstruct(ji, fn, argv, argc, node->a->a,
+								   JsCtorName(node->a->a));
+			}
+			if (node->a && node->a->type == JN_SUPER)
+			{
+				fn	= JsEnvGet(ji, "%superctor");
+				obj = JsEnvGet(ji, "this");
+			}
+			else if (node->a && node->a->type == JN_MEMBER && node->a->a &&
+					 node->a->a->type == JN_SUPER)
+			{
+				sv	= JsEnvGet(ji, "%superproto");
+				obj = JsEnvGet(ji, "this");
+				fn	= NULL;
+				if (sv)
+					fn = JsPropGet(sv, node->a->str);
+			}
+			else if (node->a && node->a->type == JN_MEMBER)
+			{
+				obj = JsEval(ji, node->a->a);
+				fn	= JsMemberGet(ji, obj, node->a->str);
+			}
+			else
+			{
+				obj = NULL;
+				fn	= JsEval(ji, node->a);
+			}
+			argc = 0;
+			child = node->b;
+			while (child && argc < JS_MAX_ARGS)
+			{
+				if (child->type == JN_SPREAD)
+				{
+					sv = JsEval(ji, child->a);
+					if (sv && sv->type == JV_ARR)
+					{
+						for (k = 0; k < sv->count && argc < JS_MAX_ARGS; k++)
+							argv[argc++] = sv->items[k];
+					}
+					else if (sv)
+					{
+						iarr = JsArrV(ji);
+						if (JsSpreadInto(ji, sv, iarr))
+						{
+							for (k = 0; k < iarr->count && argc < JS_MAX_ARGS; k++)
+								argv[argc++] = iarr->items[k];
+						}
+						else
+							argv[argc++] = sv;
+					}
+				}
+				else
+				{
+					sv = JsEval(ji, child);
+					argv[argc++] = sv;
+				}
+				child = child->next;
+			}
+			if (child)
+				JsArgClipWarn(JsCtorName(node->a));
+			if (!fn || (fn->type != JV_FUNC && fn->type != JV_NATIVE))
+			{
+				JsNotCallableWarn(ji, "call", node->a, JsCtorName(node->a),
+								  fn, obj);
+				if (JsArrMethod(JsCtorName(node->a)))
+					return JsValNew(ji, JV_ARR);
+				return JsUndefV(ji);
+			}
+			return JsCall(ji, fn, obj, argv, argc);
+		case JN_VAR:
+			child = node->a;
+			while (child)
+			{
+				if (child->type == JN_DESTRUCT)
+				{
+					v = JsUndefV(ji);
+					if (child->a)
+						v = JsEval(ji, child->a);
+					JsPatBind(ji, child->b, v, TRUE);
+				}
+				else
+				{
+					if (child->a)
+						v = JsEval(ji, child->a);
+					else
+						v = JsUndefV(ji);
+					JsEnvDeclare(ji, ji->env, child->str, v);
+				}
+				child = child->next;
+			}
+			return NULL;
+		case JN_IF:
+			if (JsToBool(JsEval(ji, node->a)))
+				JsEval(ji, node->b);
+			else if (node->c)
+				JsEval(ji, node->c);
+			return NULL;
+		case JN_WHILE:
+			while (!ji->has_err && ji->flow == JF_NORMAL &&
+				   JsToBool(JsEval(ji, node->a)))
+			{
+				JsEval(ji, node->b);
+				if (ji->flow == JF_CONTINUE)
+					ji->flow = JF_NORMAL;
+			}
+			if (ji->flow == JF_BREAK)
+				ji->flow = JF_NORMAL;
+			return NULL;
+		case JN_DO:
+			while (!ji->has_err)
+			{
+				JsEval(ji, node->a);
+				if (ji->flow == JF_CONTINUE)
+					ji->flow = JF_NORMAL;
+				if (ji->flow != JF_NORMAL)
+					break;
+				if (!JsToBool(JsEval(ji, node->b)))
+					break;
+			}
+			if (ji->flow == JF_BREAK)
+				ji->flow = JF_NORMAL;
+			return NULL;
+		case JN_CONTINUE:
+			ji->flow = JF_CONTINUE;
+			return NULL;
+		case JN_SWITCH:
+			sv = JsEval(ji, node->a);
+			item = NULL;
+			child = node->b;
+			while (child && !item && !ji->has_err)
+			{
+				if (child->a && JsStrictEq(sv, JsEval(ji, child->a)))
+					item = child;
+				child = child->next;
+			}
+			if (!item)
+			{
+				child = node->b;
+				while (child && !item)
+				{
+					if (!child->a)
+						item = child;
+					child = child->next;
+				}
+			}
+			child = item;
+			while (child && !ji->has_err && ji->flow == JF_NORMAL)
+			{
+				item = child->b;
+				while (item && !ji->has_err && ji->flow == JF_NORMAL)
+				{
+					JsEval(ji, item);
+					item = item->next;
+				}
+				child = child->next;
+			}
+			if (ji->flow == JF_BREAK)
+				ji->flow = JF_NORMAL;
+			return NULL;
+		case JN_FOR:
+			per_iter = FALSE;
+			if (node->a && node->a->type == JN_VAR && node->a->op)
+				per_iter = TRUE;
+			saved_env = ji->env;
+			if (per_iter)
+			{
+				loop_env = JsAlloc(ji, sizeof(CJsEnv))(CJsEnv *);
+				loop_env->parent = ji->env;
+				loop_env->vars = NULL;
+				ji->env = loop_env;
+			}
+			if (node->a)
+				JsEval(ji, node->a);
+			if (per_iter)
+				ji->env = JsEnvPerIter(ji, ji->env);
+			while (!ji->has_err && ji->flow == JF_NORMAL &&
+				   (!node->b || JsToBool(JsEval(ji, node->b))))
+			{
+				JsEval(ji, node->d);
+				if (ji->flow == JF_CONTINUE)
+					ji->flow = JF_NORMAL;
+				if (ji->flow == JF_NORMAL)
+				{
+					if (per_iter)
+						ji->env = JsEnvPerIter(ji, ji->env);
+					if (node->c)
+						JsEval(ji, node->c);
+				}
+			}
+			ji->env = saved_env;
+			if (ji->flow == JF_BREAK)
+				ji->flow = JF_NORMAL;
+			return NULL;
+		case JN_BLOCK:
+			child = node->a;
+			while (child && !ji->has_err && ji->flow == JF_NORMAL)
+			{
+				JsEval(ji, child);
+				child = child->next;
+			}
+			return NULL;
+		case JN_FUNC:
+			v = JsValNew(ji, JV_FUNC);
+			v->func = node(U64);
+			v->fenv = ji->env;
+			fproto = JsValNew(ji, JV_OBJ);
+			JsPropSet(ji, v, "prototype", fproto);
+			JsPropSet(ji, fproto, "constructor", v);
+			if (node->str)
+				JsEnvDeclare(ji, ji->env, node->str, v);
+			return v;
+		case JN_RETURN:
+			if (node->a)
+				ji->ret_val = JsEval(ji, node->a);
+			else
+				ji->ret_val = JsUndefV(ji);
+			ji->flow = JF_RETURN;
+			return NULL;
+		case JN_BREAK:
+			ji->flow = JF_BREAK;
+			return NULL;
+		case JN_EXPR:
+			return JsEval(ji, node->a);
+		case JN_NEW:
+			fn = JsEval(ji, node->a);
+			return JsConstruct(ji, fn, NULL, 0, node->a, JsCtorName(node->a));
+		case JN_THROW:
+			ji->exc = JsEval(ji, node->a);
+			ji->flow = JF_THROW;
+			return NULL;
+		case JN_AWAIT:
+			v = JsEval(ji, node->a);
+			if (v && v->type == JV_OBJ && v->native_id == JSO_PROMISE)
+			{
+				JsMicroDrain(ji);
+				sv	= JsPropGet(v, "_state");
+				cur	= JsPropGet(v, "_value");
+				if (sv && JsToNum(sv) == 2)
+				{
+					if (cur)
+						ji->exc = cur;
+					else
+						ji->exc = JsUndefV(ji);
+					ji->flow = JF_THROW;
+					return JsUndefV(ji);
+				}
+				if (cur)
+					return cur;
+				return JsUndefV(ji);
+			}
+			return v;
+		case JN_SPREAD:
+			return JsEval(ji, node->a);
+		case JN_TRY:
+			JsEval(ji, node->a);
+			if (ji->flow == JF_THROW && node->b)
+			{
+				ji->flow = JF_NORMAL;
+				v = ji->exc;
+				if (!v)
+					v = JsUndefV(ji);
+				if (node->str)
+					JsEnvDeclare(ji, ji->env, node->str, v);
+				JsEval(ji, node->b);
+			}
+			if (node->c)
+			{
+				op = ji->flow;
+				ji->flow = JF_NORMAL;
+				JsEval(ji, node->c);
+				if (ji->flow == JF_NORMAL)
+					ji->flow = op;
+			}
+			return NULL;
+		case JN_FOROF:
+			v = JsEval(ji, node->a);
+			if (v->type == JV_ARR)
+			{
+				for (argc = 0; argc < v->count && !ji->has_err &&
+					 ji->flow == JF_NORMAL; argc++)
+				{
+					if (node->op)
+						JsForBind(ji, node, JsNumV(ji, argc));
+					else
+						JsForBind(ji, node, v->items[argc]);
+					JsEval(ji, node->d);
+					if (ji->flow == JF_CONTINUE)
+						ji->flow = JF_NORMAL;
+				}
+			}
+			else if (v->type == JV_STR && !node->op)
+			{
+				for (argc = 0; v->str[argc] && !ji->has_err &&
+					 ji->flow == JF_NORMAL; argc++)
+				{
+					one[0] = v->str[argc];
+					one[1] = 0;
+					JsForBind(ji, node, JsStrV(ji, one));
+					JsEval(ji, node->d);
+					if (ji->flow == JF_CONTINUE)
+						ji->flow = JF_NORMAL;
+				}
+			}
+			else if (v->type == JV_OBJ && node->op)
+			{
+				prp = v->props;
+				while (prp && !ji->has_err && ji->flow == JF_NORMAL)
+				{
+					JsForBind(ji, node, JsStrV(ji, prp->name));
+					JsEval(ji, node->d);
+					if (ji->flow == JF_CONTINUE)
+						ji->flow = JF_NORMAL;
+					prp = prp->next;
+				}
+			}
+			else if (!node->op)
+			{
+				cur = JsIterOpen(ji, v);
+				if (cur)
+				{
+					k = 0;
+					while (k < JS_MAX_ITER && !ji->has_err &&
+						   ji->flow == JF_NORMAL)
+					{
+						if (!JsIterStep(ji, cur, &sv))
+							k = JS_MAX_ITER;
+						else
+						{
+							JsForBind(ji, node, sv);
+							JsEval(ji, node->d);
+							if (ji->flow == JF_CONTINUE)
+								ji->flow = JF_NORMAL;
+							k++;
+						}
+					}
+				}
+			}
+			if (ji->flow == JF_BREAK)
+				ji->flow = JF_NORMAL;
+			return NULL;
+		case JN_CLASS:
+			obj = JsValNew(ji, JV_OBJ);
+			v = NULL;
+			sv = NULL;
+			saved_env = ji->env;
+			if (node->c)
+			{
+				sv = JsEval(ji, node->c);
+				if (sv && (sv->type == JV_FUNC || sv->type == JV_NATIVE))
+				{
+					fproto = JsPropGet(sv, "prototype");
+					if (fproto && fproto->type == JV_OBJ)
+						obj->proto = fproto;
+				}
+				else
+					sv = NULL;
+			}
+			if (sv)
+			{
+				loop_env = JsAlloc(ji, sizeof(CJsEnv))(CJsEnv *);
+				loop_env->parent = saved_env;
+				ji->env = loop_env;
+				JsEnvDeclare(ji, loop_env, "%superctor", sv);
+				if (obj->proto)
+					JsEnvDeclare(ji, loop_env, "%superproto", obj->proto);
+			}
+			child = node->a;
+			while (child)
+			{
+				if (child->op >= 4)
+				{
+					child = child->next;
+					goto js_class_next;
+				}
+				fn = JsEval(ji, child->a);
+				if (child->op == 1)
+				{
+					JsAccessorDefine(ji, obj, child->str, fn, NULL);
+					child = child->next;
+					goto js_class_next;
+				}
+				if (child->op == 2)
+				{
+					JsAccessorDefine(ji, obj, child->str, NULL, fn);
+					child = child->next;
+					goto js_class_next;
+				}
+				if (!StrCompare(child->str, "constructor"))
+					v = fn;
+				else
+					JsPropSet(ji, obj, child->str, fn);
+				child = child->next;
+js_class_next:;
+			}
+			if (!v && sv)
+			{
+				v = JsValNew(ji, JV_FUNC);
+				stmp = JsSynthSuperCtor(ji);
+				v->func = stmp(U64);
+				v->fenv = ji->env(U64);
+			}
+			if (!v)
+				v = JsNativeV(ji, JSN_EVT_NOOP);
+			JsPropSet(ji, v, "prototype", obj);
+			JsPropSet(ji, obj, "constructor", v);
+			if (sv)
+				v->proto = sv;
+			child = node->a;
+			while (child)
+			{
+				if (child->op >= 4)
+				{
+					fn = JsEval(ji, child->a);
+					if (child->op == 5)
+						JsAccessorDefine(ji, v, child->str, fn, NULL);
+					else if (child->op == 6)
+						JsAccessorDefine(ji, v, child->str, NULL, fn);
+					else
+						JsPropSet(ji, v, child->str, fn);
+				}
+				child = child->next;
+			}
+			ji->env = saved_env;
+			if (node->str)
+				JsEnvDeclare(ji, ji->env, node->str, v);
+			return v;
+	}
+
+	return JsUndefV(ji);
+}
+
+
+extern Bool JsHoistList(CJsInterp *ji, CJsNode *list, CJsEnv *env);
+
+Bool JsHoistStmt(CJsInterp *ji, CJsNode *n, CJsEnv *env)
+{
+	CJsEnv	*saved;
+	CJsNode *c;
+	Bool	 any = FALSE;
+
+	if (!n)
+		return FALSE;
+	if (n->type == JN_FUNC)
+	{
+		if (!n->str)
+			return FALSE;
+		saved = ji->env;
+		ji->env = env;
+		JsEval(ji, n);
+		ji->env = saved;
+		return TRUE;
+	}
+	if (n->type == JN_BLOCK)
+		any = JsHoistList(ji, n->a, env);
+	else if (n->type == JN_IF)
+	{
+		any = JsHoistStmt(ji, n->b, env);
+		if (JsHoistStmt(ji, n->c, env))
+			any = TRUE;
+	}
+	else if (n->type == JN_WHILE)
+		any = JsHoistStmt(ji, n->b, env);
+	else if (n->type == JN_DO)
+		any = JsHoistStmt(ji, n->a, env);
+	else if (n->type == JN_FOR || n->type == JN_FOROF)
+		any = JsHoistStmt(ji, n->d, env);
+	else if (n->type == JN_TRY)
+	{
+		any = JsHoistStmt(ji, n->a, env);
+		if (JsHoistStmt(ji, n->b, env))
+			any = TRUE;
+		if (JsHoistStmt(ji, n->c, env))
+			any = TRUE;
+	}
+	else if (n->type == JN_SWITCH)
+	{
+		c = n->b;
+		while (c)
+		{
+			if (JsHoistList(ji, c->b, env))
+				any = TRUE;
+			c = c->next;
+		}
+	}
+
+	return any;
+}
+
+Bool JsHoistList(CJsInterp *ji, CJsNode *list, CJsEnv *env)
+{
+	Bool any = FALSE;
+
+	while (list && !ji->has_err)
+	{
+		if (JsHoistStmt(ji, list, env))
+			any = TRUE;
+		list = list->next;
+	}
+
+	return any;
+}
+
+
+CJsVal *JsArgOr(CJsInterp *ji, CJsVal **args, I64 argc, I64 i)
+{
+	if (i < argc)
+		return args[i];
+
+	return JsUndefV(ji);
+}
+
+
+U0 JsMicroAdd(CJsInterp *ji, CJsVal *fn, CJsVal *arg, Bool has_arg,
+			  CJsVal *derived)
+{
+	CJsMicro *m;
+
+	if (!fn || (fn->type != JV_FUNC && fn->type != JV_NATIVE))
+		return;
+	m = JsAlloc(ji, sizeof(CJsMicro))(CJsMicro *);
+	m->fn = fn;
+	m->arg = arg;
+	m->has_arg = has_arg;
+	m->derived = derived;
+	m->rejected = FALSE;
+	m->next = NULL;
+	if (ji->micro_tail)
+		ji->micro_tail->next = m;
+	else
+		ji->micro_head = m;
+	ji->micro_tail = m;
+}
+
+U0 JsMicroPass(CJsInterp *ji, CJsVal *derived, CJsVal *val, Bool rejected)
+{
+	CJsMicro *m;
+
+	if (!derived)
+		return;
+	m = JsAlloc(ji, sizeof(CJsMicro))(CJsMicro *);
+	m->fn = NULL;
+	m->arg = val;
+	m->has_arg = TRUE;
+	m->derived = derived;
+	m->rejected = rejected;
+	m->next = NULL;
+	if (ji->micro_tail)
+		ji->micro_tail->next = m;
+	else
+		ji->micro_head = m;
+	ji->micro_tail = m;
+}
+
+extern U0 JsPromiseSettle(CJsInterp *ji, CJsVal *pr, CJsVal *val, Bool rejected);
+extern U0 JsPromiseReact(CJsInterp *ji, CJsVal *pr, CJsVal *cb, Bool on_rej,
+						 CJsVal *derived);
+
+U0 JsMicroDrain(CJsInterp *ji)
+{
+	CJsMicro *m;
+	CJsVal	 *a1, *r;
+	I64		  ran = 0;
+
+	while (ji->micro_head && ran < 512)
+	{
+		m = ji->micro_head;
+		ji->micro_head = m->next;
+		if (!ji->micro_head)
+			ji->micro_tail = NULL;
+		JsBudgetReset(ji);
+		ji->depth = 0;
+		ji->flow = JF_NORMAL;
+		ji->env = ji->genv;
+		if (!m->fn)
+		{
+			JsPromiseSettle(ji, m->derived, m->arg, m->rejected);
+		}
+		else
+		{
+			if (m->has_arg)
+			{
+				a1 = m->arg;
+				r = JsCall(ji, m->fn, NULL, &a1, 1);
+			}
+			else
+				r = JsCall(ji, m->fn, NULL, NULL, 0);
+			if (m->derived)
+			{
+				if (ji->flow == JF_THROW)
+				{
+					JsPromiseSettle(ji, m->derived, ji->exc, TRUE);
+					ji->exc = NULL;
+				}
+				else if (r && r->type == JV_OBJ &&
+						 r->native_id == JSO_PROMISE)
+				{
+					JsPromiseReact(ji, r, NULL, FALSE, m->derived);
+					JsPromiseReact(ji, r, NULL, TRUE,  m->derived);
+				}
+				else
+					JsPromiseSettle(ji, m->derived, r, FALSE);
+			}
+		}
+		if (ji->has_err)
+		{
+			NetLog("%s", ji->err);
+			ji->has_err = FALSE;
+		}
+		ji->flow = JF_NORMAL;
+		ran++;
+	}
+}
+
+CJsVal *JsPromiseNew(CJsInterp *ji)
+{
+	CJsVal *pr = JsValNew(ji, JV_OBJ);
+
+	pr->native_id = JSO_PROMISE;
+	JsPropSet(ji, pr, "_state", JsNumV(ji, 0));
+	JsPropSet(ji, pr, "_onres", JsArrV(ji));
+	JsPropSet(ji, pr, "_onrej", JsArrV(ji));
+	JsPropSet(ji, pr, "_onresd", JsArrV(ji));
+	JsPropSet(ji, pr, "_onrejd", JsArrV(ji));
+	return pr;
+}
+
+Bool JsIsCallable(CJsVal *v)
+{
+	if (!v)
+		return FALSE;
+
+	return v->type == JV_FUNC || v->type == JV_NATIVE;
+}
+
+U0 JsPromiseSettle(CJsInterp *ji, CJsVal *pr, CJsVal *val, Bool rejected)
+{
+	CJsVal *st, *cbs, *ds, *d;
+	I64		i;
+
+	if (!pr || pr->native_id != JSO_PROMISE)
+		return;
+	st = JsPropGet(pr, "_state");
+	if (st && JsToNum(st) != 0.0)
+		return;
+	if (!val)
+		val = JsUndefV(ji);
+	if (rejected)
+		JsPropSet(ji, pr, "_state", JsNumV(ji, 2));
+	else
+		JsPropSet(ji, pr, "_state", JsNumV(ji, 1));
+	JsPropSet(ji, pr, "_value", val);
+	if (rejected)
+	{
+		cbs = JsPropGet(pr, "_onrej");
+		ds	= JsPropGet(pr, "_onrejd");
+	}
+	else
+	{
+		cbs = JsPropGet(pr, "_onres");
+		ds	= JsPropGet(pr, "_onresd");
+	}
+	if (cbs && cbs->type == JV_ARR)
+		for (i = 0; i < cbs->count; i++)
+		{
+			d = NULL;
+			if (ds && ds->type == JV_ARR && i < ds->count &&
+				ds->items[i]->type == JV_OBJ)
+				d = ds->items[i];
+			if (JsIsCallable(cbs->items[i]))
+				JsMicroAdd(ji, cbs->items[i], val, TRUE, d);
+			else
+				JsMicroPass(ji, d, val, rejected);
+		}
+}
+
+U0 JsPromiseReact(CJsInterp *ji, CJsVal *pr, CJsVal *cb, Bool on_rej,
+				  CJsVal *derived)
+{
+	CJsVal *st, *val, *cbs, *ds;
+	I64		state;
+
+	if (!pr || pr->native_id != JSO_PROMISE)
+		return;
+	if (!cb && !derived)
+		return;
+	st = JsPropGet(pr, "_state");
+	state = 0;
+	if (st)
+		state = JsToNum(st);
+	if (state == 0)
+	{
+		if (on_rej)
+		{
+			cbs = JsPropGet(pr, "_onrej");
+			ds	= JsPropGet(pr, "_onrejd");
+		}
+		else
+		{
+			cbs = JsPropGet(pr, "_onres");
+			ds	= JsPropGet(pr, "_onresd");
+		}
+		if (cbs && cbs->type == JV_ARR)
+		{
+			if (cb)
+				JsArrPush(ji, cbs, cb);
+			else
+				JsArrPush(ji, cbs, JsUndefV(ji));
+			if (ds && ds->type == JV_ARR)
+			{
+				if (derived)
+					JsArrPush(ji, ds, derived);
+				else
+					JsArrPush(ji, ds, JsUndefV(ji));
+			}
+		}
+		return;
+	}
+	if ((state == 1 && !on_rej) || (state == 2 && on_rej))
+	{
+		val = JsPropGet(pr, "_value");
+		if (JsIsCallable(cb))
+			JsMicroAdd(ji, cb, val, TRUE, derived);
+		else
+			JsMicroPass(ji, derived, val, on_rej);
+	}
+}
+
+
+CJsVal *JsPromiseCoerce(CJsInterp *ji, CJsVal *v)
+{
+	CJsVal *pr;
+
+	if (v && v->type == JV_OBJ && v->native_id == JSO_PROMISE)
+		return v;
+	pr = JsPromiseNew(ji);
+	JsPromiseSettle(ji, pr, v, FALSE);
+
+	return pr;
+}
+
+CJsVal *JsCombAggErr(CJsInterp *ji, CJsVal *errors)
+{
+	CJsVal *e = JsValNew(ji, JV_OBJ);
+
+	JsPropSet(ji, e, "name", JsStrV(ji, "AggregateError"));
+	JsPropSet(ji, e, "message", JsStrV(ji, "All promises were rejected"));
+	JsPropSet(ji, e, "stack", JsStrV(ji, ""));
+	JsPropSet(ji, e, "errors", errors);
+
+	return e;
+}
+
+CJsVal *JsCombStateNew(CJsInterp *ji, CJsVal *result, I64 n)
+{
+	CJsVal *st = JsValNew(ji, JV_OBJ);
+	CJsVal *slots = JsArrV(ji);
+	I64		i;
+
+	for (i = 0; i < n; i++)
+		JsArrPush(ji, slots, JsUndefV(ji));
+	JsPropSet(ji, st, "_p", result);
+	JsPropSet(ji, st, "_slots", slots);
+	JsPropSet(ji, st, "_left", JsNumV(ji, n));
+
+	return st;
+}
+
+U0 JsCombStep(CJsInterp *ji, I64 id, CJsVal *self, CJsVal *val)
+{
+	CJsVal *st, *slots, *result, *lv, *rec;
+	I64		idx, left;
+
+	if (!self)
+		return;
+	st = JsPropGet(self, "_cst");
+	lv = JsPropGet(self, "_ci");
+	if (!st || !lv)
+		return;
+	idx = ToI64(JsToNum(lv));
+	slots = JsPropGet(st, "_slots");
+	result = JsPropGet(st, "_p");
+	if (!slots || !result || slots->type != JV_ARR)
+		return;
+	if (idx < 0 || idx >= slots->count)
+		return;
+	if (id == JSN_PROMISE_ASOK || id == JSN_PROMISE_ASERR)
+	{
+		rec = JsValNew(ji, JV_OBJ);
+		if (id == JSN_PROMISE_ASOK)
+		{
+			JsPropSet(ji, rec, "status", JsStrV(ji, "fulfilled"));
+			JsPropSet(ji, rec, "value", val);
+		}
+		else
+		{
+			JsPropSet(ji, rec, "status", JsStrV(ji, "rejected"));
+			JsPropSet(ji, rec, "reason", val);
+		}
+	}
+	else
+		rec = val;
+	slots->items[idx] = rec;
+	lv = JsPropGet(st, "_left");
+	left = 0;
+	if (lv)
+		left = ToI64(JsToNum(lv));
+	left--;
+	JsPropSet(ji, st, "_left", JsNumV(ji, left));
+	if (left > 0)
+		return;
+	if (id == JSN_PROMISE_ANYERR)
+	{
+		JsPromiseSettle(ji, result, JsCombAggErr(ji, slots), TRUE);
+		return;
+	}
+	JsPromiseSettle(ji, result, slots, FALSE);
+}
+
+U0 JsCombWatch(CJsInterp *ji, CJsVal *el, I64 step_id, CJsVal *st, I64 idx,
+			   Bool on_rej)
+{
+	CJsVal *cb = JsNativeV(ji, step_id);
+
+	JsPropSet(ji, cb, "_cst", st);
+	JsPropSet(ji, cb, "_ci", JsNumV(ji, idx));
+	JsPromiseReact(ji, el, cb, on_rej, NULL);
+}
+
+U0 JsCombSettleWith(CJsInterp *ji, CJsVal *el, CJsVal *result, Bool on_rej)
+{
+	CJsVal *cb;
+
+	if (on_rej)
+		cb = JsNativeV(ji, JSN_PROMISE_REJECT);
+	else
+		cb = JsNativeV(ji, JSN_PROMISE_RESOLVE);
+	cb->proto = result;
+	JsPromiseReact(ji, el, cb, on_rej, NULL);
+}
+
+CJsVal *JsPromiseComb(CJsInterp *ji, I64 id, CJsVal **args, I64 argc)
+{
+	CJsVal *result, *arr, *st, *el;
+	I64		i, n;
+
+	result = JsPromiseNew(ji);
+	arr = JsArgOr(ji, args, argc, 0);
+	n = 0;
+	if (arr && arr->type == JV_ARR)
+		n = arr->count;
+	if (!n)
+	{
+		if (id == JSN_PROMISE_SALL || id == JSN_PROMISE_SALLSET)
+			JsPromiseSettle(ji, result, JsArrV(ji), FALSE);
+		else if (id == JSN_PROMISE_SANY)
+			JsPromiseSettle(ji, result, JsCombAggErr(ji, JsArrV(ji)), TRUE);
+		return result;
+	}
+	st = NULL;
+	if (id != JSN_PROMISE_SRACE)
+		st = JsCombStateNew(ji, result, n);
+	for (i = 0; i < n; i++)
+	{
+		el = JsPromiseCoerce(ji, arr->items[i]);
+		if (id == JSN_PROMISE_SRACE)
+		{
+			JsCombSettleWith(ji, el, result, FALSE);
+			JsCombSettleWith(ji, el, result, TRUE);
+		}
+		else if (id == JSN_PROMISE_SALL)
+		{
+			JsCombWatch(ji, el, JSN_PROMISE_ALLSTEP, st, i, FALSE);
+			JsCombSettleWith(ji, el, result, TRUE);
+		}
+		else if (id == JSN_PROMISE_SALLSET)
+		{
+			JsCombWatch(ji, el, JSN_PROMISE_ASOK, st, i, FALSE);
+			JsCombWatch(ji, el, JSN_PROMISE_ASERR, st, i, TRUE);
+		}
+		else
+		{
+			JsCombSettleWith(ji, el, result, FALSE);
+			JsCombWatch(ji, el, JSN_PROMISE_ANYERR, st, i, TRUE);
+		}
+	}
+
+	return result;
+}
+
+CJsVal *JsFetch(CJsInterp *ji, CJsVal **args, I64 argc)
+{
+	U8			  *url, *abs = NULL, *method = NULL, *body = NULL;
+	CJsVal		  *pr, *resp, *ov, *mv;
+	CHttpUrl	   base;
+	CHttpResponse *r;
+
+	pr = JsPromiseNew(ji);
+	if (!argc)
+	{
+		JsPromiseSettle(ji, pr, JsUndefV(ji), TRUE);
+		return pr;
+	}
+	url = JsToStr(ji, args[0]);
+	if (argc > 1 && args[1]->type == JV_OBJ)
+	{
+		ov = args[1];
+		mv = JsPropGet(ov, "method");
+		if (mv)
+			method = JsToStr(ji, mv);
+		mv = JsPropGet(ov, "body");
+		if (mv && mv->type != JV_UNDEF && mv->type != JV_NULL)
+			body = JsToStr(ji, mv);
+	}
+	if (HttpUrlParse(ji->url, &base) >= 0)
+		abs = HttpUrlResolve(&base, url);
+	if (!abs)
+		abs = StrNew(url);
+	if (method && !StrICompare(method, "POST") && body)
+		r = HttpPost(abs, body);
+	else
+		r = HttpGet(abs);
+	Free(abs);
+
+	resp = JsValNew(ji, JV_OBJ);
+	if (r)
+	{
+		JsPropSet(ji, resp, "status", JsNumV(ji, r->status));
+		JsPropSet(ji, resp, "ok", JsBoolV(ji, 200 <= r->status < 300));
+		JsPropSet(ji, resp, "_body", JsStrV(ji, r->body));
+		HttpResponseFree(r);
+		JsPropSet(ji, resp, "text", JsNativeV(ji, JSN_RESP_TEXT));
+		JsPropSet(ji, resp, "json", JsNativeV(ji, JSN_RESP_JSON));
+		JsPromiseSettle(ji, pr, resp, FALSE);
+	}
+	else
+	{
+		JsPropSet(ji, resp, "status", JsNumV(ji, 0));
+		JsPropSet(ji, resp, "ok", JsBoolV(ji, FALSE));
+		JsPromiseSettle(ji, pr, resp, TRUE);
+	}
+	return pr;
+}
+
+
+CJsVal *JsJsonParseVal(CJsInterp *ji, U8 **pp, I64 depth)
+{
+	U8	   *p = *pp, buf[1024];
+	I64		n;
+	CJsVal *v, *item;
+	Bool	neg;
+
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+		p++;
+	if (depth > 24 || !*p)
+	{
+		*pp = p;
+		return JsNullV(ji);
+	}
+	if (*p == '{')
+	{
+		p++;
+		v = JsValNew(ji, JV_OBJ);
+		while (*p)
+		{
+			while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',')
+				p++;
+			if (*p == '}')
+			{ p++; break; }
+			if (*p != '"')
+				break;
+			p++;
+			n = 0;
+			while (*p && *p != '"' && n < 1020)
+			{
+				if (*p == '\\' && p[1])
+					p++;
+				buf[n++] = *p++;
+			}
+			buf[n] = 0;
+			if (*p == '"')
+				p++;
+			while (*p == ' ' || *p == '\t')
+				p++;
+			if (*p == ':')
+				p++;
+			*pp = p;
+			item = JsJsonParseVal(ji, pp, depth + 1);
+			p = *pp;
+			JsPropSet(ji, v, buf, item);
+		}
+		*pp = p;
+		return v;
+	}
+	if (*p == '[')
+	{
+		p++;
+		v = JsArrV(ji);
+		while (*p)
+		{
+			while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',')
+				p++;
+			if (*p == ']')
+			{ p++; break; }
+			*pp = p;
+			item = JsJsonParseVal(ji, pp, depth + 1);
+			p = *pp;
+			JsArrPush(ji, v, item);
+		}
+		*pp = p;
+		return v;
+	}
+	if (*p == '"')
+	{
+		p++;
+		n = 0;
+		while (*p && *p != '"' && n < 1020)
+		{
+			if (*p == '\\' && p[1])
+			{
+				p++;
+				if (*p == 'n')
+				{ buf[n++] = '\n'; p++; }
+				else if (*p == 't')
+				{ buf[n++] = '\t'; p++; }
+				else
+					buf[n++] = *p++;
+			}
+			else
+				buf[n++] = *p++;
+		}
+		buf[n] = 0;
+		if (*p == '"')
+			p++;
+		*pp = p;
+		return JsStrV(ji, buf);
+	}
+	if (!StrNCompare(p, "true", 4))
+	{ *pp = p + 4; return JsBoolV(ji, TRUE); }
+	if (!StrNCompare(p, "false", 5))
+	{ *pp = p + 5; return JsBoolV(ji, FALSE); }
+	if (!StrNCompare(p, "null", 4))
+	{ *pp = p + 4; return JsNullV(ji); }
+	neg = FALSE;
+	if (*p == '-')
+	{ neg = TRUE; }
+	n = 0;
+	while ((('0' <= *p <= '9') || *p == '.' || *p == '-' || *p == '+' ||
+			*p == 'e' || *p == 'E') && n < 60)
+		buf[n++] = *p++;
+	buf[n] = 0;
+	*pp = p;
+	if (!n)
+	{ (*pp)++; return JsNullV(ji); }
+	no_warn neg;
+	return JsNumV(ji, JsStr2F64(buf));
+}
+
+U0 JsJsonAppend(U8 *out, I64 *n, I64 max, U8 *s)
+{
+	while (*s && *n < max - 1)
+		out[(*n)++] = *s++;
+	out[*n] = 0;
+}
+
+U0 JsJsonStringify(CJsInterp *ji, CJsVal *v, U8 *out, I64 *n, I64 max, I64 depth)
+{
+	CJsProp *prp;
+	I64		i;
+	Bool	first;
+
+	if (!v || depth > 12)
+	{ JsJsonAppend(out, n, max, "null"); return; }
+	switch (v->type)
+	{
+		case JV_NUM:
+		case JV_BOOL:
+			JsJsonAppend(out, n, max, JsToStr(ji, v));
+			break;
+		case JV_STR:
+			JsJsonAppend(out, n, max, "\"");
+			JsJsonAppend(out, n, max, v->str);
+			JsJsonAppend(out, n, max, "\"");
+			break;
+		case JV_ARR:
+			JsJsonAppend(out, n, max, "[");
+			for (i = 0; i < v->count; i++)
+			{
+				if (i)
+					JsJsonAppend(out, n, max, ",");
+				JsJsonStringify(ji, v->items[i], out, n, max, depth + 1);
+			}
+			JsJsonAppend(out, n, max, "]");
+			break;
+		case JV_OBJ:
+			JsJsonAppend(out, n, max, "{");
+			first = TRUE;
+			prp = v->props;
+			while (prp)
+			{
+				if (prp->name[0] != '_')
+				{
+					if (!first)
+						JsJsonAppend(out, n, max, ",");
+					first = FALSE;
+					JsJsonAppend(out, n, max, "\"");
+					JsJsonAppend(out, n, max, prp->name);
+					JsJsonAppend(out, n, max, "\":");
+					JsJsonStringify(ji, prp->val(CJsVal *), out, n, max, depth + 1);
+				}
+				prp = prp->next;
+			}
+			JsJsonAppend(out, n, max, "}");
+			break;
+		default:
+			JsJsonAppend(out, n, max, "null");
+			break;
+	}
+}
+
+
+U0 JsNodeDetach(CZNode *c)
+{
+	CZNode *p = c->parent, *s;
+
+	if (!p)
+		return;
+	if (zh_node_budget < ZH_MAX_NODES)
+		zh_node_budget++;
+	if (p->first_child == c)
+	{
+		p->first_child = c->next;
+		if (p->last_child == c)
+			p->last_child = NULL;
+	}
+	else
+	{
+		s = p->first_child;
+		while (s && s->next != c)
+			s = s->next;
+		if (s)
+		{
+			s->next = c->next;
+			if (p->last_child == c)
+				p->last_child = s;
+		}
+	}
+	c->parent = NULL;
+	c->next = NULL;
+	zh_dom_gen++;
+}
+
+U0 JsStyleIngest(CJsInterp *ji, CZNode *node)
+{
+	U8	*buf;
+	I64	 len = 0;
+
+	if (!node || StrCompare(node->tag, "style"))
+		return;
+	buf = MAlloc(32768);
+	ZNodeTextCollect(node, buf, 32760, &len);
+	if (len)
+		ZCssParseRegion(buf, buf + len);
+	Free(buf);
+	ji->dom_dirty = TRUE;
+}
+
+U0 JsNodeAppend(CJsInterp *ji, CZNode *p, CZNode *c)
+{
+	CZNode *kid, *nxt;
+
+	if (!p || !c || p == c)
+		return;
+	if (!StrCompare(c->tag, "#fragment"))
+	{
+		kid = c->first_child;
+		while (kid)
+		{
+			nxt = kid->next;
+			JsNodeAppend(ji, p, kid);
+			kid = nxt;
+		}
+		c->first_child = NULL;
+		c->last_child = NULL;
+		return;
+	}
+	JsNodeDetach(c);
+	c->parent = p;
+	c->next = NULL;
+	if (p->last_child)
+		p->last_child->next = c;
+	else
+		p->first_child = c;
+	p->last_child = c;
+	zh_dom_gen++;
+	ji->dom_dirty = TRUE;
+	JsStyleIngest(ji, c);
+}
+
+CZNode *JsNodeClone(CJsInterp *ji, CZNode *src, Bool deep, I64 depth)
+{
+	CZNode *n, *kid, *ckid;
+	CZAttr *a;
+
+	if (!src || depth > 64)
+		return NULL;
+	n = ZNodeNew(src->type, NULL);
+	if (!n)
+		return NULL;
+	StrCopy(n->tag, src->tag);
+	if (src->text)
+		n->text = StrNew(src->text);
+	if (src->value)
+		n->value = StrNew(src->value);
+	n->checked = src->checked;
+	a = src->attrs;
+	while (a)
+	{
+		ZNodeAttrSet(n, a->name, a->val);
+		a = a->next;
+	}
+	if (!deep)
+		return n;
+
+	kid = src->first_child;
+	while (kid)
+	{
+		ckid = JsNodeClone(ji, kid, TRUE, depth + 1);
+		if (ckid)
+			JsNodeAppend(ji, n, ckid);
+		kid = kid->next;
+	}
+
+	return n;
+}
+
+U0 JsNodeInsertBefore(CJsInterp *ji, CZNode *p, CZNode *c, CZNode *ref)
+{
+	CZNode *prev, *kid, *nxt;
+
+	if (!p || !c || p == c)
+		return;
+	if (!ref || ref->parent != p)
+	{
+		JsNodeAppend(ji, p, c);
+		return;
+	}
+	if (!StrCompare(c->tag, "#fragment"))
+	{
+		kid = c->first_child;
+		while (kid)
+		{
+			nxt = kid->next;
+			JsNodeInsertBefore(ji, p, kid, ref);
+			kid = nxt;
+		}
+		c->first_child = NULL;
+		c->last_child = NULL;
+		return;
+	}
+	JsNodeDetach(c);
+	c->parent = p;
+	if (p->first_child == ref)
+	{
+		c->next = ref;
+		p->first_child = c;
+	}
+	else
+	{
+		prev = p->first_child;
+		while (prev && prev->next != ref)
+			prev = prev->next;
+		if (!prev)
+		{
+			JsNodeAppend(ji, p, c);
+			return;
+		}
+		c->next = ref;
+		prev->next = c;
+	}
+	if (!p->last_child)
+		p->last_child = c;
+	zh_dom_gen++;
+	ji->dom_dirty = TRUE;
+	JsStyleIngest(ji, c);
+}
+
+U0 JsQSelSplit(U8 *sel, U8 *tag, U8 *cls, U8 *id)
+{
+	I64 tn = 0, cn = 0, in = 0, mode = 0;
+
+	tag[0] = 0;
+	cls[0] = 0;
+	id[0] = 0;
+	while (*sel == ' ')
+		sel++;
+	while (*sel && *sel != ' ' && *sel != ',')
+	{
+		if (*sel == '.')
+		{ mode = 1; cn = 0; sel++; }
+		else if (*sel == '#')
+		{ mode = 2; in = 0; sel++; }
+		else
+		{
+			if (mode == 0 && tn < 15)
+				tag[tn++] = ZChLower(*sel);
+			else if (mode == 1 && cn < 31)
+				cls[cn++] = *sel;
+			else if (mode == 2 && in < 31)
+				id[in++] = *sel;
+			sel++;
+		}
+	}
+	tag[tn] = 0;
+	cls[cn] = 0;
+	id[in] = 0;
+}
+
+Bool JsClassHasTok(U8 *class_attr, U8 *tok)
+{
+	U8	*p = class_attr;
+	I64	 tl = StrLen(tok);
+
+	if (!p || !tl)
+		return FALSE;
+	while (*p)
+	{
+		while (*p == ' ')
+			p++;
+		if (!StrNICompare(p, tok, tl) && (p[tl] == 0 || p[tl] == ' '))
+			return TRUE;
+		while (*p && *p != ' ')
+			p++;
+	}
+	return FALSE;
+}
+
+Bool JsQSelMatch(CZNode *node, U8 *tag, U8 *cls, U8 *id)
+{
+	U8 *a;
+
+	if (node->type != ZH_ELEM)
+		return FALSE;
+	if (tag[0] && StrCompare(node->tag, tag))
+		return FALSE;
+	if (id[0])
+	{
+		a = ZNodeAttr(node, "id");
+		if (!a || StrCompare(a, id))
+			return FALSE;
+	}
+	if (cls[0])
+	{
+		a = ZNodeAttr(node, "class");
+		if (!JsClassHasTok(a, cls))
+			return FALSE;
+	}
+	return tag[0] || cls[0] || id[0];
+}
+
+CZNode *JsQSelWalk(CZNode *node, U8 *tag, U8 *cls, U8 *id,
+				   CJsInterp *ji, CJsVal *all)
+{
+	CZNode *child, *hit;
+
+	if (!node)
+		return NULL;
+	if (JsQSelMatch(node, tag, cls, id))
+	{
+		if (!all)
+			return node;
+		if (all->count < 400)
+			JsArrPush(ji, all, JsElemV(ji, node));
+	}
+	child = node->first_child;
+	while (child)
+	{
+		hit = JsQSelWalk(child, tag, cls, id, ji, all);
+		if (hit && !all)
+			return hit;
+		child = child->next;
+	}
+	return NULL;
+}
+
+U0 JsClassListMod(CJsInterp *ji, CZNode *node, U8 *tok, I64 mode)
+{
+	U8	 buf[512];
+	U8	*a = ZNodeAttr(node, "class"), *p;
+	I64	 n = 0, tl = StrLen(tok);
+	Bool has = JsClassHasTok(a, tok), keep;
+
+	if (mode == 2)
+	{
+		if (has)
+			mode = 1;
+		else
+			mode = 0;
+	}
+	if (mode == 0 && has)
+		return;
+	buf[0] = 0;
+	if (a)
+	{
+		p = a;
+		while (*p)
+		{
+			while (*p == ' ')
+				p++;
+			if (!*p)
+				break;
+			keep = TRUE;
+			if (mode == 1 && !StrNICompare(p, tok, tl) &&
+				(p[tl] == 0 || p[tl] == ' '))
+				keep = FALSE;
+			while (*p && *p != ' ')
+			{
+				if (keep && n < 508)
+					buf[n++] = *p;
+				p++;
+			}
+			if (keep && n < 508)
+				buf[n++] = ' ';
+		}
+	}
+	if (mode == 0)
+	{
+		p = tok;
+		while (*p && n < 508)
+			buf[n++] = *p++;
+	}
+	while (n && buf[n - 1] == ' ')
+		n--;
+	buf[n] = 0;
+	ZNodeAttrSet(node, "class", buf);
+	ji->dom_dirty = TRUE;
+	no_warn tl;
+}
+
+
+CJsVal *JsEventObj(CJsInterp *ji, CZNode *node, U8 *type)
+{
+	CJsVal *e = JsValNew(ji, JV_OBJ);
+
+	JsPropSet(ji, e, "type", JsStrV(ji, type));
+	if (node)
+	{
+		JsPropSet(ji, e, "target", JsElemV(ji, node));
+		JsPropSet(ji, e, "currentTarget", JsElemV(ji, node));
+	}
+	JsPropSet(ji, e, "preventDefault",  JsNativeV(ji, JSN_EVT_PREVENT));
+	JsPropSet(ji, e, "stopPropagation", JsNativeV(ji, JSN_EVT_STOPPROP));
+	JsPropSet(ji, e, "defaultPrevented", JsBoolV(ji, FALSE));
+	return e;
+}
+
+CJsTimer *JsTimerAdd(CJsInterp *ji, CJsVal *fn, CJsVal *this_val,
+					 F64 ms, Bool repeat, Bool is_xhr)
+{
+	CJsTimer *t = JsAlloc(ji, sizeof(CJsTimer))(CJsTimer *);
+
+	t->id = ++ji->next_timer_id;
+	t->fn = fn;
+	t->this_val = this_val;
+	if (ms < 0.0)
+		ms = 0.0;
+	t->due = tS + ms / 1000.0;
+	if (repeat)
+	{
+		t->interval = ms / 1000.0;
+		if (t->interval < 0.004)
+			t->interval = 0.004;
+	}
+	else
+		t->interval = 0.0;
+	t->is_xhr = is_xhr;
+	t->active = TRUE;
+	t->next = ji->timers;
+	ji->timers = t;
+	return t;
+}
+
+U0 JsTimerClear(CJsInterp *ji, I64 id)
+{
+	CJsTimer *t = ji->timers;
+
+	while (t)
+	{
+		if (t->id == id)
+		{
+			t->active = FALSE;
+			return;
+		}
+		t = t->next;
+	}
+}
+
+CJsListener *JsListenerAdd(CJsInterp *ji, CZNode *node, U8 *type,
+						   CJsVal *fn, Bool is_prop)
+{
+	CJsListener *l;
+
+	if (!node || !fn || (fn->type != JV_FUNC && fn->type != JV_NATIVE))
+		return NULL;
+
+	if (is_prop)
+	{
+		l = ji->listeners;
+		while (l)
+		{
+			if (l->active && l->is_prop && l->node == node &&
+				!StrCompare(l->type, type))
+				l->active = FALSE;
+			l = l->next;
+		}
+	}
+
+	l = JsAlloc(ji, sizeof(CJsListener))(CJsListener *);
+	l->node = node;
+	l->type = JsStrDup(ji, type);
+	l->fn = fn;
+	l->is_prop = is_prop;
+	l->active = TRUE;
+	l->next = ji->listeners;
+	ji->listeners = l;
+	return l;
+}
+
+U0 JsListenerRemove(CJsInterp *ji, CZNode *node, U8 *type, CJsVal *fn)
+{
+	CJsListener *l = ji->listeners;
+
+	while (l)
+	{
+		if (l->active && l->node == node && !StrCompare(l->type, type) &&
+			l->fn == fn)
+			l->active = FALSE;
+		l = l->next;
+	}
+}
+
+U0 JsXhrFire(CJsInterp *ji, CJsVal *xhr)
+{
+	CJsVal *cb, *st;
+	I64		status = 0;
+
+	if (!xhr || xhr->type != JV_OBJ)
+		return;
+	st = JsPropGet(xhr, "status");
+	if (st)
+		status = JsToNum(st);
+
+	cb = JsPropGet(xhr, "onreadystatechange");
+	if (cb && (cb->type == JV_FUNC || cb->type == JV_NATIVE))
+	{
+		JsBudgetReset(ji); ji->depth = 0; ji->flow = JF_NORMAL; ji->env = ji->genv;
+		JsCall(ji, cb, xhr, NULL, 0);
+	}
+
+	if (status > 0)
+		cb = JsPropGet(xhr, "onload");
+	else
+		cb = JsPropGet(xhr, "onerror");
+	if (cb && (cb->type == JV_FUNC || cb->type == JV_NATIVE))
+	{
+		JsBudgetReset(ji); ji->depth = 0; ji->flow = JF_NORMAL; ji->env = ji->genv;
+		JsCall(ji, cb, xhr, NULL, 0);
+	}
+
+	cb = JsPropGet(xhr, "onloadend");
+	if (cb && (cb->type == JV_FUNC || cb->type == JV_NATIVE))
+	{
+		JsBudgetReset(ji); ji->depth = 0; ji->flow = JF_NORMAL; ji->env = ji->genv;
+		JsCall(ji, cb, xhr, NULL, 0);
+	}
+
+	if (ji->has_err)
+	{
+		NetLog("%s", ji->err);
+		ji->has_err = FALSE;
+	}
+}
+
+U0 JsXhrSend(CJsInterp *ji, CJsVal *xhr, CJsVal *body_val)
+{
+	U8			  *method = NULL, *url, *abs = NULL, *body = NULL;
+	CJsVal		  *pm, *pu, *pa;
+	CHttpUrl	   base;
+	CHttpResponse *r;
+	Bool		   is_async = TRUE;
+
+	if (!xhr || xhr->type != JV_OBJ)
+		return;
+	pu = JsPropGet(xhr, "_url");
+	if (!pu)
+	{
+		JsPropSet(ji, xhr, "status", JsNumV(ji, 0));
+		JsPropSet(ji, xhr, "readyState", JsNumV(ji, 4));
+		JsXhrFire(ji, xhr);
+		return;
+	}
+	url = JsToStr(ji, pu);
+	pm = JsPropGet(xhr, "_method");
+	if (pm)
+		method = JsToStr(ji, pm);
+	pa = JsPropGet(xhr, "_async");
+	if (pa && !JsToBool(pa))
+		is_async = FALSE;
+
+	if (HttpUrlParse(ji->url, &base) >= 0)
+		abs = HttpUrlResolve(&base, url);
+	if (!abs)
+		abs = StrNew(url);
+
+	if (body_val && body_val->type != JV_UNDEF && body_val->type != JV_NULL)
+		body = JsToStr(ji, body_val);
+
+	if (method && !StrICompare(method, "POST") && body)
+		r = HttpPost(abs, body);
+	else
+		r = HttpGet(abs);
+	Free(abs);
+
+	if (r)
+	{
+		JsPropSet(ji, xhr, "status", JsNumV(ji, r->status));
+		if (200 <= r->status < 300)
+			JsPropSet(ji, xhr, "statusText", JsStrV(ji, "OK"));
+		JsPropSet(ji, xhr, "responseText", JsStrV(ji, r->body));
+		JsPropSet(ji, xhr, "response", JsStrV(ji, r->body));
+		if (r->headers)
+			JsPropSet(ji, xhr, "_respHeaders", JsStrV(ji, r->headers));
+		JsPropSet(ji, xhr, "readyState", JsNumV(ji, 4));
+		HttpResponseFree(r);
+	}
+	else
+	{
+		JsPropSet(ji, xhr, "status", JsNumV(ji, 0));
+		JsPropSet(ji, xhr, "readyState", JsNumV(ji, 4));
+	}
+
+	if (is_async)
+		JsTimerAdd(ji, NULL, xhr, 0.0, FALSE, TRUE);
+	else
+		JsXhrFire(ji, xhr);
+}
+
+Bool JsDispatchEvent(CJsInterp *ji, CZNode *node, U8 *type, Bool bubbles=TRUE)
+{
+	CJsListener *l;
+	CJsVal		*evt, *a1, *stopped;
+	CZNode		*cur = node;
+	I64			 depth = 0;
+	Bool		 ran = FALSE;
+
+	if (!ji || !node || !type)
+		return FALSE;
+
+	evt = JsEventObj(ji, node, type);
+	ji->evt_prevented = FALSE;
+	while (cur && depth < 64)
+	{
+	JsPropSet(ji, evt, "currentTarget", JsElemV(ji, cur));
+	l = ji->listeners;
+	while (l)
+	{
+		if (l->active && l->node == cur && !StrCompare(l->type, type))
+		{
+			ji->has_err = FALSE;
+			JsBudgetReset(ji); ji->depth = 0; ji->flow = JF_NORMAL; ji->env = ji->genv;
+			a1 = evt;
+			JsCall(ji, l->fn, JsElemV(ji, cur), &a1, 1);
+			ran = TRUE;
+			if (ji->has_err)
+			{
+				NetLog("%s", ji->err);
+				ji->has_err = FALSE;
+			}
+		}
+		l = l->next;
+	}
+	stopped = JsPropGet(evt, "_stopped");
+	if (stopped && JsToBool(stopped))
+		break;
+	if (!bubbles)
+		break;
+	cur = cur->parent;
+	depth++;
+	}
+	if (ran)
+	{
+		JsMicroDrain(ji);
+		JsFlushWrites(ji);
+	}
+	return ran;
+}
+
+U0 JsEventLoopPump(CJsInterp *ji)
+{
+	CJsTimer *t;
+	I64		  fired = 0;
+	F64		  now;
+
+	if (!ji)
+		return;
+	JsMicroDrain(ji);
+	now = tS;
+	t = ji->timers;
+	while (t && fired < 256)
+	{
+		if (t->active && now >= t->due)
+		{
+			ji->has_err = FALSE;
+			JsBudgetReset(ji); ji->depth = 0; ji->flow = JF_NORMAL; ji->env = ji->genv;
+			if (t->is_xhr)
+			{
+				t->active = FALSE;
+				JsXhrFire(ji, t->this_val);
+			}
+			else
+			{
+				if (t->interval > 0.0)
+					t->due = now + t->interval;
+				else
+					t->active = FALSE;
+				if (t->fn)
+					JsCall(ji, t->fn, t->this_val, NULL, 0);
+			}
+			fired++;
+			if (ji->has_err)
+			{
+				NetLog("%s", ji->err);
+				ji->has_err = FALSE;
+			}
+		}
+		t = t->next;
+	}
+	if (fired)
+		JsFlushWrites(ji);
+	JsMicroDrain(ji);
+}
+
+#define JS_LS_MAX	48
+U8	js_ls_keys[JS_LS_MAX][64];
+U8	js_ls_vals[JS_LS_MAX][512];
+I64	js_ls_count = 0;
+I64	js_sym_n = 0;
+
+U0 JsAbsUrl(U8 *base, U8 *src, U8 *out)
+{
+	U8	*p, *lastslash = NULL;
+	I64	 n;
+
+	if (!src)
+	{
+		out[0] = 0;
+		return;
+	}
+	if (StrFind("://", src) || !base || !StrFind("://", base))
+	{
+		StrCopy(out, src);
+		return;
+	}
+	if (src[0] == '/')
+	{
+		p = StrFind("://", base) + 3;
+		while (*p && *p != '/')
+			p++;
+		n = p - base;
+		MemCopy(out, base, n);
+		StrCopy(out + n, src);
+		return;
+	}
+	StrCopy(out, base);
+	p = StrFind("://", out) + 3;
+	while (*p)
+	{
+		if (*p == '/')
+			lastslash = p;
+		p++;
+	}
+	if (lastslash)
+		StrCopy(lastslash + 1, src);
+	else
+	{
+		n = StrLen(out);
+		out[n] = '/';
+		StrCopy(out + n + 1, src);
+	}
+}
+
+U0 JsElemCollect(CJsInterp *ji, CZNode *root, I64 mode, U8 *key, CJsVal *arr)
+{
+	CZNode *child;
+	U8	   *a;
+	Bool	hit;
+
+	if (!root)
+		return;
+	child = root->first_child;
+	while (child)
+	{
+		if (child->type == ZH_ELEM && arr->count < 400)
+		{
+			hit = FALSE;
+			if (mode == 0)
+				hit = !StrCompare(key, "*") || !StrICompare(child->tag, key);
+			else if (mode == 1)
+				hit = JsClassHasTok(ZNodeAttr(child, "class"), key);
+			else
+			{
+				a	= ZNodeAttr(child, "name");
+				hit = a && !StrCompare(a, key);
+			}
+			if (hit)
+				JsArrPush(ji, arr, JsElemV(ji, child));
+		}
+		JsElemCollect(ji, child, mode, key, arr);
+		child = child->next;
+	}
+}
+
+Bool JsNodeContains(CZNode *root, CZNode *target)
+{
+	CZNode *child;
+
+	if (!root || !target)
+		return FALSE;
+	if (root == target)
+		return TRUE;
+	child = root->first_child;
+	while (child)
+	{
+		if (JsNodeContains(child, target))
+			return TRUE;
+		child = child->next;
+	}
+	return FALSE;
+}
+
+U0 JsThrowText(CJsInterp *ji, CJsVal *exc, U8 *out, I64 max)
+{
+	CJsVal *nm, *msg;
+
+	out[0] = 0;
+	if (!exc)
+	{
+		JsPathCat(out, max, "uncaught exception");
+		return;
+	}
+	if (exc->type == JV_OBJ)
+	{
+		nm	= JsPropGet(exc, "name");
+		msg = JsPropGet(exc, "message");
+		if (nm || msg)
+		{
+			if (nm)
+				JsPathCat(out, max, JsToStr(ji, nm));
+			if (nm && msg)
+				JsPathCat(out, max, ": ");
+			if (msg)
+				JsPathCat(out, max, JsToStr(ji, msg));
+			return;
+		}
+	}
+	JsPathCat(out, max, JsToStr(ji, exc));
+}
+
+CJsVal *JsEvalString(CJsInterp *ji, U8 *src)
+{
+	CJsTok	*save_toks;
+	U8		*save_src;
+	I64		 save_tc, save_pos, save_flow, before;
+	Bool	 save_perr;
+	CJsEnv	*save_env;
+	CJsNode *stmt, *head, *tail;
+	CJsVal	*val, *cur;
+
+	if (!src || !*src || ji->has_err)
+		return JsUndefV(ji);
+	save_toks = ji->toks;
+	save_src  = ji->src_text;
+	save_tc	  = ji->tok_count;
+	save_pos  = ji->pos;
+	save_perr = ji->parse_err;
+	save_env  = ji->env;
+	save_flow = ji->flow;
+
+	ji->toks = NULL;
+	ji->parse_err = FALSE;
+	ji->flow = JF_NORMAL;
+	val = JsUndefV(ji);
+	if (JsLex(ji, src))
+	{
+		head = NULL;
+		tail = NULL;
+		while (JsTok(ji)->type != JT_EOF)
+		{
+			before = ji->pos;
+			stmt = JsParseStmt(ji);
+			if (ji->parse_err)
+				JsParseResync(ji);
+			if (stmt)
+			{
+				if (tail)
+					tail->next = stmt;
+				else
+					head = stmt;
+				tail = stmt;
+			}
+			if (ji->pos == before)
+				ji->pos++;
+		}
+		ji->env = ji->genv;
+		JsHoistList(ji, head, ji->genv);
+		stmt = head;
+		while (stmt && !ji->has_err && ji->flow != JF_THROW)
+		{
+			cur = JsEval(ji, stmt);
+			if (cur)
+				val = cur;
+			stmt = stmt->next;
+		}
+	}
+	if (ji->toks)
+		Free(ji->toks);
+	ji->toks	  = save_toks;
+	ji->src_text  = save_src;
+	ji->tok_count = save_tc;
+	ji->pos		  = save_pos;
+	ji->parse_err = save_perr;
+	ji->env		  = save_env;
+	if (ji->flow != JF_THROW)
+		ji->flow = save_flow;
+
+	return val;
+}
+
+#include "JSNative"
+
+CJsVal *JsCall(CJsInterp *ji, CJsVal *fn, CJsVal *this_val,
+			   CJsVal **args, I64 argc)
+{
+	CJsEnv	*saved_env, *call_env;
+	CJsNode *func, *param;
+	CJsVal	*result, *rest;
+	I64		 i, k;
+
+	if (ji->has_err)
+		return JsUndefV(ji);
+	if (ji->depth >= JS_MAX_DEPTH)
+	{
+		JsErr(ji, "call depth exceeded");
+		return JsUndefV(ji);
+	}
+	ji->depth++;
+
+	if (fn->type == JV_NATIVE)
+	{
+		result = JsCallNative(ji, fn, fn->native_id, this_val, args, argc);
+		ji->depth--;
+		return result;
+	}
+	if (fn->type != JV_FUNC)
+	{
+		JsErr(ji, "not a function");
+		ji->depth--;
+		return JsUndefV(ji);
+	}
+
+	func = fn->func(CJsNode *);
+	call_env = JsAlloc(ji, sizeof(CJsEnv))(CJsEnv *);
+	if (fn->fenv)
+		call_env->parent = fn->fenv(CJsEnv *);
+	else
+		call_env->parent = ji->genv;
+
+	saved_env = ji->env;
+	ji->env = call_env;
+	if (this_val)
+		JsEnvDeclare(ji, call_env, "this", this_val);
+	param = func->a;
+	i = 0;
+	while (param)
+	{
+		if (param->op == 1)
+		{
+			rest = JsArrV(ji);
+			k = i;
+			while (k < argc)
+			{
+				JsArrPush(ji, rest, args[k]);
+				k++;
+			}
+			JsEnvDeclare(ji, call_env, param->str, rest);
+		}
+		else if (param->op == 2)
+		{
+			rest = JsUndefV(ji);
+			if (i < argc && args[i]->type != JV_UNDEF)
+				rest = args[i];
+			else if (param->a)
+				rest = JsEval(ji, param->a);
+			JsPatBind(ji, param->b, rest, TRUE);
+		}
+		else if (i < argc && args[i]->type != JV_UNDEF)
+			JsEnvDeclare(ji, call_env, param->str, args[i]);
+		else if (param->a)
+			JsEnvDeclare(ji, call_env, param->str, JsEval(ji, param->a));
+		else
+			JsEnvDeclare(ji, call_env, param->str, JsUndefV(ji));
+		param = param->next;
+		i++;
+	}
+	if (func->b && func->b->type == JN_BLOCK && func->op != 2)
+	{
+		if (JsHoistList(ji, func->b->a, call_env))
+			func->op = 1;
+		else
+			func->op = 2;
+	}
+	ji->ret_val = NULL;
+
+	JsEval(ji, func->b);
+
+	if (ji->flow == JF_RETURN && ji->ret_val)
+		result = ji->ret_val;
+	else
+		result = JsUndefV(ji);
+	if (ji->flow != JF_THROW)
+		ji->flow = JF_NORMAL;
+	ji->env = saved_env;
+	ji->depth--;
+
+	return result;
+}
+
+
+CJsVal *JsGlobalNative(CJsInterp *ji, U8 *name, I64 id)
+{
+	CJsVal *fn = JsNativeV(ji, id);
+
+	JsPropSet(ji, fn, "_name", JsStrV(ji, name));
+	JsEnvDeclare(ji, ji->genv, name, fn);
+
+	return fn;
+}
+
+CJsInterp *JsInterpNew(CZNode *dom_root, U8 *url)
+{
+	CJsInterp *ji = CAlloc(sizeof(CJsInterp));
+	CJsVal	  *math, *console_obj, *date, *uad, *brand, *scr, *subtle;
+
+	ji->dom_root = dom_root;
+	ji->genv = JsAlloc(ji, sizeof(CJsEnv))(CJsEnv *);
+	ji->env	 = ji->genv;
+	ji->url	 = JsStrDup(ji, url);
+	ji->write_buf = JsAlloc(ji, JS_WRITE_BUF);
+
+	ji->doc_obj = JsValNew(ji, JV_OBJ);
+	ji->doc_obj->native_id = JSO_DOCUMENT;
+	ji->loc_obj = JsValNew(ji, JV_OBJ);
+	ji->loc_obj->native_id = JSO_LOCATION;
+	ji->win_obj = JsValNew(ji, JV_OBJ);
+	ji->win_obj->native_id = JSO_WINDOW;
+
+	JsEnvDeclare(ji, ji->genv, "document", ji->doc_obj);
+	JsEnvDeclare(ji, ji->genv, "location", ji->loc_obj);
+	JsEnvDeclare(ji, ji->genv, "window",   ji->win_obj);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "floor",  JsNativeV(ji, JSN_MATH_FLOOR));
+	JsPropSet(ji, math, "ceil",	  JsNativeV(ji, JSN_MATH_CEIL));
+	JsPropSet(ji, math, "round",  JsNativeV(ji, JSN_MATH_ROUND));
+	JsPropSet(ji, math, "abs",	  JsNativeV(ji, JSN_MATH_ABS));
+	JsPropSet(ji, math, "sqrt",	  JsNativeV(ji, JSN_MATH_SQRT));
+	JsPropSet(ji, math, "pow",	  JsNativeV(ji, JSN_MATH_POW));
+	JsPropSet(ji, math, "random", JsNativeV(ji, JSN_MATH_RANDOM));
+	JsPropSet(ji, math, "max",	  JsNativeV(ji, JSN_MATH_MAX));
+	JsPropSet(ji, math, "min",	  JsNativeV(ji, JSN_MATH_MIN));
+	JsPropSet(ji, math, "trunc",  JsNativeM(ji, JSN_MATH_1ARG, 1));
+	JsPropSet(ji, math, "sign",	  JsNativeM(ji, JSN_MATH_1ARG, 2));
+	JsPropSet(ji, math, "log",	  JsNativeM(ji, JSN_MATH_1ARG, 3));
+	JsPropSet(ji, math, "log2",	  JsNativeM(ji, JSN_MATH_1ARG, 4));
+	JsPropSet(ji, math, "log10",  JsNativeM(ji, JSN_MATH_1ARG, 5));
+	JsPropSet(ji, math, "exp",	  JsNativeM(ji, JSN_MATH_1ARG, 6));
+	JsPropSet(ji, math, "sin",	  JsNativeM(ji, JSN_MATH_1ARG, 7));
+	JsPropSet(ji, math, "cos",	  JsNativeM(ji, JSN_MATH_1ARG, 8));
+	JsPropSet(ji, math, "tan",	  JsNativeM(ji, JSN_MATH_1ARG, 9));
+	JsPropSet(ji, math, "asin",	  JsNativeM(ji, JSN_MATH_1ARG, 10));
+	JsPropSet(ji, math, "acos",	  JsNativeM(ji, JSN_MATH_1ARG, 11));
+	JsPropSet(ji, math, "atan",	  JsNativeM(ji, JSN_MATH_1ARG, 12));
+	JsPropSet(ji, math, "cbrt",	  JsNativeM(ji, JSN_MATH_1ARG, 13));
+	JsPropSet(ji, math, "atan2",  JsNativeV(ji, JSN_MATH_ATAN2));
+	JsPropSet(ji, math, "hypot",  JsNativeV(ji, JSN_MATH_HYPOT));
+	JsPropSet(ji, math, "PI",	  JsNumV(ji, pi));
+	JsPropSet(ji, math, "E",	  JsNumV(ji, Exp(1.0)));
+	JsPropSet(ji, math, "LN2",	  JsNumV(ji, Ln(2.0)));
+	JsPropSet(ji, math, "LN10",	  JsNumV(ji, Ln(10.0)));
+	JsPropSet(ji, math, "LOG2E",  JsNumV(ji, 1.0 / Ln(2.0)));
+	JsPropSet(ji, math, "LOG10E", JsNumV(ji, 1.0 / Ln(10.0)));
+	JsPropSet(ji, math, "SQRT2",  JsNumV(ji, Sqrt(2.0)));
+	JsPropSet(ji, math, "SQRT1_2", JsNumV(ji, Sqrt(0.5)));
+	JsEnvDeclare(ji, ji->genv, "Math", math);
+
+	console_obj = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, console_obj, "log",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "info",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "warn",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "error", JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "debug",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "trace",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "dir",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "table",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "group",	JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "groupCollapsed", JsNativeV(ji, JSN_CONSOLE_LOG));
+	JsPropSet(ji, console_obj, "groupEnd", JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsPropSet(ji, console_obj, "time",	JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsPropSet(ji, console_obj, "timeEnd", JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsPropSet(ji, console_obj, "count",	JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsPropSet(ji, console_obj, "assert",	JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsPropSet(ji, console_obj, "clear",	JsNativeV(ji, JSN_CONSOLE_NOOP));
+	JsEnvDeclare(ji, ji->genv, "console", console_obj);
+
+	JsProtoAttach(ji, JsGlobalNative(ji, "Date", JSN_DATE_CTOR), JV_OBJ);
+	date = NULL;
+
+	JsGlobalNative(ji, "alert",		 JSN_ALERT);
+	JsGlobalNative(ji, "parseInt",	 JSN_PARSEINT);
+	JsGlobalNative(ji, "parseFloat", JSN_PARSEFLOAT);
+	JsGlobalNative(ji, "isNaN",		 JSN_ISNAN);
+	JsGlobalNative(ji, "isFinite",	 JSN_NUM_ISFINITE);
+	JsGlobalNative(ji, "btoa",		 JSN_BTOA);
+	JsGlobalNative(ji, "atob",		 JSN_ATOB);
+	JsEnvDeclare(ji, ji->genv, "encodeURIComponent",
+				 JsNativeM(ji, JSN_URI_ENCODE, 1));
+	JsEnvDeclare(ji, ji->genv, "encodeURI", JsNativeM(ji, JSN_URI_ENCODE, 0));
+	JsEnvDeclare(ji, ji->genv, "decodeURIComponent",
+				 JsNativeM(ji, JSN_URI_DECODE, 1));
+	JsEnvDeclare(ji, ji->genv, "decodeURI", JsNativeM(ji, JSN_URI_DECODE, 0));
+	JsEnvDeclare(ji, ji->genv, "escape",   JsNativeM(ji, JSN_URI_ENCODE, 1));
+	JsEnvDeclare(ji, ji->genv, "unescape", JsNativeM(ji, JSN_URI_DECODE, 1));
+
+	scr = JsGlobalNative(ji, "String", JSN_STRING);
+	JsProtoAttach(ji, scr, JV_STR);
+	JsPropSet(ji, scr, "fromCharCode",  JsNativeV(ji, JSN_STR_FROMCHAR));
+	JsPropSet(ji, scr, "fromCodePoint", JsNativeV(ji, JSN_STR_FROMCHAR));
+
+	scr = JsGlobalNative(ji, "Number", JSN_NUMBER);
+	JsProtoAttach(ji, scr, JV_NUM);
+	JsPropSet(ji, scr, "isInteger",		JsNativeM(ji, JSN_NUM_ISINT, 0));
+	JsPropSet(ji, scr, "isSafeInteger",	JsNativeM(ji, JSN_NUM_ISINT, 1));
+	JsPropSet(ji, scr, "isFinite",		JsNativeM(ji, JSN_NUM_ISFINITE, 1));
+	JsPropSet(ji, scr, "isNaN",			JsNativeV(ji, JSN_NUM_ISNAN));
+	JsPropSet(ji, scr, "parseFloat",	JsNativeV(ji, JSN_PARSEFLOAT));
+	JsPropSet(ji, scr, "parseInt",		JsNativeV(ji, JSN_PARSEINT));
+	JsPropSet(ji, scr, "MAX_SAFE_INTEGER", JsNumV(ji, JsNumConst(0x433FFFFFFFFFFFFF)));
+	JsPropSet(ji, scr, "MIN_SAFE_INTEGER", JsNumV(ji, JsNumConst(0xC33FFFFFFFFFFFFF)));
+	JsPropSet(ji, scr, "MAX_VALUE",  JsNumV(ji, JsNumConst(0x7FEFFFFFFFFFFFFF)));
+	JsPropSet(ji, scr, "MIN_VALUE",  JsNumV(ji, JsNumConst(0x0000000000000001)));
+	JsPropSet(ji, scr, "EPSILON",	 JsNumV(ji, JsNumConst(0x3CB0000000000000)));
+	JsPropSet(ji, scr, "POSITIVE_INFINITY", JsNumV(ji, JsNumInf));
+	JsPropSet(ji, scr, "NEGATIVE_INFINITY", JsNumV(ji, JsNumNInf));
+	JsPropSet(ji, scr, "NaN",		 JsNumV(ji, JsNumNaN));
+
+	JsEnvDeclare(ji, ji->genv, "NaN",
+				 JsNumV(ji, JsNumConst(0x7FF8000000000000)));
+	JsEnvDeclare(ji, ji->genv, "Infinity",
+				 JsNumV(ji, JsNumConst(0x7FF0000000000000)));
+	JsGlobalNative(ji, "setTimeout",	JSN_SETTIMEOUT);
+	JsGlobalNative(ji, "setInterval",	JSN_SETINTERVAL);
+	JsGlobalNative(ji, "clearTimeout",	JSN_CLEARTIMER);
+	JsGlobalNative(ji, "clearInterval",	JSN_CLEARTIMER);
+	JsGlobalNative(ji, "XMLHttpRequest",JSN_XHR_NEW);
+	JsGlobalNative(ji, "Promise",		JSN_PROMISE_CTOR);
+	JsGlobalNative(ji, "fetch",			JSN_FETCH);
+	JsProtoAttach(ji, JsGlobalNative(ji, "Map", JSN_MAP_CTOR), JV_OBJ);
+	JsGlobalNative(ji, "WeakMap",		JSN_MAP_CTOR);
+	JsProtoAttach(ji, JsGlobalNative(ji, "Set", JSN_SET_CTOR), JV_OBJ);
+	JsGlobalNative(ji, "WeakSet",		JSN_SET_CTOR);
+	JsProtoAttach(ji, JsGlobalNative(ji, "Error", JSN_ERROR_CTOR), JV_OBJ);
+	JsGlobalNative(ji, "TypeError",		JSN_ERROR_CTOR);
+	JsGlobalNative(ji, "RangeError",	JSN_ERROR_CTOR);
+	JsGlobalNative(ji, "SyntaxError",	JSN_ERROR_CTOR);
+	JsProtoAttach(ji, JsGlobalNative(ji, "RegExp", JSN_REGEXP_CTOR), JV_OBJ);
+	JsGlobalNative(ji, "MutationObserver",		JSN_OBSERVER_CTOR);
+	JsGlobalNative(ji, "IntersectionObserver",	JSN_OBSERVER_CTOR);
+	JsGlobalNative(ji, "ResizeObserver",		JSN_OBSERVER_CTOR);
+	JsGlobalNative(ji, "PerformanceObserver",	JSN_OBSERVER_CTOR);
+	JsGlobalNative(ji, "Symbol",				JSN_SYMBOL);
+	JsGlobalNative(ji, "matchMedia",			JSN_MATCHMEDIA);
+	JsGlobalNative(ji, "getComputedStyle",		JSN_GETCOMPUTED);
+	JsGlobalNative(ji, "AbortController",		JSN_ABORT_CTOR);
+	JsGlobalNative(ji, "Event",					JSN_EVENT_CTOR);
+	JsGlobalNative(ji, "CustomEvent",			JSN_EVENT_CTOR);
+	JsGlobalNative(ji, "requestAnimationFrame",	JSN_SETTIMEOUT);
+	JsGlobalNative(ji, "cancelAnimationFrame",	JSN_CLEARTIMER);
+	JsGlobalNative(ji, "queueMicrotask",		JSN_SETTIMEOUT);
+	JsGlobalNative(ji, "Audio",					JSN_AUDIO_CTOR);
+	JsGlobalNative(ji, "Image",					JSN_IMAGE_CTOR);
+	JsGlobalNative(ji, "structuredClone",		JSN_STRUCT_CLONE);
+	JsGlobalNative(ji, "URLSearchParams",		JSN_USP_CTOR);
+
+	JsGlobalNative(ji, "TextEncoder",			JSN_TEXTENC_CTOR);
+	JsGlobalNative(ji, "TextDecoder",			JSN_TEXTDEC_CTOR);
+
+	JsGlobalNative(ji, "ArrayBuffer",			JSN_ARRAYBUFFER_CTOR);
+	JsGlobalNative(ji, "Uint8Array",			JSN_U8ARR_CTOR);
+	JsGlobalNative(ji, "Int8Array",				JSN_I8ARR_CTOR);
+	JsGlobalNative(ji, "Uint8ClampedArray",		JSN_U8C_CTOR);
+	JsGlobalNative(ji, "Uint16Array",			JSN_U16ARR_CTOR);
+	JsGlobalNative(ji, "Int16Array",			JSN_I16ARR_CTOR);
+	JsGlobalNative(ji, "Uint32Array",			JSN_U32ARR_CTOR);
+	JsGlobalNative(ji, "Int32Array",			JSN_I32ARR_CTOR);
+	JsGlobalNative(ji, "Float32Array",			JSN_F32ARR_CTOR);
+	JsGlobalNative(ji, "Float64Array",			JSN_F64ARR_CTOR);
+	JsGlobalNative(ji, "DataView",				JSN_DATAVIEW_CTOR);
+	JsGlobalNative(ji, "Proxy",					JSN_PROXY_CTOR);
+	JsGlobalNative(ji, "FormData",				JSN_FORMDATA_CTOR);
+	JsGlobalNative(ji, "Blob",					JSN_BLOB_CTOR);
+	JsGlobalNative(ji, "Headers",				JSN_HEADERS_CTOR);
+	JsGlobalNative(ji, "Request",				JSN_REQUEST_CTOR);
+	JsGlobalNative(ji, "Response",				JSN_RESPONSE_CTOR);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "getRandomValues", JsNativeV(ji, JSN_CRYPTO_RANDVALS));
+	JsPropSet(ji, math, "randomUUID",	   JsNativeV(ji, JSN_CRYPTO_UUID));
+	subtle = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, subtle, "digest", JsNativeV(ji, JSN_SUBTLE_DIGEST));
+	JsPropSet(ji, math, "subtle", subtle);
+	JsEnvDeclare(ji, ji->genv, "crypto", math);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "now",		  JsNativeV(ji, JSN_DATE_NOW));
+	JsPropSet(ji, math, "timeOrigin", JsNumV(ji, 0));
+	JsPropSet(ji, math, "mark",		  JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "measure",	  JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "getEntriesByType", JsNativeV(ji, JSN_NOOP_ARR));
+	JsPropSet(ji, math, "getEntriesByName", JsNativeV(ji, JSN_NOOP_ARR));
+	JsPropSet(ji, math, "getEntries",	  JsNativeV(ji, JSN_NOOP_ARR));
+	JsPropSet(ji, math, "clearMarks",	  JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "clearMeasures",  JsNativeV(ji, JSN_NOOP_UNDEF));
+	subtle = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, subtle, "navigationStart",	JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "unloadEventStart",	JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "unloadEventEnd",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "redirectStart",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "redirectEnd",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "fetchStart",			JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domainLookupStart",	JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domainLookupEnd",	JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "connectStart",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "connectEnd",			JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "secureConnectionStart", JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "requestStart",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "responseStart",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "responseEnd",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domLoading",			JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domInteractive",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domContentLoadedEventStart", JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domContentLoadedEventEnd",	JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "domComplete",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "loadEventStart",		JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "loadEventEnd",		JsNumV(ji, 0));
+	JsPropSet(ji, math, "timing", subtle);
+	subtle = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, subtle, "type",		   JsNumV(ji, 0));
+	JsPropSet(ji, subtle, "redirectCount", JsNumV(ji, 0));
+	JsPropSet(ji, math, "navigation", subtle);
+	JsEnvDeclare(ji, ji->genv, "performance", math);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "get",		   JsNativeV(ji, JSN_REFLECT_GET));
+	JsPropSet(ji, math, "set",		   JsNativeV(ji, JSN_REFLECT_SET));
+	JsPropSet(ji, math, "has",		   JsNativeV(ji, JSN_REFLECT_HAS));
+	JsPropSet(ji, math, "deleteProperty", JsNativeV(ji, JSN_REFLECT_DELETE));
+	JsPropSet(ji, math, "ownKeys",	   JsNativeV(ji, JSN_OBJ_KEYS));
+	JsPropSet(ji, math, "getPrototypeOf", JsNativeV(ji, JSN_OBJ_GETPROTO));
+	JsPropSet(ji, math, "setPrototypeOf", JsNativeV(ji, JSN_OBJ_SETPROTO));
+	JsPropSet(ji, math, "defineProperty", JsNativeV(ji, JSN_OBJ_DEFINEPROP));
+	JsPropSet(ji, math, "apply",	   JsNativeV(ji, JSN_REFLECT_APPLY));
+	JsPropSet(ji, math, "construct",   JsNativeV(ji, JSN_REFLECT_CONSTRUCT));
+	JsEnvDeclare(ji, ji->genv, "Reflect", math);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "pushState",	JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "replaceState",	JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "back",			JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "forward",		JsNativeV(ji, JSN_NOOP_UNDEF));
+	JsPropSet(ji, math, "length",		JsNumV(ji, 1));
+	JsEnvDeclare(ji, ji->genv, "history", math);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "userAgent", JsStrV(ji, "Mozilla/5.0 (X11; Linux x86_64) "
+			  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"));
+	JsPropSet(ji, math, "language",  JsStrV(ji, "en-US"));
+	JsPropSet(ji, math, "platform",  JsStrV(ji, "Linux x86_64"));
+	JsPropSet(ji, math, "onLine",	 JsBoolV(ji, TRUE));
+	JsPropSet(ji, math, "appName",		JsStrV(ji, "Netscape"));
+	JsPropSet(ji, math, "appVersion",	JsStrV(ji, "5.0 (X11)"));
+	JsPropSet(ji, math, "vendor",		JsStrV(ji, "Google Inc."));
+	JsPropSet(ji, math, "product",		JsStrV(ji, "Gecko"));
+	JsPropSet(ji, math, "cookieEnabled", JsBoolV(ji, TRUE));
+	JsPropSet(ji, math, "doNotTrack",	JsNullV(ji));
+	JsPropSet(ji, math, "maxTouchPoints", JsNumV(ji, 0));
+	JsPropSet(ji, math, "hardwareConcurrency", JsNumV(ji, 4));
+	JsPropSet(ji, math, "webdriver",	JsBoolV(ji, FALSE));
+	JsPropSet(ji, math, "deviceMemory",	JsNumV(ji, 8));
+	JsPropSet(ji, math, "pdfViewerEnabled", JsBoolV(ji, TRUE));
+	JsPropSet(ji, math, "javaEnabled",	JsNativeV(ji, JSN_NOOP_FALSE));
+	JsPropSet(ji, math, "sendBeacon",	JsNativeV(ji, JSN_NOOP_TRUE));
+	date = JsArrV(ji);
+	JsArrPush(ji, date, JsStrV(ji, "en-US"));
+	JsArrPush(ji, date, JsStrV(ji, "en"));
+	JsPropSet(ji, math, "languages", date);
+	uad	  = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, uad, "mobile",   JsBoolV(ji, FALSE));
+	JsPropSet(ji, uad, "platform", JsStrV(ji, "Linux"));
+	date = JsArrV(ji);
+	brand = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, brand, "brand", JsStrV(ji, "Chromium"));
+	JsPropSet(ji, brand, "version", JsStrV(ji, "126"));
+	JsArrPush(ji, date, brand);
+	brand = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, brand, "brand", JsStrV(ji, "Google Chrome"));
+	JsPropSet(ji, brand, "version", JsStrV(ji, "126"));
+	JsArrPush(ji, date, brand);
+	JsPropSet(ji, uad, "brands", date);
+	JsPropSet(ji, uad, "getHighEntropyValues", JsNativeV(ji, JSN_UAD_ENTROPY));
+	JsPropSet(ji, math, "userAgentData", uad);
+	JsEnvDeclare(ji, ji->genv, "navigator", math);
+
+	scr = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, scr, "width",		 JsNumV(ji, 1920));
+	JsPropSet(ji, scr, "height",	 JsNumV(ji, 1080));
+	JsPropSet(ji, scr, "availWidth",  JsNumV(ji, 1920));
+	JsPropSet(ji, scr, "availHeight", JsNumV(ji, 1040));
+	JsPropSet(ji, scr, "colorDepth",  JsNumV(ji, 24));
+	JsPropSet(ji, scr, "pixelDepth",  JsNumV(ji, 24));
+	JsEnvDeclare(ji, ji->genv, "screen", scr);
+	JsEnvDeclare(ji, ji->genv, "devicePixelRatio", JsNumV(ji, 1));
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "parse",	 JsNativeV(ji, JSN_JSON_PARSE));
+	JsPropSet(ji, math, "stringify", JsNativeV(ji, JSN_JSON_STR));
+	JsEnvDeclare(ji, ji->genv, "JSON", math);
+
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "is",	  JsNativeV(ji, JSN_OBJ_IS));
+	JsPropSet(ji, math, "keys",   JsNativeV(ji, JSN_OBJ_KEYS));
+	JsPropSet(ji, math, "assign", JsNativeV(ji, JSN_OBJ_ASSIGN));
+	JsPropSet(ji, math, "values",  JsNativeV(ji, JSN_OBJ_VALUES));
+	JsPropSet(ji, math, "entries", JsNativeV(ji, JSN_OBJ_ENTRIES));
+	JsPropSet(ji, math, "fromEntries", JsNativeV(ji, JSN_OBJ_FROMENTRIES));
+	JsPropSet(ji, math, "defineProperty",   JsNativeV(ji, JSN_OBJ_DEFINEPROP));
+	JsPropSet(ji, math, "defineProperties", JsNativeV(ji, JSN_OBJ_DEFINEPROPS));
+	JsPropSet(ji, math, "create",  JsNativeV(ji, JSN_OBJ_CREATE));
+	JsPropSet(ji, math, "getPrototypeOf", JsNativeV(ji, JSN_OBJ_GETPROTO));
+	JsPropSet(ji, math, "setPrototypeOf", JsNativeV(ji, JSN_OBJ_SETPROTO));
+	JsPropSet(ji, math, "getOwnPropertyDescriptor", JsNativeV(ji, JSN_OBJ_GETDESC));
+	JsPropSet(ji, math, "getOwnPropertyNames", JsNativeV(ji, JSN_OBJ_KEYS));
+	JsPropSet(ji, math, "freeze",  JsNativeV(ji, JSN_OBJ_FREEZE));
+	JsPropSet(ji, math, "seal",	   JsNativeV(ji, JSN_OBJ_FREEZE));
+	JsPropSet(ji, math, "preventExtensions", JsNativeV(ji, JSN_OBJ_FREEZE));
+	JsPropSet(ji, math, "isFrozen",		 JsNativeV(ji, JSN_OBJ_ISFROZEN));
+	JsPropSet(ji, math, "isSealed",		 JsNativeV(ji, JSN_OBJ_ISFROZEN));
+	JsPropSet(ji, math, "isExtensible",	 JsNativeV(ji, JSN_OBJ_ISFROZEN));
+	JsPropSet(ji, math, "hasOwn",		 JsNativeV(ji, JSN_OBJ_HASOWN));
+	JsProtoAttach(ji, math, JV_OBJ);
+	JsEnvDeclare(ji, ji->genv, "Object", math);
+
+	JsEnvDeclare(ji, ji->genv, "this",		 ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "globalThis", ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "self",	 ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "top",	 ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "parent", ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "frames", ji->win_obj);
+	JsEnvDeclare(ji, ji->genv, "innerWidth",	JsNumV(ji, 1024));
+	JsEnvDeclare(ji, ji->genv, "innerHeight",	JsNumV(ji, 768));
+	JsEnvDeclare(ji, ji->genv, "outerWidth",	JsNumV(ji, 1024));
+	JsEnvDeclare(ji, ji->genv, "outerHeight",	JsNumV(ji, 768));
+	JsEnvDeclare(ji, ji->genv, "scrollX",		JsNumV(ji, 0));
+	JsEnvDeclare(ji, ji->genv, "scrollY",		JsNumV(ji, 0));
+	JsEnvDeclare(ji, ji->genv, "pageXOffset",	JsNumV(ji, 0));
+	JsEnvDeclare(ji, ji->genv, "pageYOffset",	JsNumV(ji, 0));
+	JsEnvDeclare(ji, ji->genv, "screenX",		JsNumV(ji, 0));
+	JsEnvDeclare(ji, ji->genv, "screenY",		JsNumV(ji, 0));
+	JsGlobalNative(ji, "scrollTo",	JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "scrollBy",	JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "scroll",	JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "focus",		JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "blur",		JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "print",		JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "close",		JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "open",		JSN_NOOP_UNDEF);
+	JsGlobalNative(ji, "confirm",	JSN_NOOP_FALSE);
+	JsGlobalNative(ji, "requestIdleCallback", JSN_SETTIMEOUT);
+	JsGlobalNative(ji, "cancelIdleCallback",  JSN_CLEARTIMER);
+
+	JsGlobalNative(ji, "eval", JSN_EVAL);
+	JsProtoAttach(ji, JsGlobalNative(ji, "Function", JSN_EVT_NOOP), JV_NATIVE);
+	JsProtoAttach(ji, JsGlobalNative(ji, "Boolean", JSN_BOOLEAN), JV_BOOL);
+	JsGlobalNative(ji, "URL", JSN_URL_CTOR);
+	math = JsGlobalNative(ji, "Array", JSN_ARRAY_CTOR);
+	JsProtoAttach(ji, math, JV_ARR);
+	JsPropSet(ji, math, "isArray", JsNativeV(ji, JSN_ARR_ISARR));
+	JsPropSet(ji, math, "from",	   JsNativeV(ji, JSN_ARRAY_FROM));
+	JsPropSet(ji, math, "of",	   JsNativeV(ji, JSN_ARRAY_OF));
+
+	js_script_n = 0;
+	math = JsValNew(ji, JV_OBJ);
+	JsPropSet(ji, math, "getItem",	  JsNativeV(ji, JSN_LS_GET));
+	JsPropSet(ji, math, "setItem",	  JsNativeV(ji, JSN_LS_SET));
+	JsPropSet(ji, math, "removeItem", JsNativeV(ji, JSN_LS_REMOVE));
+	JsPropSet(ji, math, "clear",	  JsNativeV(ji, JSN_LS_CLEAR));
+	JsEnvDeclare(ji, ji->genv, "localStorage", math);
+	JsEnvDeclare(ji, ji->genv, "sessionStorage", math);
+
+	return ji;
+}
+
+U0 JsInterpFree(CJsInterp *ji)
+{
+	CJsAllocHdr *h, *next;
+
+	if (!ji)
+		return;
+	h = ji->allocs;
+	while (h)
+	{
+		next = h->next;
+		Free(h);
+		h = next;
+	}
+	Free(ji);
+}
+
+
+U0 JsScriptReport(CJsInterp *ji, U8 *src, I64 nparsed, I64 nran, U8 *how)
+{
+	U8	buf[JS_WARN_LEN], head[40];
+	I64 i = 0, k = 0;
+
+	js_script_n++;
+	while (src && src[i] && k < 32)
+	{
+		if (src[i] > ' ')
+		{
+			head[k] = src[i];
+			k++;
+		}
+		i++;
+	}
+	head[k] = 0;
+	StrPrint(buf, "script[%d] %dB lexed=%d cmt=%d toks=%d parsed=%d ran=%d "
+			 "perr=%d dropped=%d steps=%d ms=%d %s head=",
+			 js_script_n, StrLen(src), ji->lex_end, ji->lex_cmt, ji->tok_count,
+			 nparsed, nran, js_parse_errs, js_tok_dropped, ji->steps,
+			 ToI64((tS - ji->t_start) * 1000.0), how);
+	JsPathCat(buf, JS_WARN_LEN, head);
+	if (ji->has_err)
+	{
+		JsPathCat(buf, JS_WARN_LEN, " err=");
+		JsPathCat(buf, JS_WARN_LEN, ji->err);
+	}
+	JsScrub(buf);
+	NetLog("JS: %s", buf);
+	if (js_script_n <= 16)
+		JsConsoleAdd("script", buf);
+}
+
+U0 JsLexEndCheck(CJsInterp *ji, U8 *src)
+{
+	U8	buf[224], win[96];
+	I64 total = StrLen(src), i, k = 0, from;
+
+	if (ji->lex_end == total)
+		return;
+	from = ji->lex_end - 24;
+	if (from < 0)
+		from = 0;
+	for (i = from; i < ji->lex_end + 40 && src[i] && k < 72; i++)
+	{
+		if (i == ji->lex_end)
+		{
+			win[k] = '>';
+			k++;
+			win[k] = '|';
+			k++;
+			win[k] = '<';
+			k++;
+		}
+		win[k] = src[i];
+		k++;
+	}
+	win[k] = 0;
+	StrPrint(buf, "LEX ENDED at %d of %d: ", ji->lex_end, total);
+	JsPathCat(buf, 224, win);
+	JsScrub(buf);
+	JsConsoleAdd("lex", buf);
+	NetLog("JS: %s", buf);
+}
+
+Bool JsRunEx(CJsInterp *ji, U8 *src, CJsVal **_last)
+{
+	CJsNode *stmt, *head, *tail;
+	CJsVal	*val;
+	I64		 before, nparsed = 0, nran = 0;
+	U8		 thrbuf[192];
+
+	if (_last)
+		*_last = NULL;
+	if (!src || !*src)
+		return TRUE;
+	ji->lex_end = 0;
+	ji->lex_cmt = 0;
+	if (StrLen(src) > JS_MAX_SRC)
+	{
+		js_parse_errs = 0;
+		JsScriptReport(ji, src, 0, 0, "SKIPPED-too-big");
+		return FALSE;
+	}
+
+	ji->has_err = FALSE;
+	ji->parse_err = FALSE;
+	JsBudgetReset(ji);
+	ji->depth	= 0;
+	ji->flow	= JF_NORMAL;
+	ji->env		= ji->genv;
+	js_soft_errs  = 0;
+	js_parse_errs = 0;
+	js_undef_errs = 0;
+	js_warn_n	  = 0;
+	js_re_warned  = 0;
+	js_tok_dropped = 0;
+
+	if (!JsLex(ji, src))
+	{
+		NetLog("%s", ji->err);
+		JsScriptReport(ji, src, 0, 0, "LEXFAIL");
+		if (ji->toks)
+		{
+			Free(ji->toks);
+			ji->toks = NULL;
+		}
+		return FALSE;
+	}
+
+	JsLexEndCheck(ji, src);
+
+	head = NULL;
+	tail = NULL;
+	while (JsTok(ji)->type != JT_EOF)
+	{
+		before = ji->pos;
+		stmt = JsParseStmt(ji);
+		if (ji->parse_err)
+			JsParseResync(ji);
+		if (stmt)
+		{
+			if (tail)
+				tail->next = stmt;
+			else
+				head = stmt;
+			tail = stmt;
+			nparsed++;
+		}
+		if (ji->pos == before)
+			ji->pos++;
+	}
+
+	if (ji->toks)
+	{
+		Free(ji->toks);
+		ji->toks = NULL;
+	}
+
+	JsHoistList(ji, head, ji->genv);
+
+	stmt = head;
+	while (stmt && !ji->has_err)
+	{
+		val = JsEval(ji, stmt);
+		if (_last && ji->flow == JF_NORMAL)
+			*_last = val;
+		if (ji->flow == JF_THROW)
+		{
+			JsThrowText(ji, ji->exc, thrbuf, 192);
+			JsScrub(thrbuf);
+			JsConsoleAdd("THROW", thrbuf);
+			NetLog("JS: uncaught throw: %s", thrbuf);
+		}
+		ji->flow = JF_NORMAL;
+		nran++;
+		stmt = stmt->next;
+	}
+	if (ji->has_err)
+		JsScriptReport(ji, src, nparsed, nran, "ABORTED");
+	else if (nran < nparsed)
+		JsScriptReport(ji, src, nparsed, nran, "STOPPED");
+	else
+		JsScriptReport(ji, src, nparsed, nran, "ok");
+
+	JsFlushWrites(ji);
+
+	if (ji->has_err)
+	{
+		NetLog("%s", ji->err);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+Bool JsRun(CJsInterp *ji, U8 *src)
+{
+	return JsRunEx(ji, src, NULL);
+}
+

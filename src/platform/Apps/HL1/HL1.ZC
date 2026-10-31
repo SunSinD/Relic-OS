@@ -1,0 +1,3613 @@
+// app shell: window, input, frame loop.
+//
+// rendering runs on this task; the blit runs in the draw_it callback on the
+// window manager task, which must never block.
+
+#define HLMOVE_SPEED		200.0
+#define HLMOVE_FAST		400.0
+#define HLPITCH_LIMIT	89.0
+
+//CL_AdjustAngles' rates, degrees per second.
+#define HLLOOK_YAWSPEED	210.0
+#define HLLOOK_PITCHSPEED	225.0
+#define HLDEFAULT_MAP	"maps/c0a0.bsp"
+
+//entities are not in the PVS, so range-limit instead.
+#define HLENT_DRAW_DIST	2000.0
+#define HLENT_LIGHT		170
+
+#define HLVIEW_HEIGHT	22.0
+
+#define HLSERVER_HZ			72.0
+#define HLSERVER_STEP		(1.0 / HLSERVER_HZ)
+#define HLSERVER_MAX_CATCHUP	4
+
+//view model sits at the eye; its verts carry the offset.
+#define HLVM_FORWARD		0.0
+#define HLVM_RIGHT		0.0
+#define HLVM_UP			0.0
+#define HLVM_LIGHT		200
+
+CHLVisState	*hl_vis		= NULL;
+CHLCanvas	*hl_canvas	= NULL;
+
+U32			*hl_present		= NULL;
+I64			 hl_present_w	= 0;
+I64			 hl_present_h	= 0;
+
+I64			 hl_res_applied = 0;
+
+U0 HLPresentFree()
+{
+	if (hl_present)
+		Free(hl_present);
+	hl_present   = NULL;
+	hl_present_w = 0;
+	hl_present_h = 0;
+}
+
+Bool HLPresentAlloc(I64 w, I64 h)
+{
+	HLPresentFree;
+
+	if (w < 1 || h < 1)
+		return FALSE;
+
+	hl_present = CAlloc(w * h * sizeof(U32));
+	if (!hl_present)
+		return FALSE;
+
+	hl_present_w = w;
+	hl_present_h = h;
+	return TRUE;
+}
+
+U0 HLPresent()
+{
+	I64 n;
+
+	if (!hl_canvas || !hl_canvas->pixels || !hl_present)
+		return;
+
+	if (hl_canvas->width != hl_present_w || hl_canvas->height != hl_present_h)
+		return;
+
+	n = hl_present_w * hl_present_h * sizeof(U32);
+	MemCopy(hl_present, hl_canvas->pixels, n);
+}
+
+F64	 hl_origin[3];
+F64	 hl_view[3];
+F64	 hl_velocity[3];
+F64	 hl_angles[3];
+Bool hl_on_ground	= FALSE;
+Bool hl_noclip		= FALSE;
+I64	 hl_water_level	= 0;
+I64	 hl_water_type	= 0;
+I64	 hl_water_last	= 0;
+F64	 hl_fov			= 90.0;
+I64	 hl_blit_w		= 320;
+I64	 hl_blit_h		= 240;
+I64	 hl_blit_x		= 0;
+I64	 hl_blit_y		= 0;
+Bool hl_draw_entities = TRUE;
+I64	 hl_ent_drawn	= 0;
+Bool hl_ready		= FALSE;
+F64	 hl_fps			= 0.0;
+I64	 hl_frame_count	= 0;
+
+Bool hl_loading = FALSE;
+
+U0 HLDrawIt(CTask *task, CDC *dc)
+{
+	CHLCanvas present;
+	CHLCanvas *src;
+	I64 w;
+	I64 h;
+	I64 cw;
+	I64 ch;
+	I64 bw;
+	I64 bh;
+
+	no_warn task;
+
+	if ((!hl_ready && !hl_loading) || !hl_canvas)
+		return;
+
+	w  = dc->width;
+	h  = dc->height;
+	cw = hl_canvas->width;
+	ch = hl_canvas->height;
+
+	if (w < 1 || h < 1 || cw < 1 || ch < 1)
+		return;
+
+	dc->color = BLACK;
+	GrRect(dc, 0, 0, w, h);
+
+	if (hl_opt_fullscreen)
+	{
+		bw = w;
+		bh = h;
+	}
+	else
+	{
+		bw = w;
+		bh = (w * ch) / cw;
+		if (bh > h)
+		{
+			bh = h;
+			bw = (h * cw) / ch;
+		}
+	}
+
+	if (bw < 1) bw = 1;
+	if (bh < 1) bh = 1;
+
+	hl_blit_w = bw;
+	hl_blit_h = bh;
+	hl_blit_x = (w - bw) / 2;
+	hl_blit_y = (h - bh) / 2;
+
+	src = hl_canvas;
+	if (hl_present && hl_present_w == cw && hl_present_h == ch)
+	{
+		MemSet(&present, 0, sizeof(CHLCanvas));
+		present.pixels = hl_present;
+		present.width  = hl_present_w;
+		present.height = hl_present_h;
+		src = &present;
+	}
+
+	HLDrawBlitFit(src, dc, hl_blit_x, hl_blit_y, hl_blit_w, hl_blit_h);
+}
+
+#define HLTRANS_MAX	256
+
+I64	hl_trans_ent[HLTRANS_MAX];
+F64	hl_trans_key[HLTRANS_MAX];
+I64	hl_trans_count;
+
+U0 HLTransCenter(CHLEntity *e, F64 *out)
+{
+	CHLModel *m;
+
+	if (e->brush_model > 0 && e->brush_model < hl_map->num_models)
+	{
+		m = &hl_map->models[e->brush_model];
+
+		out[0] = e->origin[0] + (m->mins[0] + m->maxs[0]) * 0.5;
+		out[1] = e->origin[1] + (m->mins[1] + m->maxs[1]) * 0.5;
+		out[2] = e->origin[2] + (m->mins[2] + m->maxs[2]) * 0.5;
+		return;
+	}
+
+	HLVecCopy(e->origin, out);
+}
+
+U0 HLTransAdd(I64 index, F64 *center)
+{
+	F64	d[3];
+	F64	key;
+	I64	i;
+
+	if (hl_trans_count >= HLTRANS_MAX)
+		return;
+
+	HLVecSub(center, hl_view, d);
+	key = HLVecDot(d, d);
+
+	i = hl_trans_count;
+
+	while (i > 0 && hl_trans_key[i - 1] < key)
+	{
+		hl_trans_ent[i] = hl_trans_ent[i - 1];
+		hl_trans_key[i] = hl_trans_key[i - 1];
+		i--;
+	}
+
+	hl_trans_ent[i] = index;
+	hl_trans_key[i] = key;
+	hl_trans_count++;
+}
+
+U0 HLRenderEntities()
+{
+	CHLEntity *e;
+	F64		  dist[3];
+	F64		  center[3];
+	F64		  cycle;
+	F64		  scale;
+	F64		  wave;
+	F64		  scroll;
+	I64		  i;
+	I64		  amt;
+	I64		  frame;
+	I64		  code;
+
+	hl_ent_drawn   = 0;
+	hl_trans_count = 0;
+
+	//Model 0 is the world itself and is already drawn by the PVS path.
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!hl_r_drawentities)
+			goto qde_next_brush;
+
+		if (!e->in_use || (e->effects & HLEF_NODRAW))
+			goto qde_next_brush;
+
+		if (e->brush_model > 0)
+		{
+			if (HLRenderTranslucent(e->rendermode))
+			{
+				HLTransCenter(e, center);
+				HLTransAdd(i, center);
+				goto qde_next_brush;
+			}
+
+			wave = e->scale;
+			code = (ToI64(e->rendercolor[1]) << 8) | ToI64(e->rendercolor[2]);
+			if (code > 0)
+			{
+				scroll = ToF64(code) / 16.0;
+				if (e->rendercolor[0] != 0.0)
+					scroll = -scroll;
+			}
+			else if (e->speed != 0.0)
+				scroll = e->speed;
+			else
+				scroll = 35.0;
+
+			if (HLClipIsRotatingDraw(i))
+				HLDrawBrushModel(hl_canvas, hl_map, e->brush_model,
+					e->origin, e->frame, e->angles,
+					e->rendermode, ToI64(e->renderamt), hl_vis,
+					wave, scroll);
+			else
+				HLDrawBrushModel(hl_canvas, hl_map, e->brush_model,
+					e->origin, e->frame, NULL,
+					e->rendermode, ToI64(e->renderamt), hl_vis,
+					wave, scroll);
+			hl_ent_drawn++;
+		}
+		else if (e->ent_class == HLC_SPRITE && e->spr && e->visible)
+		{
+			HLTransCenter(e, center);
+			HLTransAdd(i, center);
+		}
+
+qde_next_brush:
+	}
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->mdl && !e->studio)
+			goto qde_next;
+
+		if (!e->in_use || (e->effects & HLEF_NODRAW))
+			goto qde_next;
+
+		HLVecSub(e->origin, hl_origin, dist);
+		if (HLVecLength(dist) >= HLENT_DRAW_DIST)
+			goto qde_next;
+
+		if (e->studio)
+		{
+			cycle = HLAIEntityCycle(e);
+
+			HLStudioDraw(hl_canvas, e->studio, e->origin, e->angles,
+				e->seq, cycle, e->blending[0], e->body, e->skin,
+				HLEntLightPoint(hl_map, e), e->controllers,
+				e->blending[1], i);
+
+			if (e->spr)
+			{
+				HLTransCenter(e, center);
+				HLTransAdd(i, center);
+			}
+		}
+		else
+			HLMdlDraw(hl_canvas, e->mdl, e->frame, e->origin,
+				e->angles[1], HLEntLightPoint(hl_map, e));
+
+		hl_ent_drawn++;
+
+qde_next:
+	}
+
+	for (i = 0; i < hl_trans_count; i++)
+	{
+		e = &hl_entities[hl_trans_ent[i]];
+
+		amt = ClampI64(ToI64(e->renderamt), 0, 255);
+
+		if (e->ent_class == HLC_SPRITE)
+		{
+			frame = 0;
+
+			if (e->spr->num_frames > 1 && e->framerate > 0.0)
+				frame = ToI64(tS * e->framerate) % e->spr->num_frames;
+
+			HLSprDrawEntity(hl_canvas, e->spr, frame, e->origin, e->angles,
+				HLEntLightPoint(hl_map, e), e->rendermode, amt, e->scale);
+		}
+		else if (e->spr && e->studio)
+		{
+			//plantlight glow: origin + (0,0,(mins.z+maxs.z)*0.5), xen.cpp:105
+			center[0] = e->origin[0];
+			center[1] = e->origin[1];
+			center[2] = e->origin[2] + (e->mins[2] + e->maxs[2]) * 0.5;
+			if (amt <= 0)
+				amt = 255;
+			scale = e->scale;
+			if (scale <= 0.0)
+				scale = 1.0;
+			HLSprDrawEntity(hl_canvas, e->spr, 0, center, e->angles,
+				HLEntLightPoint(hl_map, e), HLRENDER_GLOW, amt, scale);
+		}
+		else
+		{
+			wave = e->scale;
+			code = (ToI64(e->rendercolor[1]) << 8) | ToI64(e->rendercolor[2]);
+			if (code > 0)
+			{
+				scroll = ToF64(code) / 16.0;
+				if (e->rendercolor[0] != 0.0)
+					scroll = -scroll;
+			}
+			else if (e->speed != 0.0)
+				scroll = e->speed;
+			else
+				scroll = 35.0;
+
+			if (HLClipIsRotatingDraw(hl_trans_ent[i]))
+				HLDrawBrushModel(hl_canvas, hl_map, e->brush_model,
+					e->origin, e->frame, e->angles, e->rendermode, amt,
+					hl_vis, wave, scroll);
+			else
+				HLDrawBrushModel(hl_canvas, hl_map, e->brush_model,
+					e->origin, e->frame, NULL, e->rendermode, amt,
+					hl_vis, wave, scroll);
+		}
+
+		hl_ent_drawn++;
+	}
+}
+
+#define HLCS_DAMAGE_RATE		150.0
+#define HLCS_BONUS_RATE		100.0
+
+#define HLIT_INVISIBILITY	524288
+#define HLIT_INVULNERABILITY	1048576
+#define HLIT_SUIT			2097152
+#define HLIT_QUAD			4194304
+
+F64 hl_cs_dmg_pct	= 0.0;
+F64 hl_cs_bonus_pct	= 0.0;
+
+U0 HLCShiftInit()
+{
+	hl_cs_dmg_pct   = 0.0;
+	hl_cs_bonus_pct = 0.0;
+}
+
+U0 HLCShiftDamage(F64 count)
+{//V_ParseDamage: percent += 3*count, clamped to 150.
+	hl_cs_dmg_pct += 3.0 * count;
+
+	if (hl_cs_dmg_pct < 0.0)
+		hl_cs_dmg_pct = 0.0;
+	if (hl_cs_dmg_pct > 150.0)
+		hl_cs_dmg_pct = 150.0;
+}
+
+U0 HLCShiftBonus()
+{
+	hl_cs_bonus_pct = 50.0;
+}
+
+U0 HLCShiftUpdate(F64 dt)
+{
+	hl_cs_dmg_pct -= dt * HLCS_DAMAGE_RATE;
+	if (hl_cs_dmg_pct < 0.0)
+		hl_cs_dmg_pct = 0.0;
+
+	hl_cs_bonus_pct -= dt * HLCS_BONUS_RATE;
+	if (hl_cs_bonus_pct < 0.0)
+		hl_cs_bonus_pct = 0.0;
+}
+
+U0 HLCShiftAdd(F64 *_r, F64 *_g, F64 *_b, F64 *_a,
+	F64 dr, F64 dg, F64 db, F64 percent)
+{
+	F64 a2;
+
+	if (percent <= 0.0)
+		return;
+
+	a2 = percent / 255.0;
+	if (a2 > 1.0)
+		a2 = 1.0;
+
+	*_a = *_a + a2 * (1.0 - *_a);
+	if (*_a <= 0.0)
+		return;
+
+	a2 = a2 / *_a;
+
+	*_r = *_r * (1.0 - a2) + dr * a2;
+	*_g = *_g * (1.0 - a2) + dg * a2;
+	*_b = *_b * (1.0 - a2) + db * a2;
+}
+
+U0 HLCShiftBlend(I64 *_r, I64 *_g, I64 *_b, I64 *_a)
+{
+	F64 r = 0.0;
+	F64 g = 0.0;
+	F64 b = 0.0;
+	F64 a = 0.0;
+	I64 items = 0;
+
+	if (HLClientMode)
+		items = hl_cl.items;
+
+	HLCShiftAdd(&r, &g, &b, &a,
+		ToF64(*_r), ToF64(*_g), ToF64(*_b), ToF64(*_a));
+
+	//V_ParseDamage caps its own percent at 150
+	HLCShiftAdd(&r, &g, &b, &a, 255.0, 0.0, 0.0, hl_cs_dmg_pct);
+
+	HLCShiftAdd(&r, &g, &b, &a, 215.0, 186.0, 69.0, hl_cs_bonus_pct);
+
+	if (items & HLIT_QUAD)
+		HLCShiftAdd(&r, &g, &b, &a, 0.0, 0.0, 255.0, 30.0);
+	else if (items & HLIT_SUIT)
+		HLCShiftAdd(&r, &g, &b, &a, 0.0, 255.0, 0.0, 20.0);
+	else if (items & HLIT_INVISIBILITY)
+		HLCShiftAdd(&r, &g, &b, &a, 100.0, 100.0, 100.0, 100.0);
+	else if (items & HLIT_INVULNERABILITY)
+		HLCShiftAdd(&r, &g, &b, &a, 255.0, 255.0, 0.0, 30.0);
+
+	if (a > 1.0)
+		a = 1.0;
+	if (a < 0.0)
+		a = 0.0;
+
+	*_r = ClampI64(ToI64(r), 0, 255);
+	*_g = ClampI64(ToI64(g), 0, 255);
+	*_b = ClampI64(ToI64(b), 0, 255);
+	*_a = ClampI64(ToI64(a * 255.0), 0, 255);
+}
+
+I64 hl_cs_env_r = 0;
+I64 hl_cs_env_g = 0;
+I64 hl_cs_env_b = 0;
+I64 hl_cs_env_a = 0;
+
+U0 HLCShiftDraw(CHLCanvas *c)
+{//V_CalcBlend over the 3D view alone.
+	U32	*row;
+	U32	 px;
+	I64	 r;
+	I64	 g;
+	I64	 b;
+	I64	 a;
+	I64	 x;
+	I64	 y;
+	I64	 dr;
+	I64	 dg;
+	I64	 db;
+
+	if (!c || !c->pixels)
+		return;
+
+	r = hl_cs_env_r;
+	g = hl_cs_env_g;
+	b = hl_cs_env_b;
+	a = hl_cs_env_a;
+
+	HLCShiftBlend(&r, &g, &b, &a);
+
+	if (a <= 0)
+		return;
+
+	for (y = 0; y < c->height; y++)
+	{
+		row = c->pixels + y * c->width;
+
+		for (x = 0; x < c->width; x++)
+		{
+			px = row[x];
+
+			dr = (px >> 16) & 255;
+			dg = (px >> 8) & 255;
+			db = px & 255;
+
+			dr = dr + (((r - dr) * a) / 255);
+			dg = dg + (((g - dg) * a) / 255);
+			db = db + (((b - db) * a) / 255);
+
+			row[x] = (dr << 16) | (dg << 8) | db;
+		}
+	}
+}
+
+#define HLKICK_ROLL		0.6
+#define HLKICK_PITCH		0.6
+#define HLKICK_TIME		0.5
+
+F64 hl_dmg_roll		= 0.0;
+F64 hl_dmg_pitch		= 0.0;
+F64 hl_dmg_time		= 0.0;
+F64 hl_punch[3];
+F64 hl_dmg_last		= 0.0;
+I64 hl_con_return_state = HLST_PLAYING;
+
+I64 hl_net_mismatch = 0;
+
+F64 hl_join_last_try = 0.0;
+U8  hl_join_line[96];
+F64 hl_heap_check_last = 0.0;
+U8  hl_heap_check_line[48];
+
+F64 hl_tick_log_last = 0.0;
+I64 hl_tick_log_n    = 0;
+U8  hl_tick_line[160];
+
+U0 HLViewKickInit()
+{
+	hl_dmg_roll  = 0.0;
+	hl_dmg_pitch = 0.0;
+	hl_dmg_time  = 0.0;
+	hl_dmg_last  = 0.0;
+	HLVecSet(hl_punch, 0.0, 0.0, 0.0);
+}
+
+#define HLIDLE_ROLL_CYCLE	0.5
+#define HLIDLE_PITCH_CYCLE	1.0
+#define HLIDLE_YAW_CYCLE		2.0
+#define HLIDLE_ROLL_LEVEL	0.1
+#define HLIDLE_PITCH_LEVEL	0.3
+#define HLIDLE_YAW_LEVEL		0.3
+
+F64 hl_idle_scale = 0.0;
+
+U0 HLViewAddIdle(F64 *angles)
+{
+	if (hl_idle_scale == 0.0)
+		return;
+
+	angles[2] += hl_idle_scale * Sin(tS * HLIDLE_ROLL_CYCLE) * HLIDLE_ROLL_LEVEL;
+	angles[0] += hl_idle_scale * Sin(tS * HLIDLE_PITCH_CYCLE) * HLIDLE_PITCH_LEVEL;
+	angles[1] += hl_idle_scale * Sin(tS * HLIDLE_YAW_CYCLE) * HLIDLE_YAW_LEVEL;
+}
+
+U0 HLViewApplyKick(F64 *angles)
+{
+	F64 frac;
+
+	angles[0] += hl_punch[0];
+	angles[1] += hl_punch[1];
+	angles[2] += hl_punch[2];
+
+	if (hl_dmg_time > 0.0)
+	{
+		frac = hl_dmg_time / HLKICK_TIME;
+		angles[2] += frac * hl_dmg_roll;
+		angles[0] += frac * hl_dmg_pitch;
+	}
+
+	HLViewAddIdle(angles);
+}
+
+
+//cl_bob, cl_bobcycle, cl_bobup - cl_dll/view.cpp:1720-1722.
+#define HLBOB_AMOUNT		0.01
+#define HLBOB_CYCLE		0.8
+#define HLBOB_UP			0.5
+
+//V_CalcRoll takes movevars->rollangle/rollspeed, not the cl_ cvars (view.cpp:410).
+#define HLROLL_ANGLE		0.0
+#define HLROLL_SPEED		200.0
+
+F64 hl_bob_time	= 0.0;
+F64 hl_bob_value	= 0.0;
+F64 hl_bob_prev	= 0.0;
+
+U0 HLViewBobUpdate()
+{
+	F64 cycle;
+	F64 bob;
+	F64 speed;
+	F64 dt;
+
+	dt         = tS - hl_bob_prev;
+	hl_bob_prev = tS;
+
+	if (dt < 0.0 || dt > 0.25)
+		dt = 0.0;
+
+	if (!hl_on_ground)
+		return;
+
+	hl_bob_time += dt;
+
+	cycle = hl_bob_time - ToF64(ToI64(hl_bob_time / HLBOB_CYCLE)) * HLBOB_CYCLE;
+	cycle /= HLBOB_CYCLE;
+
+	if (cycle < HLBOB_UP)
+		cycle = pi * cycle / HLBOB_UP;
+	else
+		cycle = pi + pi * (cycle - HLBOB_UP) / (1.0 - HLBOB_UP);
+
+	speed = Sqrt(hl_velocity[0] * hl_velocity[0] +
+				 hl_velocity[1] * hl_velocity[1]);
+
+	bob = speed * HLBOB_AMOUNT;
+	bob = bob * 0.3 + bob * 0.7 * Sin(cycle);
+
+	if (bob > 4.0)
+		bob = 4.0;
+	if (bob < -7.0)
+		bob = -7.0;
+
+	hl_bob_value = bob;
+}
+
+F64 HLViewBob()
+{
+	return hl_bob_value;
+}
+
+F64 hl_view_oldz	= 0.0;
+F64 hl_step_prev	= 0.0;
+
+F64 HLViewStepOffset()
+{
+	F64 dt = tS - hl_step_prev;
+
+	hl_step_prev = tS;
+
+	if (dt < 0.0 || dt > 0.25)
+		dt = 0.0;
+
+	if (!hl_on_ground || hl_origin[2] - hl_view_oldz <= 0.0)
+	{
+		hl_view_oldz = hl_origin[2];
+		return 0.0;
+	}
+
+	hl_view_oldz += dt * 80.0;
+
+	if (hl_view_oldz > hl_origin[2])
+		hl_view_oldz = hl_origin[2];
+	if (hl_origin[2] - hl_view_oldz > 12.0)
+		hl_view_oldz = hl_origin[2] - 12.0;
+
+	return hl_view_oldz - hl_origin[2];
+}
+
+F64 HLViewRoll(F64 *angles, F64 *velocity)
+{
+	F64 fwd[3];
+	F64 rgt[3];
+	F64 upv[3];
+	F64 side;
+	F64 sign;
+
+	HLAngleVectors(angles, fwd, rgt, upv);
+	side = HLVecDot(velocity, rgt);
+
+	if (side < 0.0)
+	{
+		sign = -1.0;
+		side = -side;
+	}
+	else
+		sign = 1.0;
+
+	if (side < HLROLL_SPEED)
+		side = side * HLROLL_ANGLE / HLROLL_SPEED;
+	else
+		side = HLROLL_ANGLE;
+
+	return side * sign;
+}
+
+
+U0 HLLiquidView()
+{
+	I64 r = 0;
+	I64 g = 0;
+	I64 b = 0;
+	I64 a = 0;
+
+	//Water level 3 is eye depth; only a submerged eye tints the view.
+	if (hl_water_level >= 3)
+	{
+		switch (hl_water_type)
+		{
+			case HLCONTENTS_LAVA:
+				r = 255; g = 80;  b = 0;  a = 150;
+				break;
+			case HLCONTENTS_SLIME:
+				r = 0;   g = 25;  b = 5;  a = 150;
+				break;
+			default:
+				r = 130; g = 80;  b = 50; a = 128;
+				break;
+		}
+
+		hl_warp_amount = 4.0;
+	}
+	else
+		hl_warp_amount = 0.0;
+
+	hl_warp_time = tS;
+
+	hl_cs_env_r = r;
+	hl_cs_env_g = g;
+	hl_cs_env_b = b;
+	hl_cs_env_a = a;
+
+	HLPalSetTint(0, 0, 0, 0);
+
+	if (hl_water_level > 0 && hl_water_last == 0)
+	{
+		if (hl_water_type == HLCONTENTS_LAVA)
+			HLSndPlayAt("player/inlava.wav", hl_view, 1.0, 0.0);
+		else if (hl_water_type == HLCONTENTS_SLIME)
+			HLSndPlayAt("player/slimbrn2.wav", hl_view, 1.0, 0.0);
+		else
+			HLSndPlayAt("player/inh2o.wav", hl_view, 1.0, 0.0);
+	}
+	else if (hl_water_level == 0 && hl_water_last > 0)
+		HLSndPlayAt("misc/outwater.wav", hl_view, 1.0, 0.0);
+
+	hl_water_last = hl_water_level;
+}
+
+
+//AIRTIME, dlls/player.cpp:1215. Seconds of breath from a full lung
+#define HLDROWN_AIRTIME		12.0
+
+#define HLDROWN_DMG_BASE		2.0
+#define HLDROWN_DMG_MAX		5.0
+#define HLDROWN_PERIOD		1.0
+
+F64	hl_air_finished	= 0.0;
+F64	hl_drown_dmg		= HLDROWN_DMG_BASE;
+F64	hl_drown_next	= 0.0;
+
+
+#define HLDBG_DEATH_MAX	400
+#define HLDBG_DEATH_BUF	32768
+
+U8	hl_dbg_death_buf[HLDBG_DEATH_BUF];
+U8	hl_dbg_death_line[192];
+I64	hl_dbg_death_len	= 0;
+I64	hl_dbg_death_lines	= 0;
+Bool hl_dbg_death_on		= FALSE;
+
+F64	hl_dbg_last_dmg		= 0.0;
+I64	hl_dbg_last_type		= -1;
+Bool hl_dbg_type_known	= FALSE;
+
+F64	hl_dbg_prev_hp		= 0.0;
+I64	hl_dbg_prev_flag		= 0;
+
+U0 HLShellDeathInit()
+{
+	hl_air_finished = 0.0;
+	hl_drown_dmg    = HLDROWN_DMG_BASE;
+	hl_drown_next   = 0.0;
+
+	hl_dbg_death_len    = 0;
+	hl_dbg_death_lines  = 0;
+	hl_dbg_death_on     = FALSE;
+	hl_dbg_death_buf[0] = 0;
+
+	hl_dbg_last_dmg   = 0.0;
+	hl_dbg_last_type  = -1;
+	hl_dbg_type_known = FALSE;
+
+	hl_dbg_prev_hp   = 0.0;
+	hl_dbg_prev_flag = 0;
+}
+
+U0 HLShellHurt(F64 damage, I64 damage_type)
+{
+	if (damage <= 0.0)
+		return;
+
+	hl_dbg_last_type  = damage_type;
+	hl_dbg_type_known = TRUE;
+
+	HLEntHurtPlayer(damage, damage_type);
+}
+
+U8 *HLDbgDmgName(I64 bits)
+{
+	if (bits < 0)
+		return "ent";
+
+	if (bits == HLDMG_GENERIC)
+		return "gen";
+	if (bits & HLDMG_FALL)
+		return "fall";
+	if (bits & HLDMG_DROWN)
+		return "drwn";
+	if (bits & HLDMG_CRUSH)
+		return "crsh";
+	if (bits & HLDMG_BLAST)
+		return "blst";
+	if (bits & HLDMG_BULLET)
+		return "bull";
+	if (bits & HLDMG_CLUB)
+		return "club";
+	if (bits & HLDMG_SLASH)
+		return "slsh";
+	if (bits & HLDMG_BURN)
+		return "burn";
+	if (bits & HLDMG_SHOCK)
+		return "shck";
+	if (bits & HLDMG_SONIC)
+		return "snic";
+
+	return "othr";
+}
+
+U0 HLDbgDeathFlush()
+{
+	if (!hl_disk_writes || hl_dbg_death_len <= 0)
+		return;
+
+	FileWrite("::/Apps/HL1/HL1DEATH.TXT", hl_dbg_death_buf, hl_dbg_death_len);
+}
+
+U0 HLDbgDeathPut(U8 *s)
+{
+	I64 n = StrLen(s);
+
+	if (hl_dbg_death_len + n + 1 >= HLDBG_DEATH_BUF)
+		return;
+
+	MemCopy(hl_dbg_death_buf + hl_dbg_death_len, s, n);
+	hl_dbg_death_len += n;
+	hl_dbg_death_buf[hl_dbg_death_len] = 0;
+}
+
+U0 HLDbgDeathTick()
+{
+	I64 echo;
+
+	echo = ToI64(HLCvarGet("hl_debug_death"));
+
+	if (echo == 0)
+	{
+		if (hl_dbg_death_on)
+		{
+			hl_dbg_death_on = FALSE;
+			HLDbgDeathPut("-- trace off\n");
+			HLDbgDeathFlush;
+		}
+
+		return;
+	}
+
+	if (!hl_dbg_death_on)
+	{
+		hl_dbg_death_on     = TRUE;
+		hl_dbg_death_len    = 0;
+		hl_dbg_death_lines  = 0;
+		hl_dbg_death_buf[0] = 0;
+
+		HLDbgDeathPut(
+			"   time     hp    ar dd df lk   dtime  ddtime rp bt    hit type\n");
+	}
+
+	if (hl_dbg_death_lines >= HLDBG_DEATH_MAX)
+		return;
+
+	StrPrint(hl_dbg_death_line,
+		"%7.2f %6.1f %5.1f %2d %2d %2d %7.2f %7.2f %2d %2d %6.1f %s\n",
+		hl_ent_time, hl_ent_player_health, hl_ent_player_armor,
+		hl_ent_player_dead, hl_ent_deadflag, hl_ent_input_locked,
+		hl_ent_death_time, hl_ent_dead_time,
+		hl_ent_respawn_pending, hl_ent_death_button,
+		hl_dbg_last_dmg, HLDbgDmgName(hl_dbg_last_type));
+
+	HLDbgDeathPut(hl_dbg_death_line);
+	hl_dbg_death_lines++;
+
+	//the console is 40 columns and wraps, so only a change is echoed
+	if (echo >= 2 && (hl_ent_player_health != hl_dbg_prev_hp ||
+		hl_ent_deadflag != hl_dbg_prev_flag))
+	{
+		HLConPrint(hl_dbg_death_line);
+	}
+
+	hl_dbg_prev_hp   = hl_ent_player_health;
+	hl_dbg_prev_flag = hl_ent_deadflag;
+
+	if (hl_dbg_death_lines % 8 == 0 ||
+		hl_dbg_death_lines >= HLDBG_DEATH_MAX)
+	{
+		HLDbgDeathFlush;
+	}
+}
+
+U0 HLShellDrown()
+{//CBasePlayer::WaterMove's drowning half, dlls/player.cpp:1217-1287.
+	if (hl_noclip || hl_ent_player_dead)
+	{
+		hl_air_finished = hl_ent_time + HLDROWN_AIRTIME;
+		hl_drown_dmg    = HLDROWN_DMG_BASE;
+		return;
+	}
+
+	if (hl_water_level != 3)
+	{
+		//"pev->air_finished = gpGlobals->time + AIRTIME; pev->dmg = 2"
+		hl_air_finished = hl_ent_time + HLDROWN_AIRTIME;
+		hl_drown_dmg    = HLDROWN_DMG_BASE;
+		return;
+	}
+
+	if (hl_ent_time < hl_air_finished)
+		return;
+
+	if (hl_ent_time < hl_drown_next)
+		return;
+
+	hl_drown_dmg += 1.0;
+
+	if (hl_drown_dmg > HLDROWN_DMG_MAX)
+		hl_drown_dmg = HLDROWN_DMG_MAX;
+
+	HLShellHurt(hl_drown_dmg, HLDMG_DROWN);
+
+	hl_drown_next = hl_ent_time + HLDROWN_PERIOD;
+}
+
+U0 HLShellDamageFrame()
+{
+	F64 count;
+	F64 want;
+
+	count = hl_ent_player_damage;
+	hl_ent_player_damage = 0.0;
+
+	if (count > 0.0)
+	{
+		hl_dbg_last_dmg = count;
+
+		if (!hl_dbg_type_known)
+			hl_dbg_last_type = -1;
+
+		hl_dbg_type_known = FALSE;
+
+		if (count < 10.0)
+			count = 10.0;
+		if (count > 255.0)
+			count = 255.0;
+
+		HLCShiftDamage(count);
+
+		hl_punch[0] += count * HLKICK_PITCH * 0.1;
+	}
+
+	if (hl_dmg_time > 0.0)
+	{
+		hl_dmg_time -= HLSERVER_STEP;
+		if (hl_dmg_time < 0.0)
+			hl_dmg_time = 0.0;
+	}
+
+	HLCShiftUpdate(HLSERVER_STEP);
+
+	HLDbgDeathTick;
+
+	want = HLCvarGet("hl_debug_hurt");
+
+	if (want > 0.0)
+	{
+		HLCvarSet("hl_debug_hurt", 0.0);
+		HLShellHurt(want, ToI64(HLCvarGet("hl_debug_hurt_type")));
+	}
+}
+
+U0 HLHudDrawFrame(CHLCanvas *c)
+{
+	I64 health  = 100;
+	I64 battery = 0;
+	I64 ammo    = -1;
+
+	if (HLClientMode)
+	{
+		health  = hl_cl.health;
+		battery = hl_cl.armorvalue;
+	}
+	else
+	{
+		health  = ToI64(HLPlayerHealth);
+		battery = ToI64(HLPlayerArmor);
+	}
+
+	ammo = HLWeaponAmmo;
+
+	HLHudDraw(c, health, battery, ammo, hl_ent_player_suit);
+}
+
+
+I64 HLHudMsgLines(I64 *_widest)
+{
+	I64 lines = 1;
+	I64 w     = 0;
+	I64 best  = 0;
+	I64 i     = 0;
+
+	while (hl_msg_text[i])
+	{
+		if (hl_msg_text[i] == '\\' && hl_msg_text[i + 1] == 'n')
+		{
+			if (w > best)
+				best = w;
+
+			w = 0;
+			lines++;
+			i += 2;
+			goto qhml_next;
+		}
+
+		w += HLFontCharWidth(hl_msg_text[i]);
+		i++;
+
+qhml_next:
+	}
+
+	if (w > best)
+		best = w;
+
+	if (_widest)
+		*_widest = best;
+
+	return lines;
+}
+
+U0 HLHudMsgChar(CHLCanvas *c, I64 x, I64 y, I64 ch, I64 r, I64 g, I64 b,
+	Bool add = FALSE)
+{
+	U8	*base;
+	U8	*pal;
+	U8	*src;
+	U32	*dst;
+	I64	 ofs;
+	I64	 gx;
+	I64	 gy;
+	I64	 gw;
+	I64	 gh;
+	I64	 sx;
+	I64	 sy;
+	I64	 px;
+	I64	 py;
+	I64	 stride;
+	I64	 lim;
+	I64	 cut;
+	I64	 lum;
+	I64	 nr;
+	I64	 ng;
+	I64	 nb;
+	U8	 texel;
+
+	ch &= 255;
+
+	if (ch == 32)
+		return;
+
+	if (hl_font.ready)
+	{
+		if (!hl_font.pixels)
+			return;
+
+		ofs    = hl_font.start[ch];
+		gw     = hl_font.cwidth[ch];
+		gh     = hl_font.row_height;
+		stride = HLFONT_WIDTH;
+		gx     = ofs % HLFONT_WIDTH;
+		gy     = ofs / HLFONT_WIDTH;
+		lim    = hl_font.height;
+		pal    = hl_font.palette;
+		cut    = HLSPR_TRANSPARENT;
+		base   = hl_font.pixels;
+	}
+	else
+	{
+		if (!hl_conchars)
+			return;
+
+		gw     = HLCHAR_W;
+		gh     = HLCHAR_H;
+		stride = 128;
+		gx     = (ch & 15) * HLCHAR_W;
+		gy     = (ch >> 4) * HLCHAR_H;
+		lim    = 128;
+		pal    = NULL;
+		cut    = 0;
+		base   = hl_conchars;
+	}
+
+	if (gw < 1)
+		return;
+
+	for (sy = 0; sy < gh; sy++)
+	{
+		py = y + sy;
+
+		if (py < 0 || py >= c->height)
+			goto qhmc_next_row;
+		if (gy + sy >= lim)
+			goto qhmc_next_row;
+
+		src = base + (gy + sy) * stride + gx;
+		dst = c->pixels + py * c->width;
+
+		for (sx = 0; sx < gw; sx++)
+		{
+			px = x + sx;
+
+			if (px < 0 || px >= c->width)
+				goto qhmc_next_col;
+			if (gx + sx >= stride)
+				goto qhmc_next_col;
+
+			texel = src[sx];
+
+			if (texel == cut)
+				goto qhmc_next_col;
+
+			if (pal)
+			{
+				lum = pal[texel * 3];
+				if (pal[texel * 3 + 1] > lum)	lum = pal[texel * 3 + 1];
+				if (pal[texel * 3 + 2] > lum)	lum = pal[texel * 3 + 2];
+			}
+			else
+				lum = 255;
+
+			nr = r * lum / 255;
+			ng = g * lum / 255;
+			nb = b * lum / 255;
+
+			if (add)
+			{
+				nr += (dst[px] >> 16) & 255;
+				ng += (dst[px] >> 8) & 255;
+				nb +=  dst[px] & 255;
+
+				if (nr > 255)	nr = 255;
+				if (ng > 255)	ng = 255;
+				if (nb > 255)	nb = 255;
+			}
+
+			dst[px] = (nr << 16) | (ng << 8) | nb;
+
+qhmc_next_col:
+		}
+
+qhmc_next_row:
+	}
+}
+
+U0 HLHudMsgDraw(CHLCanvas *c)
+{
+	F64	 t;
+	F64	 fade_time;
+	F64	 char_time;
+	F64	 delta;
+	I64	 blend;
+	I64	 lines;
+	I64	 widest = 0;
+	I64	 gh;
+	I64	 x0;
+	I64	 y0;
+	I64	 x;
+	I64	 y;
+	I64	 i;
+	I64	 sr;
+	I64	 sg;
+	I64	 sb;
+	I64	 dr;
+	I64	 dg;
+	I64	 db;
+	I64	 scanned;
+	Bool flicker;
+
+	if (!hl_msg_active || !hl_msg_text[0])
+		return;
+
+	t = hl_hud_time - hl_msg_start;
+
+	gh = HLCHAR_H;
+	if (hl_font.ready)
+		gh = hl_font.row_height;
+
+	lines = HLHudMsgLines(&widest);
+
+	if (hl_msg_effect == HLMSG_FX_WRITEOUT)
+		fade_time = hl_msg_fadein * ToF64(StrLen(hl_msg_text)) + hl_msg_hold;
+	else
+		fade_time = hl_msg_fadein + hl_msg_hold;
+
+	if (t > fade_time + hl_msg_fadeout)
+	{
+		hl_msg_active = FALSE;
+		return;
+	}
+
+	blend = 0;
+
+	if (hl_msg_effect == HLMSG_FX_WRITEOUT)
+	{
+		if (t > fade_time && hl_msg_fadeout > 0.0)
+			blend = ToI64((t - fade_time) / hl_msg_fadeout * 255.0);
+	}
+	else
+	{
+		if (t < hl_msg_fadein && hl_msg_fadein > 0.0)
+			blend = ToI64((hl_msg_fadein - t) / hl_msg_fadein * 255.0);
+		else if (t > fade_time)
+		{
+			if (hl_msg_fadeout > 0.0)
+				blend = ToI64((t - fade_time) / hl_msg_fadeout * 255.0);
+			else
+				blend = 255;
+		}
+	}
+
+	x0 = HLHudMsgAxis(hl_msg_x, widest, c->width);
+	y0 = HLHudMsgAxis(hl_msg_y, lines * gh, c->height);
+
+	x       = x0;
+	y       = y0;
+	i       = 0;
+	scanned = 0;
+
+	flicker = ToBool(hl_msg_effect == HLMSG_FX_FLICKER &&
+				RandU32() % 100 < 10);
+
+	while (hl_msg_text[i])
+	{
+		if (hl_msg_text[i] == '\\' && hl_msg_text[i + 1] == 'n')
+		{
+			x = x0;
+			y += gh;
+			i += 2;
+
+			flicker = ToBool(hl_msg_effect == HLMSG_FX_FLICKER &&
+						RandU32() % 100 < 10);
+
+			goto qhmd_next;
+		}
+
+		sr = hl_msg_r1;
+		sg = hl_msg_g1;
+		sb = hl_msg_b1;
+		dr = 0;
+		dg = 0;
+		db = 0;
+
+		if (hl_msg_effect == HLMSG_FX_WRITEOUT)
+		{
+			char_time = ToF64(scanned) * hl_msg_fadein;
+
+			if (char_time > t)
+			{
+				sr    = 0;
+				sg    = 0;
+				sb    = 0;
+				blend = 0;
+			}
+			else
+			{
+				delta = t - char_time;
+
+				if (t <= fade_time)
+				{
+					if (hl_msg_fxtime > 0.0 && delta <= hl_msg_fxtime)
+					{
+						dr    = hl_msg_r2;
+						dg    = hl_msg_g2;
+						db    = hl_msg_b2;
+						blend = 255 -
+							ToI64(delta / hl_msg_fxtime * 255.0 + 0.5);
+					}
+					else
+						blend = 0;
+				}
+			}
+		}
+
+		if (blend > 255)	blend = 255;
+		if (blend < 0)		blend = 0;
+
+		//The SDK's >> 8, not / 255: an 8-bit blend of two 8-bit channels.
+		HLHudMsgChar(c, x, y, hl_msg_text[i],
+			(sr * (255 - blend) + dr * blend) >> 8,
+			(sg * (255 - blend) + dg * blend) >> 8,
+			(sb * (255 - blend) + db * blend) >> 8);
+
+		if (flicker)
+			HLHudMsgChar(c, x, y, hl_msg_text[i],
+				hl_msg_r2, hl_msg_g2, hl_msg_b2, TRUE);
+
+		x += HLFontCharWidth(hl_msg_text[i]);
+		i++;
+		scanned++;
+
+qhmd_next:
+	}
+}
+
+U0 HLRenderFrame()
+{
+	F64		 forward[3];
+	F64		 right[3];
+	F64		 up[3];
+	F64		 fov_y;
+	F64		 fov_use;
+	F64		 view_angles[3];
+	F64		 saved_idle;
+	F64		 chase_f[3];
+	F64		 chase_r[3];
+	F64		 chase_u[3];
+	F64		 chase_want[3];
+	F64		 chase_zero[3];
+	CHLTrace	 chase_tr;
+	CHLMdl	*vm_mdl;
+	F64		 vm_depth;
+	F64		 snd_fwd[3];
+	F64		 snd_right[3];
+	I64		 skip_ent;
+	I64		 vm_frame;
+	I64		 i;
+	Bool	 vm_show;
+
+	HLAngleVectors(hl_angles, forward, right, up);
+
+	fov_use = hl_fov;
+
+	if (hl_wpn_zoom_fov > 0)
+		fov_use = ToF64(hl_wpn_zoom_fov);
+
+	fov_y = HLDrawFovY(fov_use, hl_canvas->width, hl_canvas->height);
+
+	HLViewBobUpdate;
+
+	HLVecCopy(hl_angles, hl_wpn_vm_ang);
+	hl_wpn_vm_bob = HLViewBob();
+	hl_wpn_vm_fed = TRUE;
+
+	HLVecCopy(hl_origin, hl_view);
+
+	if (hl_ent_deadflag != HLDEAD_NO)
+		hl_view[2] += hl_ent_death_view_ofs;
+	else
+		hl_view[2] += HLPlayerViewHeight + HLViewBob + HLViewStepOffset;
+
+	if (hl_ent_deadflag != HLDEAD_NO)
+		hl_angles[2] += hl_ent_death_roll;
+
+	hl_view[0] += 1.0 / 32.0;
+	hl_view[1] += 1.0 / 32.0;
+	hl_view[2] += 1.0 / 32.0;
+
+	if (HLCvarGet("chase_active") != 0.0 && !hl_intermission && !hl_demo_playing &&
+		HLMapValid(hl_map, "HLChaseUpdate"))
+	{
+		HLVecSet(chase_zero, 0.0, 0.0, 0.0);
+		HLAngleVectors(hl_angles, chase_f, chase_r, chase_u);
+
+		for (i = 0; i < 3; i++)
+			chase_want[i] = hl_view[i]
+				- chase_f[i] * HLCvarGet("chase_back")
+				+ chase_r[i] * HLCvarGet("chase_right")
+				+ chase_u[i] * HLCvarGet("chase_up");
+
+		HLTraceEntity(hl_map, hl_view, chase_want, chase_zero, chase_zero,
+			hl_player_edict, TRUE, &chase_tr);
+
+		for (i = 0; i < 3; i++)
+			hl_view[i] = chase_tr.end_pos[i];
+
+		if (chase_tr.fraction < 1.0)
+		{
+			for (i = 0; i < 3; i++)
+				hl_view[i] += chase_tr.plane_normal[i] * 4.0;
+		}
+	}
+
+	HLVecCopy(hl_angles, view_angles);
+
+	if (hl_intermission)
+	{
+		saved_idle   = hl_idle_scale;
+		hl_idle_scale = 1.0;
+		view_angles[2] = 0.0;
+		HLViewAddIdle(view_angles);
+		hl_idle_scale = saved_idle;
+	}
+	else
+	{
+		view_angles[2] = HLViewRoll(hl_angles, hl_velocity);
+
+		HLViewApplyKick(view_angles);
+	}
+
+	HLAngleVectors(view_angles, snd_fwd, snd_right, NULL);
+	HLSndListener(hl_view, snd_right);
+
+	if (HLClientMode)
+		hl_snd_viewent = hl_cl_viewent;
+	else
+		hl_snd_viewent = hl_player_edict;
+
+	HLSndUpdate;
+
+	//gHUD.m_flTime, hud_redraw.cpp:101.
+	hl_hud_time = hl_game_time;
+
+	if (hl_world_active)
+		HLEntGameTitleDrain;
+
+	HLLightAnimate(hl_game_time);
+	HLTurbFrame(tS);
+
+	HLLightFrame(tS);
+
+	hl_ambient_light = ToI64(HLCvarGet("r_ambient"));
+	HLPushDlights(hl_map, tS);
+
+	hl_surf_frame++;
+
+	HLSndAmbientUpdate(hl_game_time);
+
+	if (HLMapValid(hl_map, "HLSndLeafAmbients"))
+		HLSndLeafAmbients(hl_map, HLVisLeafForPoint(hl_map, hl_view),
+			HLCvarGet("ambient_level"), HLCvarGet("ambient_fade"), tS);
+
+	HLLiquidView;
+
+	HLDrawClear(hl_canvas, 0);
+	HLDrawSetViewRect(hl_canvas, HLCvarGet("viewsize"), HLSbarLines);
+
+	HLRSpeeds(ToBool(HLCvarGet("r_speeds") != 0.0));
+
+	hl_r_decals        = ToBool(HLCvarGet("r_decals") != 0.0);
+	HLDecalSetMax(ToI64(HLCvarGet("r_decals")));
+	hl_r_dynamic       = ToBool(HLCvarGet("r_dynamic") != 0.0);
+	hl_r_drawentities  = ToBool(HLCvarGet("r_drawentities") != 0.0);
+	hl_r_drawsprites   = ToBool(HLCvarGet("r_drawsprites") != 0.0);
+	hl_r_drawsky       = ToBool(HLCvarGet("r_drawsky") != 0.0);
+	hl_r_lightpoint    = ToBool(HLCvarGet("r_lightpoint") != 0.0);
+	hl_r_beams         = ToBool(HLCvarGet("r_beams") != 0.0);
+
+	HLSndVolumeSet(HLCvarGet("volume"));
+	HLSndMusicVolumeSet(HLCvarGet("bgmvolume"));
+	HLSndSuitVolumeSet(HLCvarGet("suitvolume"));
+	HLSndRoomOffSet(ToBool(HLCvarGet("room_off") != 0.0));
+	if (hl_ent_cam_active)
+	{
+		HLVecCopy(hl_ent_cam_org, hl_view);
+		HLVecCopy(hl_ent_cam_ang, view_angles);
+	}
+
+	HLDrawSetView(hl_canvas, hl_view, view_angles, fov_use);
+
+	if (!HLMapValid(hl_map, "HLRenderFrame") || !hl_vis)
+	{
+		HLHudDrawFrame(hl_canvas);
+		HLPresent;
+		return;
+	}
+
+	HLVisBuildList(hl_vis, hl_view, forward, right, up, fov_use, fov_y);
+	HLDrawWorld(hl_canvas, hl_map, hl_vis);
+
+	if (hl_draw_entities)
+	{
+		if (HLClientMode)
+		{
+			//svc_setview names this client's body; 0 draws everyone.
+			skip_ent = hl_cl_viewent;
+			HLNetDrawEntities(hl_canvas, hl_map, hl_view, 10000.0, skip_ent);
+
+			HLGameDrawStatics(hl_canvas, hl_map);
+			if (hl_udp_ready && !hl_udp_server || hl_demo_playing)
+				HLBiBeamsFollow(hl_cl_viewent);
+			else
+				HLBiBeamsFollow(hl_player_edict);
+
+			HLBiDrawBeams(hl_canvas, tS);
+		}
+		else
+			HLRenderEntities();
+	}
+
+	HLEntDrawBeams(hl_canvas);
+
+	HLAITripmineBeams(hl_canvas);
+
+	HLPartDraw(hl_canvas, tS);
+
+	vm_show = ToBool(HLClientMode && hl_cl.health > 0 && !hl_intermission);
+
+	if (vm_show)
+	{
+		vm_mdl   = NULL;
+		vm_frame = 0;
+
+		if (hl_cl.weaponmodel > 0 &&
+			hl_cl.weaponmodel < hl_precache_model_count)
+		{
+			vm_mdl   = hl_precache_mdl[hl_cl.weaponmodel];
+			vm_frame = hl_cl.weaponframe;
+		}
+
+		if (vm_mdl)
+		{
+			if (hl_opt_gunclip)
+				vm_depth = 1.0 / 0.3;
+			else
+				vm_depth = 1.0;
+
+			HLMdlDrawView(hl_canvas, vm_mdl, vm_frame,
+				HLVM_FORWARD + HLViewBob * 0.4, HLVM_RIGHT, HLVM_UP,
+				1.0, HLVM_LIGHT, vm_depth);
+		}
+	}
+
+	if (hl_hud_dirty)
+	{
+		hl_hud_dirty = FALSE;
+		HLHudLoad(hl_canvas->width);
+	}
+
+	if (!hl_loading && HLMapValid(hl_map, "HLCShiftDraw") && hl_vis)
+		HLCShiftDraw(hl_canvas);
+
+	if (!hl_intermission || hl_finale)
+		HLSbarCenterPrint(hl_canvas);
+
+	if (hl_intermission && !hl_finale && HLCvarGet("deathmatch") != 0.0)
+	{
+		HLSbarDrawScoreboard(hl_canvas);
+	}
+	else
+	{
+		HLSbarIntermission(hl_canvas, hl_completed_time);
+	}
+
+	if (!hl_intermission)
+	{
+		HLSbarTileClear(hl_canvas);
+		HLHudDrawFrame(hl_canvas);
+	}
+
+	HLHudOverlayDraw(hl_canvas);
+
+	HLHudMsgDraw(hl_canvas);
+
+	if (hl_scoreboard_show)
+		HLSbarDrawScoreboard(hl_canvas);
+
+	if (hl_state == HLST_CONSOLE)
+		HLConDraw(hl_canvas);
+	else
+		HLConDrawNotify(hl_canvas);
+
+	HLPresent;
+}
+
+U0 HLCenterView(CTask *task)
+{
+	I64 w = task->pix_width;
+	I64 h = task->pix_height;
+	I64 cw;
+	I64 ch;
+
+	if (!hl_canvas)
+		return;
+
+	cw = hl_canvas->width;
+	ch = hl_canvas->height;
+
+	hl_blit_w = w;
+	hl_blit_h = (w * ch) / cw;
+
+	if (hl_blit_h > h)
+	{
+		hl_blit_h = h;
+		hl_blit_w = (h * cw) / ch;
+	}
+
+	if (hl_blit_w < 1) hl_blit_w = 1;
+	if (hl_blit_h < 1) hl_blit_h = 1;
+
+	hl_blit_x = (w - hl_blit_w) / 2;
+	hl_blit_y = (h - hl_blit_h) / 2;
+}
+
+U0 HLWindowApply()
+{
+	I64 w;
+	I64 h;
+
+	if (!hl_canvas)
+		return;
+
+	w = hl_canvas->width;
+	h = hl_canvas->height;
+
+	WinBorder(OFF);
+
+	if (hl_opt_fullscreen)
+	{
+		WinHorz(0, TEXT_COLS - 1);
+		WinVert(0, TEXT_ROWS - 1);
+	}
+	else
+	{
+		WinHorz(2, 2 + (w / FONT_WIDTH));
+		WinVert(2, 2 + (h / FONT_HEIGHT));
+	}
+
+	WinToTop;
+	HLCenterView(Fs);
+}
+
+U0 HLApplyVideo()
+{
+	CHLCanvas *old;
+	I64		  w = hl_res_w[hl_opt_res];
+	I64		  h = hl_res_h[hl_opt_res];
+
+	if (hl_canvas && hl_opt_res == hl_res_applied)
+	{
+		HLLog("video: window only\n");
+		HLLogFlush;
+		HLWindowApply;
+		hl_res_dirty = FALSE;
+		return;
+	}
+
+	HLLog("video: drain\n");
+	HLLogFlush;
+
+	hl_ready     = FALSE;
+	Fs->draw_it = NULL;
+	Sleep(60);
+
+	HLLog("video: free canvas\n");
+	HLLogFlush;
+
+	old      = hl_canvas;
+	hl_canvas = NULL;
+	HLDrawFree(old);
+	HLPresentFree;
+
+	hl_canvas = HLDrawNew(w, h);
+
+	if (!hl_canvas)
+	{
+		"HL1: %d x %d canvas refused, staying at %d x %d\n",
+			w, h, hl_res_w[hl_res_applied], hl_res_h[hl_res_applied];
+
+		hl_opt_res = hl_res_applied;
+		w          = hl_res_w[hl_opt_res];
+		h          = hl_res_h[hl_opt_res];
+
+		hl_canvas = HLDrawNew(w, h);
+	}
+
+	if (!hl_canvas)
+	{
+		hl_opt_res = 0;
+		w          = hl_res_w[0];
+		h          = hl_res_h[0];
+		hl_canvas  = HLDrawNew(w, h);
+	}
+
+	if (!hl_canvas)
+	{
+		"HL1: no canvas could be allocated\n";
+		hl_quit_request = TRUE;
+		hl_res_dirty    = FALSE;
+
+		Fs->draw_it = &HLDrawIt;
+		return;
+	}
+
+	if (!HLPresentAlloc(hl_canvas->width, hl_canvas->height))
+		"HL1: present buffer refused; blit falls back to live canvas\n";
+
+	hl_res_applied = hl_opt_res;
+
+	HLLog("video: canvas ok, resizing window\n");
+	HLLogFlush;
+
+	HLWindowApply;
+
+	HLLog("video: window resized, restoring draw_it\n");
+	HLLogFlush;
+
+	Fs->draw_it  = &HLDrawIt;
+	hl_res_dirty = FALSE;
+
+	HLHudLoad(hl_canvas->width);
+
+	HLDrawSetViewRect(hl_canvas, HLCvarGet("viewsize"), HLSbarLines);
+}
+
+Bool HLLoadMap(U8 *mapname)
+{
+	I64 ent_count;
+	I64 mdl_count;
+	I64 host_slot;
+	U8  line[256];
+
+	if (hl_vis)
+	{
+		HLVisFree(hl_vis);
+		hl_vis = NULL;
+	}
+	if (hl_map)
+	{
+		HLBSPFree(hl_map);
+		hl_map = NULL;
+	}
+
+	hl_map = HLBSPLoad(mapname);
+	if (!hl_map)
+		return FALSE;
+
+	HLStrCopy(hl_map_name, mapname, 96);
+
+	HLPartTrailReset;
+
+	hl_vis = HLVisNew(hl_map);
+
+	ent_count = HLEntParse(hl_map);
+	mdl_count = HLEntLoadModels;
+
+	HLHeapCheck("after HLBSPLoad");
+
+	StrPrint(line, "map %s: %d entities, %d static models\n",
+		mapname, ent_count, mdl_count);
+	HLLog(line);
+
+	HLSvClearSignon;
+
+	if (hl_demo_playing)
+	{
+		HLGameShutdown;
+
+		HLNetStatesClear;
+		HLNetClientClear;
+	}
+
+	else
+	{
+		HLGameInit(hl_map);
+
+		hl_hud_time = hl_game_time;
+
+		StrPrint(line, "entities: %d classes spawned natively\n",
+			HLEntSpawnAll(hl_map));
+		HLLog(line);
+
+		hl_ent_player = 0;
+
+		HLWeaponPlayerSpawn;
+		hl_wpn_spawned   = TRUE;
+		hl_wpn_last_time = hl_ent_time;
+
+		HLEntReport;
+
+		if (!hl_ai_sent_count)
+			HLAISentencesLoad;
+	}
+
+	HLLogFlush;
+	"HL1: %d entities, %d alias models\n", ent_count, mdl_count;
+
+	HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+	hl_on_ground = FALSE;
+
+	if (!HLEntFindPlayerStart(hl_origin, hl_angles))
+	{
+		"HL1: no info_player_start, using model bounds (noclip on)\n";
+		hl_noclip = TRUE;
+		hl_origin[0] = (hl_map->models[0].mins[0] + hl_map->models[0].maxs[0]) * 0.5;
+		hl_origin[1] = (hl_map->models[0].mins[1] + hl_map->models[0].maxs[1]) * 0.5;
+		hl_origin[2] = (hl_map->models[0].mins[2] + hl_map->models[0].maxs[2]) * 0.5;
+		HLVecSet(hl_angles, 0.0, 0.0, 0.0);
+	}
+
+	HLVecCopy(hl_origin, hl_old_origin);
+
+	HLSurfCacheSetMap(hl_map);
+
+	HLSvClientsClear;
+	HLSvHostTickInit;
+
+	if (hl_udp_ready && hl_udp_server)
+		host_slot = HLSvHostClaimLocal(hl_origin, hl_angles, hl_setup_name,
+			hl_setup_top, hl_setup_bottom);
+	else
+	{
+		host_slot = -1;
+		HLSvMaxClientsSet(1);
+	}
+
+	no_warn host_slot;
+
+	hl_world_active = TRUE;
+
+	return TRUE;
+}
+
+#define HLTRANSITION_PATH	"HLTRANS.SAV"
+
+U0 HLSavePath(I64 slot, U8 *out)
+{
+	if (slot < 0)				slot = 0;
+	if (slot >= HLSAVE_SLOTS)	slot = HLSAVE_SLOTS - 1;
+
+	StrPrint(out, "HLSAVE%d.SAV", slot + 1);
+}
+
+Bool HLSaveGame()
+{
+	U8 path[32];
+
+	HLSavePath(hl_menu_slot, path);
+
+	return HLSaveWrite(path, hl_map_name, hl_game_time, hl_origin,
+		hl_velocity, hl_angles, hl_on_ground, hl_water_level, hl_water_type);
+}
+
+Bool HLLoadGame()
+{
+	U8 mapname[96];
+	U8 line[160];
+	U8 path[32];
+
+	HLSavePath(hl_menu_slot, path);
+
+	if (!HLSaveReadHeader(path, mapname))
+		return FALSE;
+
+	HLGameShutdown;
+	HLEntFree;
+
+	if (hl_vis)
+	{
+		HLVisFree(hl_vis);
+		hl_vis = NULL;
+	}
+	if (hl_map)
+	{
+		HLBSPFree(hl_map);
+		hl_map = NULL;
+	}
+
+	if (!HLLoadMap(mapname))
+	{
+		StrPrint(line, "load: %s failed to load\n", mapname);
+		HLLog(line);
+		HLSaveDiscard;
+		return FALSE;
+	}
+
+	HLSvClearSignon;
+
+	HLGameInit(hl_map);
+
+	if (!HLSaveRestore(&hl_game_time, hl_origin, hl_velocity, hl_angles,
+		&hl_on_ground, &hl_water_level, &hl_water_type))
+	{
+		HLLog("load: restore failed\n");
+		return FALSE;
+	}
+
+	hl_ent_display_title = FALSE;
+	HLHudTitleInit;
+	hl_fade_mode = HLFADE_NONE;
+	hl_fade_a    = 0;
+
+	HLNetStatesClear;
+	HLNetClientClear;
+	HLMsgClear(&hl_net_send);
+	HLMsgAppendIfRoom(&hl_net_send, &hl_sv_signon, HLNET_MAX_MSG);
+	HLNetSendToClient(&hl_net_send);
+	HLNetClientFrame;
+
+	HLVecCopy(hl_origin, hl_old_origin);
+	hl_world_warned = FALSE;
+	HLBiIntermissionClear;
+
+	StrPrint(line, "load: %s at %.0f %.0f %.0f\n", mapname,
+		hl_origin[0], hl_origin[1], hl_origin[2]);
+	HLLog(line);
+	HLLogFlush;
+
+	return TRUE;
+}
+
+Bool HLPakMountOne(U8 *dir, I64 index)
+{//mount dir/pakN, trying both cases. Valve ships PAK0.PAK;
+	U8 pakname[64];
+
+	StrPrint(pakname, "%s/%s/PAK%d.PAK", hl_game_root, dir, index);
+	if (FileFind(pakname))
+		return HLPakMount(pakname);
+
+	StrPrint(pakname, "%s/%s/pak%d.pak", hl_game_root, dir, index);
+	if (FileFind(pakname))
+		return HLPakMount(pakname);
+
+	return FALSE;
+}
+
+U0 HLPakMountGame()
+{
+	I64	i;
+
+	if (!HLPakMountOne("valve", 0))
+		return;
+
+	i = 1;
+	while (i < HLPAK_MAX_PAKS && HLPakMountOne("valve", i))
+		i++;
+
+	if (!hl_game_dir[0])
+		return;
+
+	if (!HLPakMountOne(hl_game_dir, 0))
+	{
+		HLLog("gamedir: no pak0 in that directory\n");
+		return;
+	}
+
+	i = 1;
+	while (i < HLPAK_MAX_PAKS && HLPakMountOne(hl_game_dir, i))
+		i++;
+}
+
+Bool HLGameDirSwitch(U8 *dir)
+{
+	U8	line[96];
+
+	if (!dir)
+		return FALSE;
+
+	hl_ready = FALSE;
+	Sleep(60);
+
+	HLDemoStop;
+	hl_demo_loop = FALSE;
+
+	HLGameShutdown;
+	HLEntFree;
+
+	HLMoveStateReset;
+
+	HLSurfCacheFlush;
+	HLSurfCacheSetMap(NULL);
+
+	if (hl_vis)
+	{
+		HLVisFree(hl_vis);
+		hl_vis = NULL;
+	}
+	if (hl_map)
+	{
+		HLBSPFree(hl_map);
+		hl_map = NULL;
+	}
+
+	HLMusicFree;
+	HLSndFree;
+
+	HLMdlCacheFree;
+	HLStudioCacheFree;
+	HLMdlPreviewFree;
+
+	HLWad3UnmountAll;
+	HLPakUnmountAll;
+
+	HLStrCopy(hl_game_dir, dir, 32);
+	HLWad3SetGameDir(hl_game_dir);
+	HLPakMountGame;
+
+	HLCvarSet("registered", 1.0);
+
+	if (!HLPalLoad)
+	{
+		HLLog("gamedir: palette missing, cannot continue\n");
+		return FALSE;
+	}
+
+	HLWadInit;
+	HLSbarInit;
+	HLMenuInit;
+
+	HLNetStatesClear;
+	HLNetClientClear;
+	HLBiFreePrecache;
+
+	hl_menu_ingame = FALSE;
+	hl_menu_page   = HLPAGE_MAIN;
+	hl_state       = HLST_MENU;
+	hl_map_name[0] = 0;
+
+	hl_ready = TRUE;
+
+	if (dir[0])
+		StrPrint(line, "gamedir: now %s\n", dir);
+	else
+		StrPrint(line, "gamedir: now valve\n");
+	HLLog(line);
+	HLConPrint(line);
+	HLCfgSave;
+
+	return TRUE;
+}
+
+Bool HLChangeLevel(U8 *mapname)
+{
+	U8  path[96];
+	U8  line[160];
+	U8  lm_name[64];
+	F64 landmark_ofs[3];
+	Bool landmark_ok;
+	I64 li;
+	I64 ci;
+
+	hl_sv_keep_clients = TRUE;
+
+	landmark_ok = FALSE;
+	lm_name[0]  = 0;
+
+	if (hl_ent_changelevel_landmark[0])
+	{
+		li = HLEntFindByTargetname(hl_ent_changelevel_landmark, 0);
+
+		if (li >= 0)
+		{
+			HLVecSub(hl_origin, hl_entities[li].origin, landmark_ofs);
+
+			HLStrCopy(lm_name, hl_ent_changelevel_landmark, 64);
+			landmark_ok = TRUE;
+		}
+	}
+
+	HLGameShutdown;
+	HLEntFree;
+	HLMortarPendClear;
+
+	if (hl_vis)
+	{
+		HLVisFree(hl_vis);
+		hl_vis = NULL;
+	}
+	if (hl_map)
+	{
+		HLBSPFree(hl_map);
+		hl_map = NULL;
+	}
+
+	if (hl_canvas)
+	{
+		HLDrawClear(hl_canvas, 0);
+		if (hl_pic_conback.pixels)
+			HLPicDrawFill(hl_canvas, &hl_pic_conback);
+		HLSbarLoadingPlaque(hl_canvas);
+		HLPresent;
+		hl_loading = TRUE;
+	}
+
+	if (!StrNICompare(mapname, "maps/", 5))
+		HLStrCopy(path, mapname, 96);
+	else
+		StrPrint(path, "maps/%s.bsp", mapname);
+
+	if (!HLLoadMap(path))
+	{
+		hl_sv_keep_clients = FALSE;
+		hl_loading = FALSE;
+		StrPrint(line, "changelevel: %s failed to load\n", path);
+		HLLog(line);
+		return FALSE;
+	}
+
+	hl_sv_keep_clients = FALSE;
+	hl_loading = FALSE;
+
+	HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+	hl_water_level  = 0;
+	hl_water_type   = 0;
+	hl_on_ground    = FALSE;
+	hl_world_warned = FALSE;
+
+	if (landmark_ok)
+	{
+		li = HLEntFindByTargetname(lm_name, 0);
+
+		if (li >= 0)
+		{
+			HLVecAdd(hl_entities[li].origin, landmark_ofs, hl_origin);
+
+			StrPrint(line, "changelevel: landmark %s, offset %.0f %.0f %.0f\n",
+				lm_name,
+				landmark_ofs[0], landmark_ofs[1], landmark_ofs[2]);
+			HLLog(line);
+		}
+		else
+		{
+			StrPrint(line, "changelevel: landmark %s absent in %s\n",
+				lm_name, path);
+			HLLog(line);
+		}
+	}
+
+	if (hl_udp_ready && hl_udp_server)
+	{
+		for (ci = 0; ci < HLSV_MAX_CLIENTS; ci++)
+		{
+			if (!hl_sv_clients[ci].active || hl_sv_clients[ci].local)
+				goto qcl_next_client;
+
+			hl_sv_clients[ci].edict   = ci + 1;
+			hl_sv_clients[ci].spawned = FALSE;
+			hl_sv_clients[ci].signon  = 0;
+
+			hl_sv_clients[ci].sent_ident = FALSE;
+
+			HLNetSendServerInfo(ci);
+
+qcl_next_client:
+		}
+	}
+
+	HLVecCopy(hl_origin, hl_old_origin);
+
+	StrPrint(line, "changelevel: spawned at %.0f %.0f %.0f\n",
+		hl_origin[0], hl_origin[1], hl_origin[2]);
+	HLLog(line);
+
+	StrPrint(line, "changelevel -> %s\n", path);
+	HLLog(line);
+	HLLogFlush;
+
+	return TRUE;
+}
+
+U0 HLClientPrecacheRebuild()
+{
+	U8	*name;
+	I64	 j;
+
+	HLBiFreePrecache;
+
+	hl_precache_model[0]    = NULL;
+	hl_precache_mdl[0]      = NULL;
+	hl_precache_model_count = 1;
+
+	for (j = 0; j < hl_cl_model_count; j++)
+	{
+		name = hl_cl_model_names + j * HLCL_PRECACHE_NAME;
+		if (j == 0)
+		{
+			HLStrCopy(hl_world_model_name, name, 96);
+			hl_precache_model[1] = hl_world_model_name;
+			hl_precache_mdl[1]   = NULL;
+			hl_precache_model_count = 2;
+		}
+		else
+			HLBiPrecacheModel(name);
+	}
+
+	for (j = 0; j < hl_cl_sound_count; j++)
+		hl_precache_sound[j] = hl_cl_sound_names + j * HLCL_PRECACHE_NAME;
+	hl_precache_sound_count = hl_cl_sound_count;
+
+	StrPrint(hl_join_line, "client: %d models, %d sounds precached\n",
+		hl_precache_model_count, hl_precache_sound_count);
+	HLLog(hl_join_line);
+}
+
+U0 HLInputDrain()
+{
+	I64 ch;
+	I64 sc;
+	I64 guard = 0;
+
+	while (guard < 64 && KeyScan(&ch, &sc))
+		guard++;
+}
+
+U0 HLInputDrainAll()
+{
+	I64 ch;
+	I64 sc;
+	I64 guard;
+	I64 pass;
+
+	for (pass = 0; pass < 4; pass++)
+	{
+		guard = 0;
+		while (guard < 65536 && KeyScan(&ch, &sc))
+			guard++;
+
+		if (!guard)
+			break;
+
+		Sleep(10);
+	}
+}
+
+U0 HLGameLoop()
+{
+	F64  forward[3];
+	F64  right[3];
+	F64  up[3];
+	F64  move[3];
+	F64  speed;
+	F64  net_fwd;
+	F64  net_side;
+	F64  now;
+	F64  last;
+	F64  dt;
+	F64  fps_time;
+
+	I64  dx;
+	I64  dy;
+	I64  fps_frames   = 0;
+	I64  impulse      = 0;
+	I64  i            = 0;
+	I64  menu_sc      = 0;
+	I64  last_menu_sc = 0;
+	Bool attack       = FALSE;
+
+	Bool mouse1       = FALSE;
+	Bool mouse2       = FALSE;
+	Bool mouse3       = FALSE;
+	Bool esc_held     = FALSE;
+	Bool start_game   = FALSE;
+	Bool tilde_held   = FALSE;
+	I64  wheel_dz     = 0;
+	Bool save_held    = FALSE;
+	Bool load_held    = FALSE;
+	Bool hl_load_request = FALSE;
+	F64  srv_accum    = 0.0;
+	I64  srv_steps    = 0;
+
+	Bool use_now      = FALSE;
+	Bool hl_use_held  = FALSE;
+
+	U8   cl_line[96];
+
+	F64  use_fwd[3];
+	F64  use_rgt[3];
+	F64  use_up[3];
+	F64  use_eye[3];
+
+	last     = ToF64(counts.jiffies) / ToF64(JIFFY_FREQ);
+	fps_time = last;
+
+	while (TRUE)
+	{
+		now  = ToF64(counts.jiffies) / ToF64(JIFFY_FREQ);
+		dt   = now - last;
+		last = now;
+
+		if (dt > 0.1)
+			dt = 0.1;
+
+		if (hl_res_dirty)
+			HLApplyVideo;
+
+		HLInputDrain;
+
+		if (hl_world_active)
+		{
+			hl_music_mp3_on = ToBool(HLCvarGet("cdmp3") != 0.0);
+			HLMusicUpdate(now);
+
+			if (hl_con_want_bf)
+			{
+				hl_con_want_bf = FALSE;
+				HLCShiftBonus;
+			}
+
+			HLConDrainProgs;
+
+			HLConDrainStuff;
+
+			HLSvHostTick(now, dt, HLSERVER_STEP, hl_origin, hl_angles,
+				hl_velocity, hl_on_ground, HLPlayerHealth());
+		}
+
+		if (Bt(kbd.down_bitmap, SC_F2))
+		{
+			if (!save_held)
+			{
+				save_held = TRUE;
+				if (hl_world_active)
+					HLSaveGame;
+			}
+		}
+		else
+			save_held = FALSE;
+
+		if (Bt(kbd.down_bitmap, SC_F3))
+		{
+			if (!load_held)
+			{
+				load_held = TRUE;
+				hl_load_request = TRUE;
+			}
+		}
+		else
+			load_held = FALSE;
+
+		if (hl_menu_save_req)
+		{
+			hl_menu_save_req = FALSE;
+			if (hl_world_active)
+				HLSaveGame;
+		}
+
+		if (hl_menu_load_req)
+		{
+			hl_menu_load_req = FALSE;
+			hl_load_request  = TRUE;
+		}
+
+		if (hl_load_request)
+		{
+			hl_load_request = FALSE;
+			HLLoadGame;
+			goto ql_next_frame;
+		}
+
+		if (hl_menu_leave_req)
+		{
+			hl_menu_leave_req = FALSE;
+
+			HLGameShutdown;
+			HLEntFree;
+
+			if (hl_vis)
+			{
+				HLVisFree(hl_vis);
+				hl_vis = NULL;
+			}
+			if (hl_map)
+			{
+				HLBSPFree(hl_map);
+				hl_map = NULL;
+			}
+
+			hl_menu_ingame = FALSE;
+			hl_state       = HLST_MENU;
+			hl_menu_page   = HLPAGE_MAIN;
+			hl_menu_row    = 0;
+			hl_map_name[0] = 0;
+
+			goto ql_next_frame;
+		}
+
+		if (hl_udp_ready && !hl_udp_server)
+		{
+			if (tS - hl_join_last_try > 1.0)
+			{
+				hl_join_last_try = tS;
+
+				if (!HLNetUdpPeerResolved)
+					HLNetUdpArpProbe;
+
+				HLNetClientSendConnect(hl_setup_name, hl_setup_top, hl_setup_bottom);
+			}
+
+			HLNetClientFrame;
+		}
+
+		if (hl_demo_playing)
+		{
+			if (hl_change_pending)
+			{
+				hl_change_pending = FALSE;
+				if (HLChangeLevel(hl_change_map))
+					HLClientPrecacheRebuild;
+				else
+				{
+					HLLog("demo: level failed to load, stopping\n");
+					hl_demo_loop = FALSE;
+					HLDemoStop;
+				}
+			}
+
+			HLNetClientFrame;
+
+			if (hl_demo_playing)
+			{
+				if (hl_cl_viewent > 0 && hl_cl_viewent < HLNET_MAX_ENTS)
+					HLVecCopy(hl_net_cl[hl_cl_viewent].origin, hl_origin);
+				HLVecCopy(hl_demo_angles, hl_angles);
+			}
+
+			if (!hl_demo_playing)
+			{
+				hl_change_pending = FALSE;
+
+				hl_menu_ingame = FALSE;
+				hl_menu_page   = HLPAGE_MAIN;
+				hl_state       = HLST_MENU;
+			}
+		}
+
+		if (hl_net_join_pending)
+		{
+			hl_net_join_pending = FALSE;
+
+			if (hl_demo_playing || (hl_udp_ready && !hl_udp_server))
+			{
+				if (hl_demo_playing)
+					StrPrint(hl_join_line, "demo: %s, level %s\n",
+						hl_demo_name, hl_net_join_map);
+				else
+					StrPrint(hl_join_line, "net: joining, server level %s\n",
+						hl_net_join_map);
+				HLLog(hl_join_line);
+
+				HLStrCopy(hl_change_map, hl_net_join_map, 64);
+				hl_change_pending = TRUE;
+				hl_menu_ingame    = TRUE;
+				if (!hl_demo_playing || hl_state != HLST_MENU)
+					hl_state = HLST_PLAYING;
+			}
+		}
+
+		dx = mouse_hard.raw_data.x;
+		dy = mouse_hard.raw_data.y;
+
+		wheel_dz = mouse_hard.raw_data.z;
+
+		mouse1 = ToBool(mouse_hard.raw_bttns[0] || mouse_hard.bttns[0]);
+		mouse2 = ToBool(mouse_hard.raw_bttns[1] || mouse_hard.bttns[1]);
+		mouse3 = ToBool(mouse_hard.raw_bttns[2] || mouse_hard.bttns[2]);
+
+		MouseRawReset;
+
+		HLBindFrame(mouse1, mouse2, mouse3, wheel_dz,
+			ToBool(hl_state == HLST_PLAYING && !hl_msg_mode));
+
+		attack = HLInDown(HLIN_ATTACK);
+
+		if (HLBindActionDown("toggleconsole"))
+		{
+			if (!tilde_held)
+			{
+				tilde_held = TRUE;
+
+				if (hl_state == HLST_CONSOLE)
+				{
+					if (hl_menu_ingame)
+						hl_state = HLST_PLAYING;
+					else
+					{
+						hl_state     = HLST_MENU;
+						hl_menu_page = HLPAGE_MAIN;
+					}
+				}
+				else
+				{
+					hl_state = HLST_CONSOLE;
+
+					HLConInputReset;
+				}
+			}
+		}
+		else
+			tilde_held = FALSE;
+
+		hl_scoreboard_show = FALSE;
+		if (hl_state == HLST_PLAYING && !hl_msg_mode)
+		{
+			if (hl_in_msg_want)
+			{
+				HLMsgModeBegin(ToBool(hl_in_msg_want == 2));
+				HLConInputReset;
+			}
+
+			hl_scoreboard_show = HLInDown(HLIN_SCORE);
+		}
+
+		hl_in_msg_want = 0;
+
+		if (Bt(kbd.down_bitmap, SC_ESC))
+		{
+			if (!esc_held)
+			{
+				esc_held = TRUE;
+
+				if (hl_msg_mode)
+					HLMsgModeCancel;
+				else if (hl_state == HLST_PLAYING)
+				{
+					hl_state = HLST_MENU;
+					HLMenuMsReset;
+					HLMenuSound(HLMSND_ENTER);
+				}
+				else if (hl_state == HLST_CONSOLE)
+				{
+					hl_state     = HLST_MENU;
+					hl_menu_page = HLPAGE_MAIN;
+					HLMenuMsReset;
+					HLMenuSound(HLMSND_ENTER);
+				}
+				else if (hl_menu_page == HLPAGE_KEYS)
+					HLKeysKey(SC_ESC);
+				else if (hl_menu_page != HLPAGE_MAIN)
+					HLMenuKey(SC_ESC, &start_game);
+				else if (hl_menu_ingame)
+					hl_state = HLST_PLAYING;
+			}
+		}
+		else
+			esc_held = FALSE;
+
+		if (hl_state == HLST_CONSOLE)
+		{
+			HLConInput;
+
+			if (hl_con_want_noclip)
+			{
+				hl_noclip = !hl_noclip;
+				HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+				hl_con_want_noclip = FALSE;
+			}
+
+			if (hl_con_fov_want != 0.0)
+			{
+				hl_fov          = hl_con_fov_want;
+				hl_con_fov_want = 0.0;
+			}
+
+			if (hl_con_want_save)
+			{
+				hl_con_want_save = FALSE;
+				hl_con_save_ok   = HLSaveGame;
+			}
+
+			if (hl_con_want_load)
+			{
+				hl_con_want_load = FALSE;
+				hl_load_request  = TRUE;
+			}
+
+			if (hl_con_want_quit)
+				break;
+
+		}
+
+		if (hl_state == HLST_CONSOLE && !hl_menu_ingame)
+		{
+			HLMenuDraw(hl_canvas);
+			HLConDraw(hl_canvas);
+			HLPresent;
+			HLCenterView(Fs);
+			hl_ready = TRUE;
+
+			LBts(&Fs->task_flags, TASKf_IDLE);
+			Yield;
+			LBtr(&Fs->task_flags, TASKf_IDLE);
+			goto ql_next_frame;
+		}
+
+		if (hl_state == HLST_MENU)
+		{
+			menu_sc = 0;
+
+			if (hl_menu_page == HLPAGE_KEYS && hl_keys_capture)
+			{
+				for (i = 1; i < 0x100; i++)
+				{
+					if (Bt(kbd.down_bitmap, i))
+					{
+						menu_sc = i;
+						break;
+					}
+				}
+			}
+			else
+			{
+				if (Bt(kbd.down_bitmap, SC_CURSOR_UP))		menu_sc = SC_CURSOR_UP;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_DOWN))	menu_sc = SC_CURSOR_DOWN;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_LEFT))	menu_sc = SC_CURSOR_LEFT;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_RIGHT))	menu_sc = SC_CURSOR_RIGHT;
+				if (Bt(kbd.down_bitmap, SC_ENTER))			menu_sc = SC_ENTER;
+
+				if (Bt(kbd.down_bitmap, SC_PAGE_UP))		menu_sc = SC_PAGE_UP;
+				if (Bt(kbd.down_bitmap, SC_PAGE_DOWN))		menu_sc = SC_PAGE_DOWN;
+				if (Bt(kbd.down_bitmap, SC_DELETE))			menu_sc = SC_DELETE;
+				if (Bt(kbd.down_bitmap, SC_BACKSPACE))		menu_sc = SC_BACKSPACE;
+			}
+
+			HLSetupInput;
+			HLLanInput;
+
+			if (menu_sc && menu_sc != last_menu_sc && !hl_setup_editing &&
+				!hl_lan_editing)
+			{
+				if (HLMenuKey(menu_sc, &start_game))
+				{
+					if (start_game)
+					{
+						HLDemoStop;
+						hl_demo_loop = FALSE;
+
+						hl_menu_ingame = TRUE;
+						hl_state       = HLST_PLAYING;
+					}
+				}
+			}
+			last_menu_sc = menu_sc;
+
+			if (HLMenuMouse(hl_canvas, dx, dy, hl_blit_w, hl_blit_h,
+				mouse1, wheel_dz, &start_game))
+			{
+				if (start_game)
+				{
+					HLDemoStop;
+					hl_demo_loop = FALSE;
+
+					hl_menu_ingame = TRUE;
+					hl_state       = HLST_PLAYING;
+				}
+			}
+
+			if (hl_mp_start_dm)
+			{
+				HLDemoStop;
+				hl_demo_loop = FALSE;
+
+				hl_mp_start_dm = FALSE;
+				hl_menu_ingame = TRUE;
+				hl_state       = HLST_PLAYING;
+			}
+
+			if (hl_quit_request)
+				break;
+
+			if (hl_menu_ingame && hl_map && hl_vis)
+				HLRenderFrame;
+
+			HLMenuDraw(hl_canvas);
+			HLMenuMsDraw(hl_canvas);
+			HLPresent;
+			HLCenterView(Fs);
+			hl_ready = TRUE;
+
+			LBts(&Fs->task_flags, TASKf_IDLE);
+			Yield;
+			LBtr(&Fs->task_flags, TASKf_IDLE);
+			goto ql_next_frame;
+		}
+
+		if (hl_state != HLST_PLAYING || hl_msg_mode)
+		{
+			dx       = 0;
+			dy       = 0;
+			wheel_dz = 0;
+			attack   = FALSE;
+		}
+
+		if (hl_intermission)
+		{
+			dx = 0;
+			dy = 0;
+		}
+
+		hl_angles[1] -= ToF64(dx) * hl_opt_sensitivity;
+		if (HLCvarGet("m_pitch") < 0.0)
+			hl_angles[0] -= ToF64(dy) * hl_opt_sensitivity;
+		else
+			hl_angles[0] += ToF64(dy) * hl_opt_sensitivity;
+
+		if (hl_state == HLST_PLAYING && !hl_msg_mode && !hl_intermission)
+		{
+			if (HLInDown(HLIN_LOOKUP))
+				hl_angles[0] -= HLLOOK_PITCHSPEED * dt;
+			if (HLInDown(HLIN_LOOKDOWN))
+				hl_angles[0] += HLLOOK_PITCHSPEED * dt;
+
+			if (HLInDown(HLIN_KLOOK))
+			{
+				if (HLInDown(HLIN_FORWARD))
+					hl_angles[0] -= HLLOOK_PITCHSPEED * dt;
+				if (HLInDown(HLIN_BACK))
+					hl_angles[0] += HLLOOK_PITCHSPEED * dt;
+			}
+
+			if (!HLInDown(HLIN_STRAFE))
+			{
+				if (HLInDown(HLIN_LEFT))
+					hl_angles[1] += HLLOOK_YAWSPEED * dt;
+				if (HLInDown(HLIN_RIGHT))
+					hl_angles[1] -= HLLOOK_YAWSPEED * dt;
+			}
+		}
+
+		if (hl_angles[0] > HLPITCH_LIMIT)
+			hl_angles[0] = HLPITCH_LIMIT;
+		if (hl_angles[0] < -HLPITCH_LIMIT)
+			hl_angles[0] = -HLPITCH_LIMIT;
+
+		hl_angles[1] = HLAngleNorm(hl_angles[1]);
+
+		impulse = 0;
+
+		if (hl_in_slot_want)
+		{
+			impulse         = hl_in_slot_want;
+			hl_in_slot_want = 0;
+		}
+
+		if (hl_in_cycle_want > 0)
+			impulse = 10;
+		else if (hl_in_cycle_want < 0)
+			impulse = 12;
+
+		hl_wpn_cycle_want = hl_in_cycle_want;
+
+		hl_in_cycle_want = 0;
+
+		if (hl_in_lastinv_want)
+		{
+			hl_in_lastinv_want = FALSE;
+			HLConLastInv;
+		}
+
+		if (hl_in_centerview_want)
+		{
+			hl_in_centerview_want = FALSE;
+			hl_angles[0]          = 0.0;
+		}
+
+
+		HLAngleVectors(hl_angles, forward, right, up);
+		HLVecSet(move, 0.0, 0.0, 0.0);
+		net_fwd  = 0.0;
+		net_side = 0.0;
+
+		if (hl_msg_mode || hl_state == HLST_CONSOLE)
+		{
+			if (hl_msg_mode)
+				HLMsgModeInput;
+			impulse = 0;
+			attack  = FALSE;
+		}
+		else if (HLPlayerFrozen)
+		{
+			impulse = 0;
+		}
+		else
+		{
+			if (!HLInDown(HLIN_KLOOK))
+			{
+				if (HLInDown(HLIN_FORWARD))
+				{
+					HLVecAdd(move, forward, move);
+					net_fwd += 1.0;
+				}
+				if (HLInDown(HLIN_BACK))
+				{
+					HLVecSub(move, forward, move);
+					net_fwd -= 1.0;
+				}
+			}
+
+			if (HLInDown(HLIN_MOVERIGHT) ||
+				(HLInDown(HLIN_STRAFE) && HLInDown(HLIN_RIGHT)))
+			{
+				HLVecAdd(move, right, move);
+				net_side += 1.0;
+			}
+			if (HLInDown(HLIN_MOVELEFT) ||
+				(HLInDown(HLIN_STRAFE) && HLInDown(HLIN_LEFT)))
+			{
+				HLVecSub(move, right, move);
+				net_side -= 1.0;
+			}
+
+			if (HLInDown(HLIN_MOVEUP))
+				move[2] += 1.0;
+			if (HLInDown(HLIN_MOVEDOWN))
+				move[2] -= 1.0;
+		}
+
+		speed = HLCvarGet("cl_forwardspeed");
+		if (speed < HLMOVE_SPEED)
+			speed = HLMOVE_SPEED;
+
+		if (HLInDown(HLIN_SPEED))
+		{
+			if (speed >= HLMOVE_FAST)
+				speed = HLMOVE_SPEED;
+			else
+				speed = HLMOVE_FAST;
+		}
+
+		if (hl_noclip)
+		{
+			HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+			if (HLVecLength(move) > 0.0)
+			{
+				HLVecNormalize(move);
+				HLVecMA(hl_origin, speed * dt, move, hl_origin);
+			}
+		}
+		else
+		{
+			hl_water_level = HLWaterLevelGet(hl_map, hl_origin, &hl_water_type);
+
+			if (hl_water_level < 2)
+				move[2] = 0.0;
+
+			if (HLVecLength(move) > 0.0)
+				HLVecNormalize(move);
+		}
+
+		if (hl_con_impulse_want)
+		{
+			impulse            = hl_con_impulse_want;
+			hl_con_impulse_want = 0;
+		}
+
+		//Console heapcheck 1 only: the sweep walks every live allocation.
+		if (hl_heap_check_on && tS - hl_heap_check_last > 1.0)
+		{
+			hl_heap_check_last = tS;
+			StrPrint(hl_heap_check_line, "in game f%d", hl_frame_count);
+			HLHeapCheck(hl_heap_check_line);
+		}
+
+		if (hl_net_active && hl_udp_server && tS - hl_tick_log_last > 1.0)
+		{
+			hl_tick_log_last = tS;
+
+			if (hl_tick_log_n < 120)
+			{
+				hl_tick_log_n++;
+
+				StrPrint(hl_tick_line,
+					"tick: state %d rem %d org(%.0f %.0f) "
+					"mv(%.0f %.0f) sig %d\n",
+					hl_state, hl_sv_clients[1].edict,
+					hl_sv_clients[1].origin[0], hl_sv_clients[1].origin[1],
+					hl_sv_clients[1].cmd[0], hl_sv_clients[1].cmd[1],
+					hl_sv_clients[1].signon);
+				HLLog(hl_tick_line);
+				HLLogFlush;
+			}
+		}
+
+		if (hl_paused)
+			srv_accum = 0.0;
+		else
+			srv_accum += dt;
+
+		srv_steps  = 0;
+
+		while (srv_accum >= HLSERVER_STEP && srv_steps < HLSERVER_MAX_CATCHUP)
+		{
+			hl_move_pass = hl_player_edict;
+
+			hl_game_time += HLSERVER_STEP;
+
+			hl_ent_death_button = ToBool(HLInDown(HLIN_JUMP) ||
+				HLInDown(HLIN_ATTACK) || HLInDown(HLIN_ATTACK2) ||
+				HLInDown(HLIN_USE) || HLInDown(HLIN_FORWARD) ||
+				HLInDown(HLIN_BACK));
+
+			HLEntFrame(hl_map, HLSERVER_STEP, hl_origin, hl_angles);
+
+		if (hl_demo_playing)
+			{
+				if (hl_cl_viewent > 0 && hl_cl_viewent < HLNET_MAX_ENTS)
+					HLVecCopy(hl_net_cl[hl_cl_viewent].origin, hl_origin);
+
+				HLVecCopy(hl_demo_angles, hl_angles);
+				HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+				hl_on_ground = TRUE;
+			}
+			else if (hl_udp_ready && !hl_udp_server)
+			{
+			}
+			else if (!hl_noclip)
+			{
+				if (hl_ent_input_locked || hl_ent_cam_freeze)
+				{
+					HLVecSet(move, 0.0, 0.0, 0.0);
+					speed = 0.0;
+				}
+
+				HLPlayerMove(hl_map, hl_origin, hl_velocity, move, speed,
+					ToBool(HLInDown(HLIN_JUMP) && !hl_ent_input_locked &&
+							!hl_ent_cam_freeze),
+					HLSERVER_STEP,
+					&hl_on_ground, hl_water_level, FALSE, hl_angles,
+					hl_player_edict,
+					ToBool(HLInDown(HLIN_DUCK) && !hl_ent_input_locked));
+			}
+
+			HLVecCopy(hl_origin, hl_ent_player_org);
+
+			HLEntTouchPlayer(hl_origin);
+
+			HLAIFrame(HLSERVER_STEP);
+
+
+			if (hl_fall_damage_pending > 0.0)
+			{
+				HLShellHurt(hl_fall_damage_pending, HLDMG_FALL);
+				hl_fall_damage_pending = 0.0;
+			}
+
+			HLShellDrown;
+
+			if (hl_step_play)
+			{
+				HLSndPlayStepSound(hl_step_kind, hl_step_vol, hl_origin, 0);
+				hl_step_play = FALSE;
+			}
+
+			if (hl_fall_sound_vol > 0.0)
+			{
+				HLSndLandStep(hl_map, hl_origin, hl_fall_sound_vol, 0);
+
+				if (hl_fall_pain)
+					HLSndPlayAt("player/pl_fallpain3.wav", hl_origin,
+						1.0, 1.0, 0, 0);
+
+				hl_fall_sound_vol = 0.0;
+				hl_fall_pain      = FALSE;
+			}
+
+			hl_gravity_scale = hl_ent_gravity;
+
+			if (hl_ent_shake_pending)
+			{
+				if (hl_ent_time < hl_ent_shake_until)
+				{
+					hl_punch[0] += HLPartRand(hl_ent_shake_amp * 0.05);
+					hl_punch[2] += HLPartRand(hl_ent_shake_amp * 0.05);
+				}
+				else
+					hl_ent_shake_pending = FALSE;
+			}
+
+			if (hl_fall_punch_z != 0.0)
+			{
+				hl_punch[2]     += hl_fall_punch_z;
+				hl_fall_punch_z  = 0.0;
+			}
+
+			hl_punch[0] += hl_wpn_punch[0];
+			hl_punch[1] += hl_wpn_punch[1];
+			hl_punch[2] += hl_wpn_punch[2];
+			HLVecSet(hl_wpn_punch, 0.0, 0.0, 0.0);
+
+			hl_velocity[0] += hl_wpn_push[0];
+			hl_velocity[1] += hl_wpn_push[1];
+			hl_velocity[2] += hl_wpn_push[2];
+			HLVecSet(hl_wpn_push, 0.0, 0.0, 0.0);
+
+			hl_punch[0] -= hl_punch[0] * 10.0 * HLSERVER_STEP;
+			hl_punch[1] -= hl_punch[1] * 10.0 * HLSERVER_STEP;
+			hl_punch[2] -= hl_punch[2] * 10.0 * HLSERVER_STEP;
+
+			if (hl_ent_teleport_pending)
+			{
+				HLVecCopy(hl_ent_teleport_to, hl_origin);
+				HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+				hl_on_ground = FALSE;
+				hl_ent_teleport_pending = FALSE;
+			}
+
+			if (hl_ent_push_pending)
+			{
+				HLVecAdd(hl_velocity, hl_ent_push_vel, hl_velocity);
+				hl_ent_push_pending = FALSE;
+			}
+
+			if (hl_ent_respawn_pending)
+			{
+				hl_ent_respawn_pending = FALSE;
+
+				HLVecCopy(hl_ent_respawn_org, hl_origin);
+				HLVecCopy(hl_ent_respawn_ang, hl_angles);
+				HLVecSet(hl_velocity, 0.0, 0.0, 0.0);
+
+				hl_on_ground   = FALSE;
+				hl_water_level = 0;
+				hl_water_type  = 0;
+
+				HLVecCopy(hl_origin, hl_old_origin);
+			}
+
+			if (!HLIsZeroF(hl_platform_yaw_carry))
+			{
+				hl_angles[1] += hl_platform_yaw_carry;
+
+				while (hl_angles[1] >= 360.0)
+					hl_angles[1] -= 360.0;
+				while (hl_angles[1] < 0.0)
+					hl_angles[1] += 360.0;
+
+				hl_platform_yaw_carry = 0.0;
+			}
+
+			use_now = ToBool(HLInDown(HLIN_USE) && !hl_ent_input_locked);
+
+			if (use_now && !hl_use_held)
+			{
+				HLAngleVectors(hl_angles, use_fwd, use_rgt, use_up);
+
+				HLVecCopy(hl_origin, use_eye);
+				use_eye[2] += HLPlayerViewHeight;
+
+				HLEntUseInFront(use_eye, use_fwd);
+
+				HLAIFollowerUseInFront(use_eye, use_fwd);
+			}
+			else if (use_now)
+			{
+				HLAngleVectors(hl_angles, use_fwd, use_rgt, use_up);
+
+				HLVecCopy(hl_origin, use_eye);
+				use_eye[2] += HLPlayerViewHeight;
+
+				HLEntUseInFront(use_eye, use_fwd, TRUE);
+			}
+
+			hl_use_held = use_now;
+
+
+			HLShellDamageFrame;
+
+			srv_accum -= HLSERVER_STEP;
+			srv_steps++;
+		}
+
+		if (srv_accum > HLSERVER_STEP)
+			srv_accum = 0.0;
+
+		if (hl_udp_ready && !hl_udp_server && hl_cl_signon >= 4)
+		{
+			HLNetClientSendMove(hl_angles, net_fwd * speed, net_side * speed,
+				ToF64(HLSvFlagI(HLInDown(HLIN_MOVEUP)) -
+					HLSvFlagI(HLInDown(HLIN_MOVEDOWN))) * speed,
+				attack,
+				ToBool(HLInDown(HLIN_JUMP) && !hl_ent_input_locked),
+				impulse, hl_game_time,
+				ToBool(HLInDown(HLIN_DUCK) && !hl_ent_input_locked),
+				dt);
+			HLPredApply(hl_map, hl_origin, hl_velocity, &hl_on_ground);
+			HLVecCopy(hl_pred_punch, hl_punch);
+		}
+
+		HLTrainPlayerDriveFrame(
+			ToBool(HLInDown(HLIN_FORWARD) && !hl_ent_input_locked),
+			ToBool(HLInDown(HLIN_BACK) && !hl_ent_input_locked));
+
+		if (hl_ent_weaponstrip_pending)
+		{
+			hl_ent_weaponstrip_pending = FALSE;
+			HLWeaponRemoveAll;
+		}
+
+		//player_loadsaved and SP death
+		if (hl_ent_loadsaved_pending)
+		{
+			hl_ent_loadsaved_pending = FALSE;
+
+			if (!HLLoadGame)
+			{
+				HLLog("reload: no save - remounting map\n");
+
+				if (hl_map_name[0])
+					HLChangeLevel(hl_map_name);
+			}
+			goto ql_next_frame;
+		}
+
+		if (hl_ent_autosave_pending)
+		{
+			hl_ent_autosave_pending = FALSE;
+			HLSaveGame;
+		}
+
+		if (hl_ent_endsection_pending)
+		{
+			hl_ent_endsection_pending = FALSE;
+			hl_state                  = HLST_MENU;
+			hl_menu_page              = HLPAGE_MAIN;
+		}
+
+		if (hl_ent_changelevel_pending)
+		{
+			hl_ent_changelevel_pending = FALSE;
+
+			if (hl_ent_changelevel[0])
+			{
+				StrPrint(cl_line, "changelevel: %s\n", hl_ent_changelevel);
+				HLLog(cl_line);
+
+				HLLogFlush;
+
+				HLSaveTransitionWrite(HLTRANSITION_PATH, hl_ent_changelevel,
+					hl_ent_changelevel_landmark, hl_origin, hl_angles);
+
+				if (HLChangeLevel(hl_ent_changelevel))
+					HLSaveTransitionRestore(HLTRANSITION_PATH, hl_origin,
+						hl_angles);
+				else
+				{
+					HLLog("changelevel: failed to load\n");
+
+					hl_world_active = FALSE;
+					hl_menu_ingame  = FALSE;
+					hl_state        = HLST_MENU;
+					hl_menu_page    = HLPAGE_MAIN;
+					hl_menu_row     = 0;
+
+					goto ql_next_frame;
+				}
+			}
+		}
+
+		HLPartUpdate(dt, tS);
+
+		HLCenterView(Fs);
+		HLRenderFrame;
+		hl_ready = TRUE;
+
+		hl_frame_count++;
+		fps_frames++;
+		if (now - fps_time >= 0.5)
+		{
+			hl_fps      = ToF64(fps_frames) / (now - fps_time);
+			fps_frames = 0;
+			fps_time   = now;
+		}
+
+		if (hl_restart_pending)
+		{
+			hl_restart_pending = FALSE;
+			HLChangeLevel(hl_map_name);
+			goto ql_next_frame;
+		}
+
+		if (hl_gamedir_pending)
+		{
+			hl_gamedir_pending = FALSE;
+			hl_change_pending  = FALSE;
+			HLGameDirSwitch(hl_gamedir_next);
+			goto ql_next_frame;
+		}
+
+		if (hl_change_pending && !hl_demo_playing)
+		{
+			hl_change_pending = FALSE;
+			HLChangeLevel(hl_change_map);
+
+			//Guest: after map load, reply to signonnum 1 with "prespawn".
+			if (hl_udp_ready && !hl_udp_server && hl_net_need_prespawn)
+			{
+				hl_net_need_prespawn = FALSE;
+				HLLog("net: cl -> prespawn (map loaded)\n");
+				HLLogFlush;
+				HLNetClientSendStringCmd("prespawn");
+			}
+		}
+
+		LBts(&Fs->task_flags, TASKf_IDLE);
+		Yield;
+		LBtr(&Fs->task_flags, TASKf_IDLE);
+
+ql_next_frame:
+	}
+}
+
+U0 HLDocCursorPark()
+{
+	CDoc *doc;
+	Bool  unlock;
+
+	doc = Fs->put_doc;
+	if (!doc)
+		return;
+
+	unlock = DocLock(doc);
+
+	doc->cur_entry = &doc->head;
+	doc->cur_col   = 0;
+
+	if (unlock)
+		DocUnlock(doc);
+}
+
+U0 HLTaskEndCB()
+{
+	hl_ready = FALSE;
+	Fs->draw_it = NULL;
+	Sleep(100);
+	hl_canvas = NULL;
+	HLPresentFree;
+
+	hl_snd_enabled = FALSE;
+	HLSndStopAll(TRUE);
+	AudioSFXStopAll;
+
+	MouseRaw(FALSE);
+	Exit;
+}
+
+U0 HL1(U8 *mapname = HLDEFAULT_MAP)
+{
+	CHLCanvas	*canvas			= NULL;
+	CHLVisState	*vis			= NULL;
+	CHLMap		*map			= NULL;
+	Bool		 raw_was_on		= FALSE;
+	Bool		 demo_boot		= FALSE;
+	I64			 final_thinks	= 0;
+	I64			 final_models	= 0;
+	I64			 final_snd		= 0;
+	I64			 final_drop		= 0;
+	F64			 final_time		= 0.0;
+	U8			 line[256];
+	U8			 pakname[64];
+	I64			 i;
+
+	"  init HLLogReset\n";
+	HLLogReset;
+
+	HLHeapCheck("entry");
+
+	"  init HLPakInit\n";
+	HLPakInit;
+	"  init HLWad3Init\n";
+	HLWad3Init;
+	"  init HLAIInit\n";
+	HLAIInit;
+	"  init HLSndInit\n";
+	HLSndInit;
+	"  init HLPartInit\n";
+	HLPartInit;
+	"  init HLClipInit\n";
+	HLClipInit;
+	hl_music_frames     = NULL;
+	hl_music_count      = 0;
+	hl_music_rate       = HLSND_RATE;
+	hl_music_track      = 0;
+	hl_save_buf         = NULL;
+	hl_mdl_preview      = NULL;
+	hl_mdl_preview_skin = NULL;
+	hl_vis              = NULL;
+	hl_map              = NULL;
+	hl_entities         = NULL;
+	hl_num_entities     = 0;
+
+	"  init HLMdlCacheInit\n";
+	HLMdlCacheInit;
+	"  init HLStudioCacheInit\n";
+	HLStudioCacheInit;
+	"  init HLBiBspCacheInit\n";
+	HLBiBspCacheInit;
+	"  init HLSurfCacheInit\n";
+	HLSurfCacheInit;
+	"  init HLMusicReset\n";
+	HLMusicReset;
+	"  init HLPlayerStateInit\n";
+	HLPlayerStateInit;
+	"  init HLDemoInit\n";
+	HLDemoInit;
+	"  init HLConHistoryInit\n";
+	HLConHistoryInit;
+	"  init HLLightInit\n";
+	HLLightInit;
+	"  init HLTurbInit\n";
+	HLTurbInit;
+	"  init HLNetInit\n";
+	HLNetInit;
+	"  init HLNetUdpInit\n";
+	HLNetUdpInit;
+	"  init HLNetStatesClear\n";
+	HLNetStatesClear;
+
+	"  init HLNetPlayersInit\n";
+	HLNetPlayersInit;
+	"  init HLNetClockInit\n";
+	HLNetClockInit;
+	"  init HLSetupDefaults\n";
+	HLSetupDefaults;
+	"  init HLCfgLoad\n";
+	HLCfgLoad;
+	"  init HLViewKickInit\n";
+	HLViewKickInit;
+	"  init HLCShiftInit\n";
+	HLCShiftInit;
+
+	"  init HLCvarInit\n";
+	HLCvarInit;
+
+	HLCvarSet("crosshair", ToF64(hl_opt_crosshair));
+
+	HLCvarDefine("hl_debug_death",		0.0);
+	HLCvarDefine("hl_debug_hurt",		0.0);
+	HLCvarDefine("hl_debug_hurt_type",	0.0);
+
+	"  init HLShellDeathInit\n";
+	HLShellDeathInit;
+
+	HLPakSetGameDir(hl_game_dir);
+
+	"  init HLPakMountGame\n";
+	HLPakMountGame;
+
+	if (!hl_pak_count && !HLFileExists(HLDEFAULT_MAP))
+	{
+		"HL1: no pak and no %s under ::/Apps/HL1/valve/.\n", HLDEFAULT_MAP;
+		"HL1: See ::/Apps/HL1/README.md for what to copy in.\n";
+		return;
+	}
+
+	if (hl_game_dir[0])
+	{
+		StrPrint(pakname, "HL1: gamedir %s\n", hl_game_dir);
+		"%s", pakname;
+	}
+
+	"  init HLBindStartup\n";
+	HLBindStartup;
+
+	HLCvarSet("registered", 1.0);
+
+	if (!HLPalLoad)
+	{
+		"HL1: palette load failed\n";
+		return;
+	}
+
+	//Interface art: gfx.wad plus the standalone gfx/*.lmp menu pictures.
+	"  init HLWadInit\n";
+	HLWadInit;
+	"  init HLSbarInit\n";
+	HLSbarInit;
+	"  init HLMenuInit\n";
+	HLMenuInit;
+
+	demo_boot = FALSE;
+	if (HLCvarGet("demoloop") != 0.0)
+		demo_boot = HLDemoNextInLoop;
+
+	if (demo_boot)
+		HLLog("demo: attract loop started\n");
+	else if (!HLLoadMap(mapname))
+	{
+		"HL1: could not load %s\n", mapname;
+		return;
+	}
+
+	hl_state       = HLST_MENU;
+	hl_menu_ingame = FALSE;
+
+	hl_canvas = HLDrawNew(hl_res_w[hl_opt_res], hl_res_h[hl_opt_res]);
+
+	if (!hl_canvas)
+	{
+		"HL1: %d x %d canvas refused at startup, using %d x %d\n",
+			hl_res_w[hl_opt_res], hl_res_h[hl_opt_res],
+			hl_res_w[0], hl_res_h[0];
+
+		hl_opt_res = 0;
+		hl_canvas  = HLDrawNew(hl_res_w[0], hl_res_h[0]);
+	}
+
+	if (!hl_canvas)
+	{
+		"HL1: no canvas could be allocated\n";
+
+		hl_snd_enabled = FALSE;
+		HLSndStopAll(TRUE);
+		HLSndFree;
+		return;
+	}
+
+	if (!HLPresentAlloc(hl_canvas->width, hl_canvas->height))
+		"HL1: present buffer refused; blit falls back to live canvas\n";
+
+	hl_res_applied = hl_opt_res;
+
+	HLHudLoad(hl_canvas->width);
+	hl_ready  = FALSE;
+
+	HLHeapCheck("startup");
+
+	MenuPush(
+		"File {"
+		"  Exit(,CH_ESC);"
+		"}"
+	);
+	SettingsPush;
+
+	try
+	{
+		Fs->win_inhibit = WIG_TASK_DEFAULT - WIF_SELF_FOCUS -
+						  WIF_SELF_GRAB_SCROLL - WIF_FOCUS_TASK_MENU;
+		AutoComplete;
+		WinBorder(OFF);
+		HLWindowApply;
+		DocCursor;
+		DocClear;
+
+		Fs->task_end_cb = &HLTaskEndCB;
+
+		raw_was_on = MouseRaw(TRUE);
+		MouseRawReset;
+
+		Fs->draw_it = &HLDrawIt;
+
+		MouseRawReset;
+
+		mouse_hard.bttns[0] = FALSE;
+		mouse_hard.bttns[1] = FALSE;
+		mouse_hard.bttns[2] = FALSE;
+
+		HLGameLoop;
+	}
+	catch
+		PutExcept;
+
+	hl_snd_enabled = FALSE;
+	HLSndStopAll(TRUE);
+
+	AudioSFXStopAll;
+
+	Fs->task_end_cb = NULL;
+
+	hl_ready     = FALSE;
+	Fs->draw_it = NULL;
+	Sleep(100);
+
+	canvas   = hl_canvas;
+	hl_canvas = NULL;
+	HLPresentFree;
+	vis      = hl_vis;
+	hl_vis    = NULL;
+	map      = hl_map;
+	hl_map    = NULL;
+
+	if (!raw_was_on)
+		MouseRaw(FALSE);
+
+	SettingsPop;
+	MenuPop;
+
+	final_thinks = hl_game_thinks;
+	final_time   = hl_game_time;
+	final_models = hl_precache_model_count;
+	final_snd    = hl_snd_played;
+	final_drop   = hl_snd_dropped;
+
+	HLHeapCheck("teardown");
+
+	HLLog("teardown: begin\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"  init HLGameShutdown\n";
+	HLGameShutdown;
+	HLLog("teardown: HLGameShutdown ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"  init HLMusicFree\n";
+	HLMusicFree;
+	"  init HLSndFree\n";
+	HLSndFree;
+	HLLog("teardown: HLSndFree ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"  init HLNetUdpClose\n";
+	HLNetUdpClose;
+	"  init HLMdlPreviewFree\n";
+	HLMdlPreviewFree;
+	HLLog("teardown: net/preview ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"  init HLEntFree\n";
+	HLEntFree;
+	HLLog("teardown: HLEntFree ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"  init HLSurfCacheFlush\n";
+	HLSurfCacheFlush;
+	HLSurfCacheSetMap(NULL);
+	HLLog("teardown: HLSurfCacheFlush ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	HLDrawFree(canvas);
+	HLLog("teardown: HLDrawFree ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	HLVisFree(vis);
+	HLLog("teardown: HLVisFree ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	HLBSPFree(map);
+	HLLog("teardown: HLBSPFree ok\n");
+
+	"  init HLMdlCacheFree\n";
+	HLMdlCacheFree;
+	"  init HLStudioCacheFree\n";
+	HLStudioCacheFree;
+	HLLog("teardown: model caches freed ok\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	StrPrint(line, "exit: %d frames rendered\n", hl_frame_count);
+	HLLog(line);
+
+	StrPrint(line, "world: %d thinks over %4.1f s of game time, %d models\n",
+		final_thinks, final_time, final_models);
+	HLLog(line);
+
+	StrPrint(line, "sound: %d played, %d dropped (4 streams)\n",
+		final_snd, final_drop);
+	HLLog(line);
+
+	HLHeapCheck("returning");
+
+	HLLog("teardown: returning\n");
+	"  init HLLogFlush\n";
+	HLLogFlush;
+
+	"\nLog written to ::/Apps/HL1/HL1LOG.TXT\n";
+
+	"  init HLInputDrainAll\n";
+	HLInputDrainAll;
+	"  init HLDocCursorPark\n";
+	HLDocCursorPark;
+
+	Fs->title_src = TTS_LOCKED_CONST;
+
+	Sleep(200);
+
+}

@@ -1,0 +1,111 @@
+Bool RelicGamesDataPresent(I64 i)
+{
+ Bool old = Silent, ok = FALSE;
+ switch (i)
+ {
+  case 0: ok = FileFind("::/Apps/Quake/id1/PAK0.PAK") || FileFind("::/Apps/Quake/id1/pak0.pak"); break;
+  case 1: ok = FileFind("::/Apps/QuakePlus/id1/PAK0.PAK") || FileFind("::/Apps/QuakePlus/id1/pak0.pak"); break;
+  case 2: ok = FileFind("::/Apps/HL1/valve/halflife.wad"); break;
+  case 3: ok = FileFind("::/Apps/Diablo1/DIABDAT.MPQ"); break;
+  case 4: ok = FileFind("::/Apps/OpenEmpire/Data/graphics.drs"); break;
+ }
+ Silent(old);
+ return ok;
+}
+
+U0 RelicGameDataClose(CDEWidget *wg)
+{
+ Bool *done = wg->user_data;
+ *done = TRUE;
+}
+
+public U0 RelicGameData(I64 i)
+{
+ Bool done = FALSE;
+ CDEWidget *close;
+ CDEWinCtx *ctx = DEWinInit("Install game data", 544, 216);
+ DELabel(ctx, 20, 24, "Game data is required", TRUE);
+ DELabel(ctx, 20, 48, "RelicOS includes the engine source.");
+ DELabel(ctx, 20, 68, "Copy your game data to the folder below:");
+ switch (i)
+ {
+  case 0: DELabel(ctx,20,100,"::/Apps/Quake/id1/PAK0.PAK"); break;
+  case 1: DELabel(ctx,20,100,"::/Apps/QuakePlus/id1/PAK0.PAK"); break;
+  case 2: DELabel(ctx,20,100,"::/Apps/HL1/valve/ (retail data)"); break;
+  case 3: DELabel(ctx,20,100,"::/Apps/Diablo1/DIABDAT.MPQ"); break;
+  case 4: DELabel(ctx,20,100,"::/Apps/OpenEmpire/Data/ (AoE II trial)"); break;
+ }
+ DELabel(ctx,20,128,"Then return to the library and choose Play.");
+ close = DEButton(ctx,412,168,104,28,"Close",&RelicGameDataClose);
+ close->user_data = &done;
+ while (!done && DEWinPoll(ctx)) Sleep(16);
+ DEWinExit(ctx);
+}
+
+U0 RelicGamesLaunch(CDEWidget *wg)
+{
+ U8 *command;
+ if (!RelicGamesDataPresent(wg->user_data))
+ {
+  command = MStrPrint("RelicGameData(%d);",wg->user_data);
+  PopUp(command);
+  Free(command);
+  return;
+ }
+ switch (wg->user_data)
+ {
+  case 0: PopUp("RelicGameRun(\"::/Apps/Quake\",\"id1/PAK0.PAK\",\"id1/pak0.pak\",\"Quake PAK0.PAK\");"); break;
+  case 1: PopUp("RelicGameRun(\"::/Apps/QuakePlus\",\"id1/PAK0.PAK\",\"id1/pak0.pak\",\"Quake PAK0.PAK\");"); break;
+  case 2: PopUp("RelicGameRun(\"::/Apps/HL1\",\"valve/halflife.wad\",NULL,\"the retail Half-Life valve folder\");"); break;
+  case 3: PopUp("RelicGameRun(\"::/Apps/Diablo1\",\"DIABDAT.MPQ\",NULL,\"Diablo DIABDAT.MPQ\");"); break;
+  case 4: PopUp("RelicGameRun(\"::/Apps/OpenEmpire\",\"Data/graphics.drs\",NULL,\"the Age of Empires II Trial Data folder\");"); break;
+ }
+}
+
+I64 RelicGamesIcon(I64 i)
+{
+ switch (i)
+ {
+  case 0: return DE_SMI_QUAKE;
+  case 1: return DE_SMI_QUAKEP;
+  case 2: return DE_SMI_LAMBDA;
+  case 3: return DE_SMI_PENT;
+ }
+ return DE_SMI_GAME;
+}
+
+U0 RelicGamesDraw(CTask *task, CDC *dc)
+{
+ I64 i;
+ DEWidgetsDrawIt(task, dc);
+ for (i = 0; i < 5; i++)
+  DESMIcon(dc, 36 + i % 3 * 208, 70 + i / 3 * 160,
+   RelicGamesIcon(i), de_theme.text, de_theme.text_dim);
+}
+
+U0 RelicGamesCard(CDEWinCtx *ctx, I64 i, U8 *title, U8 *detail)
+{
+ I64 x = 16 + i % 3 * 208, y = 54 + i / 3 * 160;
+ CDEWidget *wg;
+ DEPanel(ctx, x, y, 192, 144);
+ DELabel(ctx, x + 16, y + 56, title, TRUE);
+ DELabel(ctx, x + 16, y + 76, detail);
+ wg = DEButton(ctx, x + 16, y + 100, 160, 28, "Play", &RelicGamesLaunch);
+ wg->user_data = i;
+}
+
+public U0 RelicGames()
+{
+ CDEWinCtx *ctx = DEWinInit("Games", 648, 424);
+ DELabel(ctx, 16, 20, "Library", TRUE);
+ RelicGamesCard(ctx, 0, "Quake", "id1/PAK0.PAK");
+ RelicGamesCard(ctx, 1, "QuakePlus", "id1/PAK0.PAK");
+ RelicGamesCard(ctx, 2, "Half-Life", "Retail valve folder");
+ RelicGamesCard(ctx, 3, "Diablo", "DIABDAT.MPQ");
+ RelicGamesCard(ctx, 4, "OpenEmpire", "AoE II trial data");
+ DELabel(ctx, 16, 386, "Install your game data before playing.");
+ DELabel(ctx, 16, 402, "Engine ports. Controls vary by game.");
+ Fs->draw_it = &RelicGamesDraw;
+ while (DEWinPoll(ctx)) Sleep(16);
+ DEWinExit(ctx);
+}

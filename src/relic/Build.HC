@@ -77,15 +77,30 @@ U0 RelicInstallSources(U8 *dst_dir) {
   DirMk(dst_dir);
   RelicCopy("RelicBoot.HC", dst_dir);
   RelicCopy("RelicDesktop.HC", dst_dir);
+  RelicCopy("RelicSettings.HC", dst_dir);
+  RelicCopy("RelicApps.HC", dst_dir);
   RelicCopy("RelicChrome.HC", dst_dir);
   RelicCopy("RelicTheme.HC", dst_dir);
   RelicCopy("RelicWallpaper.HC", dst_dir);
   RelicCopy("wallpaper.raw", dst_dir);
+  RelicCopy("Icons.BIN", dst_dir);
   RelicCopy("RunTOOM.HC", dst_dir);
   RelicCopy("GamesLauncher.HC", dst_dir);
   RelicCopy("RelicInstall.HC", dst_dir);
+  RelicCopy("RelicOSInstall.HC", dst_dir);
   RelicCopy("RelicStartUp.HC", dst_dir);
   RelicCopy("RelicDisplay.HC", dst_dir);
+  RelicCopy("RelicRefresh.HC", dst_dir);
+  RelicCopy("RelicSplash.HC", dst_dir);
+  RelicCopy("RelicAutoBoot.HC", dst_dir);
+  RelicCopy("RelicURL.HC", dst_dir);
+  RelicCopy("RelicVMMouse.HC", dst_dir);
+  RelicCopy("RelicShellHelp.HC", dst_dir);
+  U8 net_dst[256];
+  StrPrint(net_dst,"%s/Net",dst_dir);
+  RelicCopyTree("Net",net_dst);
+  StrPrint(net_dst,"%s/Games",dst_dir);
+  RelicCopyTree("Games",net_dst);
 }
 
 "1. Installing RelicOS to ::/Home/RelicOS/...\n";
@@ -149,7 +164,7 @@ U0 ReplaceBranding(U8 *filename) {
   if (buf) {
     I64 i;
     for (i = 0; i < size - 14; i++) {
-      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V0.4.0", 14);
+      if (!MemCmp(buf + i, "TempleOS V5.03", 14)) MemCpy(buf + i, "RelicOS V0.5.0", 14);
     }
     for (i = 0; i < size - 8; i++) {
       // Keep "AboutTempleOS": it names a real file (::/Doc/AboutTempleOS.DD.Z,
@@ -170,7 +185,7 @@ U0 ReplaceBranding(U8 *filename) {
 
 // RestoreStartOS: Strip any previously-injected RelicBootPalette code
 // from StartOS.HC.Z. StartOS.HC.Z is compiled at the VERY first stage
-// of boot before ANY symbols exist — we must NEVER inject code into it.
+// of boot before ANY symbols exist: we must NEVER inject code into it.
 // The dark palette is set later via PatchDefaultPalette on GrPalette.HC.Z
 // and via RelicThemeApply in HomeSys.HC.Z.
 U0 RestoreStartOS() {
@@ -307,7 +322,7 @@ U0 PatchKernelBanner(U8 *filename) {
   // same so the Print() call stays valid.
   RelicFileReplaceOnce(filename,
         "\"TempleOS V%5.3f\\t%D %T\\n\\n\",",
-        "\"RelicOS V0.4.0 (core %5.3f)\\t%D %T\\n\\n\",");
+        "\"RelicOS V0.5.0 (core %5.3f)\\t%D %T\\n\\n\",");
 }
 
 U0 RestoreADefine()
@@ -385,7 +400,7 @@ U0 RelicBrandBootLoader()
   U8 *p = BDVD_START;
   I64 n = BDVD_END - BDVD_START, i;
   for (i = 0; i + 14 <= n; i++) {
-    if (!MemCmp(p + i, "TempleOS V5.03", 14)) MemCpy(p + i, "RelicOS V0.4.0", 14);
+    if (!MemCmp(p + i, "TempleOS V5.03", 14)) MemCpy(p + i, "RelicOS V0.5.0", 14);
   }
   for (i = 0; i + 8 <= n; i++) {
     if (!MemCmp(p + i, "TempleOS", 8)) MemCpy(p + i, "RelicOS ", 8);

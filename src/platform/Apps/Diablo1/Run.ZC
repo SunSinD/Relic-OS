@@ -1,0 +1,55 @@
+// build and launch entry point.
+//
+// single-pass compiler: a file can only reference symbols from an earlier one,
+// so the include order below is load-bearing.
+
+Cd(__DIR__);;
+
+#include "D1Fmt"
+#include "D1Mpq"
+#include "D1Pal"
+#include "D1Rnd"
+#include "D1Net"
+#include "D1Snd"
+#include "D1Draw"
+#include "D1Opt"
+#include "D1UI"
+#include "D1Lvl"
+#include "D1Light"
+#include "D1Cel"
+#include "D1Menu"
+#include "D1Drlg1"
+#include "D1Drlg2"
+#include "D1Drlg3"
+#include "D1Drlg4"
+#include "D1Render"
+#include "D1Item"
+#include "D1Char"
+#include "D1Inv"
+#include "D1Affix"
+#include "D1Obj"
+#include "D1Mon"
+#include "D1Mis"
+#include "D1Path"
+#include "D1Towner"
+#include "D1Store"
+#include "D1Play"
+#include "D1Panel"
+#include "D1CharUI"
+#include "D1Spell"
+#include "D1Auto"
+#include "D1Quest"
+#include "D1Save"
+#include "D1Sel"
+#include "D1Test"
+#include "Diablo1"
+
+//spawned rather than run in the terminal task: a task gets its own heap, so a
+//stray render write cannot reach the compiler CCompCtrl or the lexer's document.
+Spawn(&Diablo1, NULL, "Diablo1");
+
+"\nType $$LTBLUE$$D1Test;$$FG$$ to run the data-layer self-check.\n";
+"Type $$LTBLUE$$D1TestAudio;$$FG$$ for the playback check. ~20s, audible.\n";
+"Type $$LTBLUE$$D1TestNet;$$FG$$ for the net-layer check (one machine).\n";
+"Type $$LTBLUE$$D1TestLockstep;$$FG$$ for the two-peer determinism harness.\n";
+"LAN play: $$LTBLUE$$ExeFile(\"::/Apps/Diablo1/RunNet\");$$FG$$\n";

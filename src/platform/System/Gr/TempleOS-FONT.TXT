@@ -1,0 +1,4 @@
+RelicOS TempleOS 8x8
+Original bitmap glyphs: Terry A. Davis, TempleOS, public domain.
+TTF outlines generated from Kernel/FontStd.ZC by tools/platform_font.py.
+Each lit bitmap pixel becomes a square outline. No glyph redesign.

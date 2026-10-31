@@ -1,0 +1,32 @@
+// player state for the shell. the player entity is HLEntity.ZC's.
+
+
+F64 HLPlayerHealth()
+{
+	return hl_ent_player_health;
+}
+
+F64 HLPlayerArmor()
+{
+	return hl_ent_player_armor;
+}
+
+F64 HLPlayerViewHeight()
+{
+	return hl_view_ofs_z;
+}
+
+Bool HLPlayerDead()
+{
+	return hl_ent_player_dead;
+}
+
+Bool HLPlayerWalking()
+{
+	return TRUE;
+}
+
+Bool HLPlayerFrozen()
+{
+	return hl_ent_input_locked;
+}

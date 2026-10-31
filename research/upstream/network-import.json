@@ -1,0 +1,201 @@
+{
+  "repository": "https://github.com/tinkeros/tinkeros",
+  "commit": "fe68fde1f4c3c49652025656dd8f1dc5095a07ae",
+  "files": [
+    {
+      "path": "src/relic/Net/Utilities/Net.HH",
+      "upstream": "Demo/Net/Utilities/Net.HH",
+      "sha256": "b61832218793b0ff576f512aa2be1482b08b4a388c05efb1a6193f4ba28402ab",
+      "changes": [],
+      "adapted_sha256": "b61832218793b0ff576f512aa2be1482b08b4a388c05efb1a6193f4ba28402ab"
+    },
+    {
+      "path": "src/relic/Net/Utilities/NetQueue.HC",
+      "upstream": "Demo/Net/Utilities/NetQueue.HC",
+      "sha256": "10b7412bfb22d38bbdac03550fa7ce625ef84eeeb5863fbba5d5409d5ea78d9e",
+      "changes": [],
+      "adapted_sha256": "10b7412bfb22d38bbdac03550fa7ce625ef84eeeb5863fbba5d5409d5ea78d9e"
+    },
+    {
+      "path": "src/relic/Net/Utilities/BST.HC",
+      "upstream": "Demo/Net/Utilities/BST.HC",
+      "sha256": "8519949a4d05052eeb8b24f40dc6e1b86448228f8b07a94175358ec11190bd14",
+      "changes": [],
+      "adapted_sha256": "8519949a4d05052eeb8b24f40dc6e1b86448228f8b07a94175358ec11190bd14"
+    },
+    {
+      "path": "src/relic/Net/Utilities/NetHandler.HC",
+      "upstream": "Demo/Net/Utilities/NetHandler.HC",
+      "sha256": "4cf9b09cbc19b15e0b2d3b4ef73faf0a1605460e17b13fd022341c8934f9c55d",
+      "changes": [
+        "Poll PCNet and process RX queue in persistent Adam-owned handler"
+      ],
+      "adapted_sha256": "a4075e15c6d36d61052b6da263713e66bfc6758d42d68ba100a0ee7b7fcb25cd"
+    },
+    {
+      "path": "src/relic/Net/Utilities/Ping.HC",
+      "upstream": "Demo/Net/Utilities/Ping.HC",
+      "sha256": "0a09888e355376789c6444e1c484de20016be28bd47305c1ba24d79bde0dc409",
+      "changes": [],
+      "adapted_sha256": "0a09888e355376789c6444e1c484de20016be28bd47305c1ba24d79bde0dc409"
+    },
+    {
+      "path": "src/relic/Net/Drivers/PCNet.HC",
+      "upstream": "Demo/Net/Drivers/PCNet.HC",
+      "sha256": "264caa788cbf23be30c873fdfbfbcddb4750a0cd1278cd5cb829df66c75865c9",
+      "changes": [
+        "Stock PCI and heap APIs; packed ring length fields",
+        "Bounded device initialization; 1ms polling replaces interrupt routing"
+      ],
+      "adapted_sha256": "1fe6399965ba350f54d6a8905bb1b6a32ab62897ef4b6b77f3f6060e4577f081"
+    },
+    {
+      "path": "src/relic/Net/Protocols/Ethernet.HC",
+      "upstream": "Demo/Net/Protocols/Ethernet.HC",
+      "sha256": "6162e42201347f750922abe076342e5a35992f5578b07dc7d1a7f05dca10292c",
+      "changes": [],
+      "adapted_sha256": "6162e42201347f750922abe076342e5a35992f5578b07dc7d1a7f05dca10292c"
+    },
+    {
+      "path": "src/relic/Net/Protocols/ARP.HC",
+      "upstream": "Demo/Net/Protocols/ARP.HC",
+      "sha256": "dd4d11abc059a8ca88861f5dc953901a50e8115be4ef1d76deac25d6f9014e5d",
+      "changes": [],
+      "adapted_sha256": "dd4d11abc059a8ca88861f5dc953901a50e8115be4ef1d76deac25d6f9014e5d"
+    },
+    {
+      "path": "src/relic/Net/Protocols/IPV4.HC",
+      "upstream": "Demo/Net/Protocols/IPV4.HC",
+      "sha256": "363e13f0692b83fcbafefeb0723fd88b1136e8b619b25919824a64078400e7fb",
+      "changes": [
+        "Packed version/header length; reject invalid lengths, versions and fragments"
+      ],
+      "adapted_sha256": "0fd01f1ce7c2f5df07d3725c108faf5d4ef7904d59d76188d24f9770eaf63473"
+    },
+    {
+      "path": "src/relic/Net/Protocols/ICMP.HC",
+      "upstream": "Demo/Net/Protocols/ICMP.HC",
+      "sha256": "d7d14c96e721dc700135e9084dd3f1ef24d84bd1b7455188309c0fb1465d656d",
+      "changes": [
+        "Explicit stock MemCpy structure size"
+      ],
+      "adapted_sha256": "2a78474500624549f463a8f29fd018322bbe1b2644904d10e1102c074bad5356"
+    },
+    {
+      "path": "src/relic/Net/Protocols/Sockets.HC",
+      "upstream": "Demo/Net/Protocols/Sockets.HC",
+      "sha256": "c6f8dbeb7b29251878c2257ba4cc8c49bc28f120927afd52c617982d9be0c1fd",
+      "changes": [
+        "Explicit structure copy; bounded manual IPv4 parser"
+      ],
+      "adapted_sha256": "28860d5fc1c869524ef52bdb8e1f08becb943197d762b78492532fe369c23ab4"
+    },
+    {
+      "path": "src/relic/Net/Protocols/DNS.HC",
+      "upstream": "Demo/Net/Protocols/DNS.HC",
+      "sha256": "34368ca7fcc18985e9582007ebc95f2ccb546fe2106112cb322632d52efff1de",
+      "changes": [
+        "Bound compressed-name pointers, label count/size, response counts and flags",
+        "Fix parser remaining length and free label buffers/chains on failures",
+        "Bound outgoing host labels"
+      ],
+      "adapted_sha256": "476b43d1b52183a3ccba405ccb8e951b7ebc9b6d032157458536094d8116b5e3"
+    },
+    {
+      "path": "src/relic/Net/Protocols/DHCP.HC",
+      "upstream": "Demo/Net/Protocols/DHCP.HC",
+      "sha256": "bb2cde26f2547f1cdf4391a36d81f706b5e58c34d1d2438a5c46d9c01aae6e48",
+      "changes": [
+        "Avoid reading four bytes from short options; accept first DNS/router in address lists"
+      ],
+      "adapted_sha256": "40ac2313019470a8ec1ac2d9d30d8997ac46b10e40e81fecf0f31062850c482b"
+    },
+    {
+      "path": "src/relic/Net/Protocols/UDP/MakeUDP.HC",
+      "upstream": "Demo/Net/Protocols/UDP/MakeUDP.HC",
+      "sha256": "1e92acaefa1392f61118ae19d147953d8b7c4cfab1c38aaadfb862958af5b017",
+      "changes": [],
+      "adapted_sha256": "1e92acaefa1392f61118ae19d147953d8b7c4cfab1c38aaadfb862958af5b017"
+    },
+    {
+      "path": "src/relic/Net/Protocols/UDP/UDP.HC",
+      "upstream": "Demo/Net/Protocols/UDP/UDP.HC",
+      "sha256": "085539c4c473ca7afc030fe8c3b6b4d6cc78be8aadd2840d346b9e9439d8b09b",
+      "changes": [
+        "Explicit structure sizes for address copies"
+      ],
+      "adapted_sha256": "534fe78ca6ec9eaae4feff9d2578fa63657a1ef92f91006b421cf5f81d32cc0f"
+    },
+    {
+      "path": "src/relic/Net/Protocols/UDP/UDP.HH",
+      "upstream": "Demo/Net/Protocols/UDP/UDP.HH",
+      "sha256": "e2c1d72bf9d4b8c39cd604e4be9eb484b11ced38480ea9a9ed5892a3ec62f0e5",
+      "changes": [],
+      "adapted_sha256": "e2c1d72bf9d4b8c39cd604e4be9eb484b11ced38480ea9a9ed5892a3ec62f0e5"
+    },
+    {
+      "path": "src/relic/Net/Protocols/UDP/UDPTree.HC",
+      "upstream": "Demo/Net/Protocols/UDP/UDPTree.HC",
+      "sha256": "c29c19ec6b76d588082c74988f792995ea9d1cc4199d96d17335bd2bc9987b08",
+      "changes": [],
+      "adapted_sha256": "c29c19ec6b76d588082c74988f792995ea9d1cc4199d96d17335bd2bc9987b08"
+    },
+    {
+      "path": "src/relic/Net/Protocols/TCP/MakeTCP.HC",
+      "upstream": "Demo/Net/Protocols/TCP/MakeTCP.HC",
+      "sha256": "d638c2dbb7be8320cbdbc56265e3e17b8f80766f910e4cc01c464519ae4bf592",
+      "changes": [],
+      "adapted_sha256": "d638c2dbb7be8320cbdbc56265e3e17b8f80766f910e4cc01c464519ae4bf592"
+    },
+    {
+      "path": "src/relic/Net/Protocols/TCP/TCP.HC",
+      "upstream": "Demo/Net/Protocols/TCP/TCP.HC",
+      "sha256": "641b214f142d2b72aa9a6684a89f90e13b52f7d15dd2f4a400b0a57297aeb103",
+      "changes": [
+        "Packed header fields; explicit MemSet; return NULL on connection errors"
+      ],
+      "adapted_sha256": "67137b8f3f7ea120973fd2004d4a7590784cedc55b010cbe74f35d0861923d95"
+    },
+    {
+      "path": "src/relic/Net/Protocols/TCP/TCP.HH",
+      "upstream": "Demo/Net/Protocols/TCP/TCP.HH",
+      "sha256": "1c43a46c4017dd0f9f4307176ea77dde55403692a2d07269c64e94cb12d137da",
+      "changes": [
+        "Packed offset/flag bytes instead of unsupported bitfields"
+      ],
+      "adapted_sha256": "31b17168f3a73e137b765bea042c1a38b1ade7507cbc80968c964526b88752c1"
+    },
+    {
+      "path": "src/relic/Net/Protocols/TCP/TCPHandler.HC",
+      "upstream": "Demo/Net/Protocols/TCP/TCPHandler.HC",
+      "sha256": "d92c6ac7ff9ed8b0c8490c8004f967a4f4d1cc632ec6ed08b7d65f47e9447743",
+      "changes": [
+        "Use explicit TCP flag masks"
+      ],
+      "adapted_sha256": "76443d402676c07c6504ae530c7d283288d997d959b78e738e81383be19007b8"
+    },
+    {
+      "path": "src/relic/Net/Protocols/TCP/TCPTree.HC",
+      "upstream": "Demo/Net/Protocols/TCP/TCPTree.HC",
+      "sha256": "03f6c500ef58e6d1db2735d262c451640681cb2b8e6eed635c1f7eafa66bf773",
+      "changes": [],
+      "adapted_sha256": "03f6c500ef58e6d1db2735d262c451640681cb2b8e6eed635c1f7eafa66bf773"
+    },
+    {
+      "path": "src/relic/Net/Programs/Gopher.HC",
+      "upstream": "Demo/Net/Programs/Gopher.HC",
+      "sha256": "a94f8a513738bd14fff953af2b371cce32c5e30c4150f2a23b3b539712a5b491",
+      "status": "not ported; excluded from shipped source"
+    },
+    {
+      "path": "src/relic/Net/Programs/FTPClient.HC",
+      "upstream": "Demo/Net/Programs/FTPClient.HC",
+      "sha256": "581b641e5f23e7c014fb768f2656a180cbfcd19f8fecbeebc32493c5c3933ba2",
+      "status": "not ported; excluded from shipped source"
+    }
+  ],
+  "new_files": [
+    "src/relic/Net/Load.HC",
+    "src/relic/Net/HTTP.HC"
+  ]
+}

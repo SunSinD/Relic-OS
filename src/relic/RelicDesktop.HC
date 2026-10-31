@@ -6,13 +6,21 @@
 // Games run inline on this task (see GamesLauncher.HC).
 
 // ---- Constants ----
-#define DOCK_H      34
-#define DOCK_BTN_W  52
-#define DOCK_BTN_H  24
-#define DOCK_GAP    4
-#define NUM_APPS    8
-#define TOPBAR_H    14
-#define DOCK_MARGIN 28
+// Taskbar along the bottom edge: launcher button anchored bottom-left,
+// pinned apps to its right.  The app menu opens above the launcher.
+#define NUM_APPS     14
+#define DOCK_COUNT   2
+#define TOPBAR_H     14
+#define TASKBAR_H    36
+#define TASK_BTN_W   40
+#define TASK_BTN_H   28
+#define TASK_BTN_GAP 4
+#define TASK_PIN_X   56
+#define MENU_W       392
+#define MENU_H       320
+#define MENU_COLS    4
+#define MENU_TILE_W  90
+#define MENU_TILE_H  60
 
 // WinMgr frames (~1 s) without a newly published DOOM frame before the
 // presenter falls back to snapshotting doom_scrn directly.
@@ -20,7 +28,7 @@
 
 // ---- Globals ----
 I64 relic_ox = 0, relic_oy = 0;
-I64 relic_w = 640, relic_h = 480;
+I64 relic_w = 640, relic_h = 472;
 I64 relic_pending_app = -1;
 
 // Spawned shell task (child of the desktop). NULL when no shell is open.
@@ -41,30 +49,63 @@ I64 relic_doom_last_frames = -1;
 F64 relic_doom_fps_t0 = 0;
 I64 relic_doom_fps_frames = 0;
 
-I64 app_colors[NUM_APPS] = {
-  CYAN, CYAN, CYAN, LTBLUE,
-  LTBLUE, LTBLUE, YELLOW,
-  LTGREEN
-};
-
 extern U8 blkdev_text_attr[BDT_TYPES_NUM];
 extern U8 drv_text_attr[3];
-
 U8 relic_old_blkdev_text_attr[BDT_TYPES_NUM];
 U8 relic_old_drv_text_attr[3];
 Bool relic_drive_colors_saved = FALSE;
+U8 app_icons[NUM_APPS][8] = {"Files","Edit","Shell","Games","Tasks","Memory","System","Help","Web","Paint","Calc","Date","Prefs","Notes"};
+U8 app_tips[NUM_APPS][16] = {"Files","Editor","Shell","Games","Tasks","Memory","System","Help","Browser","Paint","Calculator","Calendar","Settings","Notes"};
+I64 relic_dock_apps[DOCK_COUNT]={8,0};
+// Start menu order: everyday apps first, system tools last.
+I64 relic_menu_order[NUM_APPS]={8,0,1,2,9,10,11,13,3,12,7,4,5,6};
+Bool relic_menu=FALSE;
+F64 relic_menu_progress=0,relic_menu_from=0,relic_menu_t=0;
+I64 relic_menu_offset=0,relic_menu_sel=0;
+F64 relic_dock_hover[DOCK_COUNT];
+F64 relic_draw_last=0;
 
-U8 app_icons[NUM_APPS][4] = {
-  "Fi", "Ed", ">_", "Gm",
-  "Tk", "Mm", "Si",
-  "?"
-};
+U0 RelicMenuSet(Bool show)
+{
+  relic_menu_from=relic_menu_progress;
+  relic_menu_t=tS;
+  relic_menu=show;
+  relic_menu_sel=0;
+}
 
-U8 app_tips[NUM_APPS][16] = {
-  "Files", "Editor", "Shell", "Games",
-  "Tasks", "Memory", "SysInfo",
-  "Help"
-};
+U8 relic_search[64]="";
+F64 relic_last_input=0;
+Bool relic_saver=FALSE;
+
+Bool RelicMenuMatch(I64 i)
+{
+  U8 a[64],b[64];
+  StrCpy(a,app_tips[i]); StrCpy(b,relic_search);
+  return !b[0] || StrIMatch(b,a)!=NULL;
+}
+
+// Apps shown in the menu right now (search applied), in menu order.
+I64 RelicMenuList(I64 *out)
+{
+  I64 i,n=0;
+  for (i=0;i<NUM_APPS;i++)
+    if (RelicMenuMatch(relic_menu_order[i]))
+      out[n++]=relic_menu_order[i];
+  return n;
+}
+
+// Menu panel origin; it sits above the launcher, anchored bottom-left.
+U0 RelicMenuGeom(I64 h,I64 *x,I64 *y)
+{
+  *x=8;
+  *y=h-TASKBAR_H-8-MENU_H+relic_menu_offset;
+}
+
+U0 RelicMenuTile(I64 n,I64 mx0,I64 my0,I64 *x,I64 *y)
+{
+  *x=mx0+16+(n%MENU_COLS)*MENU_TILE_W;
+  *y=my0+68+(n/MENU_COLS)*MENU_TILE_H;
+}
 
 U0 RelicDriveColorsDark()
 {
@@ -150,14 +191,73 @@ U0 RelicDrawDoomFrame(CTask *task, CDC *dc)
 }
 
 // ---- Desktop draw_it (graphics layer) ----
+// Taskbar button i (i=-1 is the launcher) in client pixels.
+U0 RelicTaskBtn(I64 i,I64 h,I64 *x,I64 *y)
+{
+  if (i<0) *x=8;
+  else *x=TASK_PIN_X+i*(TASK_BTN_W+TASK_BTN_GAP);
+  *y=h-TASKBAR_H+(TASKBAR_H-TASK_BTN_H)/2;
+}
+
+U0 RelicDrawMenu(CTask *task,CDC *dc,I64 h,I64 mx,I64 my)
+{
+  I64 list[NUM_APPS],n,i,x0,y0,tx,ty,cols;
+  U8 buf[80];
+  RelicMenuGeom(h,&x0,&y0);
+  n=RelicMenuList(list);
+  if (relic_menu_sel>=n) relic_menu_sel=MaxI64(0,n-1);
+  dc->color=rc_panel; GrRect(dc,x0,y0,MENU_W,MENU_H);
+  dc->color=rc_line; RelicOutline(dc,x0,y0,MENU_W,MENU_H);
+  // Search field
+  dc->color=BLACK; GrRect(dc,x0+16,y0+16,MENU_W-32,24);
+  dc->color=RelicChoose(relic_search[0]!=0,rc_strong,rc_line);
+  RelicOutline(dc,x0+16,y0+16,MENU_W-32,24);
+  cols=(MENU_W-56)/FONT_WIDTH;
+  if (relic_search[0]) {
+    dc->color=rc_strong; RelicFit(buf,relic_search,cols);
+    GrPrint(dc,x0+28,y0+24,"%s",buf);
+    GrRect(dc,x0+28+StrLen(buf)*FONT_WIDTH+1,y0+22,1,12);
+  } else {
+    dc->color=rc_dim; GrPrint(dc,x0+28,y0+24,"Type to search");
+  }
+  dc->color=rc_text;
+  if (relic_search[0]) GrPrint(dc,x0+16,y0+52,"Results");
+  else GrPrint(dc,x0+16,y0+52,"All apps");
+  if (!n) {
+    dc->color=rc_dim; GrPrint(dc,x0+16,y0+76,"No app matches that name.");
+  }
+  for (i=0;i<n;i++) {
+    RelicMenuTile(i,x0,y0,&tx,&ty);
+    if (RelicUIIn(mx,my,tx,ty,MENU_TILE_W-4,MENU_TILE_H-4)) {
+      dc->color=rc_hover; GrRect(dc,tx,ty,MENU_TILE_W-4,MENU_TILE_H-4);
+    }
+    if (i==relic_menu_sel) {
+      dc->color=rc_strong; RelicOutline(dc,tx,ty,MENU_TILE_W-4,MENU_TILE_H-4);
+    }
+    dc->color=rc_strong;
+    RelicAppGlyph(dc,list[i],tx+(MENU_TILE_W-4-20)/2,ty+10,20);
+    dc->color=RelicChoose(i==relic_menu_sel,rc_strong,rc_text);
+    RelicUITextC(dc,tx,ty+40,MENU_TILE_W-4,app_tips[list[i]]);
+  }
+}
+
 U0 DrawDesktop(CTask *task, CDC *dc)
 {
-  I64 w = dc->width;
-  I64 h = dc->height;
-  I64 i, bx, by, wp_y;
-  I64 dock_w, dock_x, dock_y;
-  I64 mx, my, hover;
-  I64 tw, tx, ty;
+  I64 w = task->pix_width;
+  I64 h = task->pix_height;
+  I64 i, bx, by, wp_y, app;
+  I64 mx, my, st, tw, tx, ty;
+  F64 dt=Clamp(tS-relic_draw_last,0,0.1),motion,target,dur;
+  relic_draw_last=tS;
+  // Open: 167 ms decelerate; close: 100 ms.  Reduced motion snaps.
+  dur=0.167;
+  if (!relic_menu) dur=0.1;
+  motion=Clamp((tS-relic_menu_t)/dur,0,1);
+  motion=1-(1-motion)*(1-motion)*(1-motion);
+  target=RelicChoose(relic_menu,1,0);
+  relic_menu_progress=relic_menu_from+(target-relic_menu_from)*motion;
+  if (!relic_cfg.animations) relic_menu_progress=target;
+  relic_menu_offset=ToI64((1-relic_menu_progress)*16);
 
   winmgr.show_menu = FALSE;
 
@@ -181,67 +281,67 @@ U0 DrawDesktop(CTask *task, CDC *dc)
   dc->color = BLACK;
   GrRect(dc, 0, 0, w, wp_y);
 
-  if (relic_wp_dc)
+  if (relic_wp_dc && relic_cfg.wallpaper)
     GrBlot(dc, 0, wp_y, relic_wp_dc);
   else {
     dc->color = BLACK;
     GrRect(dc, 0, wp_y, w, h - wp_y);
   }
 
-  // Dock background
-  dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
-  dock_x = (w - dock_w) / 2;
-  dock_y = h - DOCK_H - DOCK_MARGIN;
+  if (relic_saver) {
+    dc->color=BLACK; GrRect(dc,0,0,w,h);
+    dc->color=LTGRAY; GrPrint(dc,32+(ToI64(tS/8)%8)*56,180,"RelicOS");
+    return;
+  }
 
-  dc->color = BLACK;
-  GrRect(dc, dock_x, dock_y, dock_w, DOCK_H);
+  mx=ms.pos.x-relic_ox; my=ms.pos.y-relic_oy;
 
-  // Dock borders
-  dc->color = CYAN;
-  GrLine(dc, dock_x + 4, dock_y, dock_x + dock_w - 4, dock_y);
-  dc->color = DKGRAY;
-  GrLine(dc, dock_x + 4, dock_y + DOCK_H - 1, dock_x + dock_w - 4, dock_y + DOCK_H - 1);
-  GrLine(dc, dock_x, dock_y + 4, dock_x, dock_y + DOCK_H - 4);
-  GrLine(dc, dock_x + dock_w - 1, dock_y + 4, dock_x + dock_w - 1, dock_y + DOCK_H - 4);
+  // Taskbar
+  dc->color=rc_panel; GrRect(dc,0,h-TASKBAR_H,w,TASKBAR_H);
+  dc->color=rc_line; GrLine(dc,0,h-TASKBAR_H,w-1,h-TASKBAR_H);
+  RelicTaskBtn(-1,h,&bx,&by);
+  st=RelicUIState(task,bx,by,TASK_BTN_W,TASK_BTN_H);
+  if (relic_menu) {
+    dc->color=rc_sel; GrRect(dc,bx,by,TASK_BTN_W,TASK_BTN_H);
+    dc->color=rc_text; GrRect(dc,bx+10,by+TASK_BTN_H-2,TASK_BTN_W-20,2);
+  } else if (st!=RUI_NORMAL) {
+    dc->color=RelicChoose(st==RUI_DOWN,rc_sel,rc_hover);
+    GrRect(dc,bx,by,TASK_BTN_W,TASK_BTN_H);
+  }
+  dc->color=rc_strong;
+  RelicAppGlyph(dc,RELIC_GLYPH_LAUNCHER,bx+(TASK_BTN_W-20)/2,by+(TASK_BTN_H-20)/2,20);
+  dc->color=rc_line;
+  GrLine(dc,TASK_PIN_X-5,by+6,TASK_PIN_X-5,by+TASK_BTN_H-7);
 
-  // Dock buttons
-  mx = ms.pos.x - relic_ox;
-  my = ms.pos.y - relic_oy;
-
-  for (i = 0; i < NUM_APPS; i++) {
-    bx = dock_x + 8 + i * (DOCK_BTN_W + DOCK_GAP);
-    by = dock_y + 5;
-    hover = (mx >= bx && mx <= bx + DOCK_BTN_W &&
-             my >= by && my <= by + DOCK_BTN_H);
-
-    if (hover) {
-      dc->color = app_colors[i];
-      GrRect(dc, bx, by, DOCK_BTN_W, DOCK_BTN_H);
-      dc->color = BLACK;
-      GrPrint(dc, bx + 14, by + 8, app_icons[i]);
-
-      tw = StrLen(app_tips[i]) * 8 + 12;
-      tx = bx + (DOCK_BTN_W - tw) / 2;
-      ty = dock_y - 20;
-      dc->color = BLACK;
-      GrRect(dc, tx, ty, tw, 16);
-      dc->color = CYAN;
-      GrLine(dc, tx, ty, tx + tw - 1, ty);
-      dc->color = LTGRAY;
-      GrPrint(dc, tx + 6, ty + 4, app_tips[i]);
-    } else {
-      dc->color = DKGRAY;
-      GrRect(dc, bx, by, DOCK_BTN_W, DOCK_BTN_H);
-      dc->color = app_colors[i];
-      GrLine(dc, bx + 2, by, bx + DOCK_BTN_W - 2, by);
-      dc->color = app_colors[i];
-      GrPrint(dc, bx + 14, by + 8, app_icons[i]);
+  for (i=0;i<DOCK_COUNT;i++) {
+    app=relic_dock_apps[i];
+    RelicTaskBtn(i,h,&bx,&by);
+    st=RelicUIState(task,bx,by,TASK_BTN_W,TASK_BTN_H);
+    if (relic_menu_progress>0.005) st=RUI_NORMAL;
+    target=RelicChoose(st!=RUI_NORMAL,1,0);
+    if (relic_cfg.animations)
+      relic_dock_hover[i]+=(target-relic_dock_hover[i])*Min(1.0,dt/0.083);
+    else
+      relic_dock_hover[i]=target;
+    if (st!=RUI_NORMAL) {
+      dc->color=RelicChoose(st==RUI_DOWN,rc_sel,rc_hover);
+      GrRect(dc,bx,by,TASK_BTN_W,TASK_BTN_H);
+    }
+    by-=ToI64(relic_dock_hover[i]*2+0.5);
+    dc->color=RelicChoose(st==RUI_NORMAL,rc_text,rc_strong);
+    RelicAppGlyph(dc,app,bx+(TASK_BTN_W-20)/2,by+(TASK_BTN_H-20)/2,20);
+    if (st!=RUI_NORMAL) {
+      tw=StrLen(app_tips[app])*FONT_WIDTH+16;
+      tx=ClampI64(bx+(TASK_BTN_W-tw)/2,4,w-tw-4);
+      ty=h-TASKBAR_H-26;
+      dc->color=rc_panel; GrRect(dc,tx,ty,tw,20);
+      dc->color=rc_line; RelicOutline(dc,tx,ty,tw,20);
+      dc->color=rc_strong; GrPrint(dc,tx+8,ty+6,"%s",app_tips[app]);
     }
   }
 
-  dc->color = CYAN;
-  GrPlot(dc, w / 2, dock_y + DOCK_H + 3);
-  GrPlot(dc, w / 2 + 1, dock_y + DOCK_H + 3);
+  if (relic_menu_progress>0.005)
+    RelicDrawMenu(task,dc,h,mx,my);
 }
 
 U0 RelicDocDark()
@@ -250,7 +350,6 @@ U0 RelicDocDark()
   Fs->text_attr = BLACK << 4 | LTGRAY;
   Fs->border_attr = BLACK << 4 | DKGRAY;
   Fs->border_src = BDS_CONST;
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
 }
 
 // Borderless, maximised, focusable, menu inhibited.
@@ -358,10 +457,10 @@ U0 RelicDoomBegin()
   if (!relic_doom_active)
     relic_saved_draw_it = Fs->draw_it;
   relic_doom_active = TRUE;
+  VMWMsRelative;
   Fs->draw_it = &DrawDesktop;
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
   DocClear;
   DCFill;
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
@@ -374,6 +473,9 @@ U0 RelicDoomEnd()
   // Flip the mode first so the WinMgr stops presenting before we unpublish.
   relic_doom_active = FALSE;
   relic_doom_fps = -1;
+  // DOOM pins the cursor by moving ms.offset; give the desktop its mouse back.
+  ms.offset.x = ms.offset.y = 0;
+  VMWMsAbsolute;
   Fs->draw_it = relic_saved_draw_it;
   relic_saved_draw_it = NULL;
   while (FramePtr("RELIC_DOOM_BUSY")) FramePtrDel("RELIC_DOOM_BUSY");
@@ -388,7 +490,7 @@ U0 RelicDesktopRestore()
     RelicDoomEnd;
   winmgr.show_menu = FALSE;
   relic_pending_app = -1;
-  RelicThemeApply;
+  RelicUIMatte;
   RelicChromeInstall;
   RelicDesktopMode;
   DocClear;
@@ -399,23 +501,36 @@ U0 RelicDesktopRestore()
   FlushMsgs;
 }
 
-I64 RelicDockHit(I64 x, I64 y)
+// Click on the desktop: returns the app to launch, or -1.
+I64 RelicDockHit(I64 x,I64 y)
 {
-  I64 dock_w, dock_x, dock_y;
-  I64 i, bx, by;
-
-  dock_w = NUM_APPS * (DOCK_BTN_W + DOCK_GAP) + DOCK_GAP + 16;
-  dock_x = (relic_w - dock_w) / 2;
-  dock_y = relic_h - DOCK_H - DOCK_MARGIN;
-
-  for (i = 0; i < NUM_APPS; i++) {
-    bx = dock_x + 8 + i * (DOCK_BTN_W + DOCK_GAP);
-    by = dock_y + 5;
-    if (x >= bx && x <= bx + DOCK_BTN_W &&
-        y >= by && y <= by + DOCK_BTN_H)
-      return i;
+  I64 list[NUM_APPS],i,n,bx,by,x0,y0;
+  if (relic_menu) {
+    RelicMenuGeom(relic_h,&x0,&y0);
+    if (RelicUIIn(x,y,x0,y0,MENU_W,MENU_H)) {
+      n=RelicMenuList(list);
+      for (i=0;i<n;i++) {
+        RelicMenuTile(i,x0,y0,&bx,&by);
+        if (RelicUIIn(x,y,bx,by,MENU_TILE_W-4,MENU_TILE_H-4)) {
+          RelicMenuSet(FALSE);
+          return list[i];
+        }
+      }
+      return -1;
+    }
   }
-
+  RelicTaskBtn(-1,relic_h,&bx,&by);
+  if (RelicUIIn(x,y,bx,by,TASK_BTN_W,TASK_BTN_H)) {
+    RelicMenuSet(!relic_menu); relic_search[0]=0; return -1;
+  }
+  for (i=0;i<DOCK_COUNT;i++) {
+    RelicTaskBtn(i,relic_h,&bx,&by);
+    if (RelicUIIn(x,y,bx,by,TASK_BTN_W,TASK_BTN_H)) {
+      RelicMenuSet(FALSE);
+      return relic_dock_apps[i];
+    }
+  }
+  if (relic_menu) RelicMenuSet(FALSE);
   return -1;
 }
 
@@ -437,32 +552,28 @@ I64 RelicKeyApp(I64 ch)
     return 6;
   if (ch == 'h' || ch == 'H' || ch == '?')
     return 7;
+  if (ch=='b' || ch=='B') return 8;
+  if (ch=='p' || ch=='P') return 9;
+  if (ch=='c' || ch=='C') return 10;
+  if (ch=='l' || ch=='L') return 11;
+  if (ch=='o' || ch=='O') return 12;
+  if (ch=='n' || ch=='N') return 13;
   return -1;
 }
 
-U0 RelicLaunchEditor()
+// ---- Shell (independent child task) ----
+U8 relic_shell_history[16][1024];
+I64 relic_shell_history_count=0;
+U0 RelicShellRecall(U8 *line,I64 *len,U8 *replacement)
 {
-  U8 *doc;
-  U8 *init_str = "$BG,BLACK$$FG,LTGRAY$";
-  doc = FileRead("B:/RelicNote.DD");
-  if (!doc || !StrMatch("$BG,BLACK$", doc))
-    FileWrite("B:/RelicNote.DD", init_str, StrLen(init_str));
-  if (doc)
-    Free(doc);
-  // The editor gets a bordered window so its own title/[X] border doc is
-  // drawn on the window frame (row 1) and never on the status strip.
-  WinBorder(ON);
-  WinMax;
-  Fs->title_src = TTS_ED_FILENAME;
-  Ed("B:/RelicNote.DD", DOF_DONT_TEXT_ATTR);
-  Fs->title_src = TTS_LOCKED_CONST;
-  StrCpy(Fs->task_title, "RelicOS");
+  while (*len>0) { "%c",CH_BACKSPACE; (*len)--; }
+  StrCpy(line,replacement); *len=StrLen(line);
+  "%s",line;
 }
 
-// ---- Shell (independent child task) ----
 U0 RelicShellPrompt()
 {
-  "\n$FG,LTGRAY$> $FG$";
+  "\n> ";
 }
 
 U0 RelicShellExe(U8 *line)
@@ -480,8 +591,9 @@ U0 RelicShellExe(U8 *line)
 // Esc or "exit" returns, which ends the task cleanly via Exit.
 U0 RelicShellTaskMain(I64 arg)
 {
-  U8 line[1024];
-  I64 len = 0, ch, sc, mc;
+  U8 line[1024],draft[1024];
+  draft[0]=0;
+  I64 len = 0, ch, sc, mc,i,hpos=relic_shell_history_count;
   Bool stop = FALSE;
 
   no_warn arg;
@@ -494,7 +606,6 @@ U0 RelicShellTaskMain(I64 arg)
   Fs->text_attr = BLACK << 4 | LTGRAY;
   RelicTermNew;
   StrCpy(Fs->task_title, "Relic Shell");
-  "$FD,LTGRAY$$BD,BLACK$$FG,LTGRAY$$BG,BLACK$";
   DocClear;
   "$WW,1$"; // wrap long lines instead of scrolling the shell sideways
   LBts(&Fs->display_flags, DISPLAYf_SHOW);
@@ -503,8 +614,8 @@ U0 RelicShellTaskMain(I64 arg)
   WinFocus(Fs);
   FlushMsgs;
 
-  "$FG,YELLOW$Relic Shell$FG$\n";
-  "$FG,DKGRAY$Run HolyC commands. Type $FG,YELLOW$exit$FG,DKGRAY$ or press $FG,YELLOW$Esc$FG,DKGRAY$ to return.$FG$\n";
+  "Relic Shell\n";
+  "Type help for commands, or exit to return.\n";
   RelicShellPrompt;
 
   while (!stop) {
@@ -513,8 +624,25 @@ U0 RelicShellTaskMain(I64 arg)
       Sleep(10);
     } else if (ch == CH_ESC || ch == CH_SHIFT_ESC) {
       stop = TRUE;
+    } else if ((sc&255)==SC_CURSOR_UP) {
+      if (hpos==relic_shell_history_count) { line[len]=0; StrCpy(draft,line); }
+      if (hpos>0) RelicShellRecall(line,&len,relic_shell_history[--hpos]);
+    } else if ((sc&255)==SC_CURSOR_DOWN) {
+      if (hpos<relic_shell_history_count) {
+        hpos++;
+        if (hpos==relic_shell_history_count) RelicShellRecall(line,&len,draft);
+        else RelicShellRecall(line,&len,relic_shell_history[hpos]);
+      }
     } else if (ch == '\n') {
       line[len] = 0;
+      if (len && (relic_shell_history_count==0 || StrCmp(line,relic_shell_history[relic_shell_history_count-1]))) {
+        if (relic_shell_history_count==16) {
+          for (i=0;i<15;i++) StrCpy(relic_shell_history[i],relic_shell_history[i+1]);
+          relic_shell_history_count=15;
+        }
+        StrCpy(relic_shell_history[relic_shell_history_count++],line);
+      }
+      hpos=relic_shell_history_count; draft[0]=0;
       len = 0;
       "\n";
       if (!StrICmp(line, "exit"))
@@ -605,109 +733,52 @@ U0 RelicLaunchGames()
     RelicGamesLauncher;
   } catch {
     Fs->catch_except = TRUE;
-    "\n\n$FG,LTRED$Games launcher failed.$FG$\n\n";
+    RelicGamesAfter;
+    DocClear;
     PutExcept;
-    "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-    RelicWaitKey;
+    RelicUIMatte;
+    RelicNotify("Games","The games launcher stopped because of an error. "
+          "You will return to the desktop.");
   }
 }
 
-U0 RelicAppFiles()
-{
-  "$FG,CYAN$=== Files ===$FG$\n\n";
-  Dir;
-  "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-  GetChar;
-}
+#include "::/Home/RelicOS/RelicApps.HC"
+U0 RelicAppFiles() { RelicFilesApp; }
 
 U0 RelicAppTasks()
 {
-  "$FG,CYAN$=== Task Report ===$FG$\n\n";
+  "Tasks\n\n";
   TaskRep;
-  "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-  GetChar;
+  "\nUp/Down or PageUp/PageDown scroll. Esc returns.\n";
+  DocTop; View;
 }
 
 U0 RelicAppMemory()
 {
-  "$FG,CYAN$=== Memory Report ===$FG$\n\n";
+  "Memory\n\n";
   MemRep;
-  "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-  GetChar;
+  "\nUp/Down or PageUp/PageDown scroll. Esc returns.\n";
+  DocTop; View;
 }
 
 U0 RelicAppSysInfo()
 {
-  "$FG,CYAN$=== System Information ===$FG$\n\n";
-  "$FG,LTGRAY$OS:        $FG,CYAN$RelicOS V0.4.0$FG$\n";
-  "$FG,LTGRAY$Kernel:    $FG,CYAN$RelicOS V0.4.0$FG$\n";
-  "$FG,LTGRAY$Resolution:$FG,CYAN$ 640x480$FG$\n";
-  "$FG,LTGRAY$Colors:    $FG,CYAN$16-color (custom dark palette)$FG$\n\n";
-  "$FG,LTGRAY$CPU Info:$FG$\n";
+  "System\n\n";
+  "OS:         RelicOS V0.5.0 (a TempleOS fork)\n";
+  "Display:    640 x 480, 16 colours\n\n";
+  "CPU Info:\n";
   CPURep;
-  "\n$FG,LTGRAY$Disk Info:$FG$\n";
+  "\nDisk Info:\n";
   RelicDriveColorsDark;
   DrvRep;
   RelicDriveColorsRestore;
-  "\n$FG,DKGRAY$Press any key to return to desktop...$FG$\n";
-  GetChar;
+  "\nUp/Down or PageUp/PageDown scroll. Esc returns.\n";
+  DocTop; View;
 }
 
 U0 RelicAppHelp()
 {
-  "$FG,CYAN$\n";
-  "  =========================================\n";
-  "   IN MEMORY OF TERRY A. DAVIS\n";
-  "   December 15, 1969 - August 11, 2018\n";
-  "  =========================================\n";
-  "$FG$\n";
-  "$FG,LTGRAY$  Terry Andrew Davis was an American programmer$FG$\n";
-  "$FG,LTGRAY$  and the sole creator of TempleOS - the operating$FG$\n";
-  "$FG,LTGRAY$  system that Relic OS is built upon and dedicated to.$FG$\n\n";
-  "$FG,CYAN$  Who He Was$FG$\n";
-  "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-  "  Terry was a brilliant, self-taught engineer who\n";
-  "  spent over a decade building TempleOS entirely\n";
-  "  alone - every line of code, every driver, the\n";
-  "  compiler, the kernel, the graphics system, and\n";
-  "  even the programming language (HolyC) itself.\n\n";
-  "  He held a degree in Electrical Engineering and\n";
-  "  previously worked at Ticketmaster as a systems\n";
-  "  programmer before dedicating his life to his\n";
-  "  magnum opus: a pure, ring-0, single-address-space\n";
-  "  operating system he believed was built for God.\n\n";
-  "$FG,CYAN$  His Work$FG$\n";
-  "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-  "  TempleOS is a technical marvel. Running entirely\n";
-  "  in kernel mode with no memory protection, it is\n";
-  "  one of the few operating systems ever written\n";
-  "  from scratch by a single person, including:\n\n";
-  "$FG,LTGRAY$   - HolyC: a custom C variant with JIT compilation\n";
-  "   - A full 64-bit protected-mode kernel\n";
-  "   - DolDoc: a rich text/graphics document system\n";
-  "   - A complete IDE, compiler, and assembler\n";
-  "   - 640x480, 16-color VGA with custom graphics APIs\n";
-  "   - The custom RedSea file system and disk drivers$FG$\n\n";
-  "$FG,CYAN$  Relic OS$FG$\n";
-  "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-  "  Relic OS is a modern fork of TempleOS, built as\n";
-  "  a tribute to Terry's genius and vision. It aims\n";
-  "  to bring a refined, usable desktop experience to\n";
-  "  the foundation he created - while never forgetting\n";
-  "  who made it all possible.\n\n";
-  "$FG,CYAN$  \"Thou madest him to have dominion over the works\n";
-  "   of thy hands.\" - Psalm 8:6$FG$\n\n";
-  "$FG,DKGRAY$  Rest in peace, Terry. Your work lives on.\n\n";
-  "$FG,CYAN$  Keys$FG$\n";
-  "$FG,DKGRAY$  -----------------------------------------$FG$\n";
-  "  Desktop:  F Files  E Editor  S Shell  G Games\n";
-  "            T Tasks  M Memory  I SysInfo  H Help\n";
-  "  DOOM:     W/S move, Left/Right turn, A/D strafe,\n";
-  "            Ctrl fire, Space doors, Tab map, Esc menu\n";
-  "  Ctrl+Alt+V  back to plain VGA (shows a crash screen\n";
-  "              if the system ever freezes)\n\n";
-  "$FG,DKGRAY$  Press any key to return to desktop...$FG$\n";
-  GetChar;
+  RelicHelpApp;
 }
 
 // Returns TRUE when the app ran inline and the desktop must be restored now.
@@ -722,11 +793,12 @@ Bool LaunchApp(I64 idx)
     return FALSE;
   }
 
+  RelicMenuSet(FALSE);
   RelicAppStart;
   if (idx == 0)
     RelicAppFiles;
   else if (idx == 1)
-    RelicLaunchEditor;
+    RelicEditorApp;
   else if (idx == 3)
     RelicLaunchGames;
   else if (idx == 4)
@@ -737,16 +809,25 @@ Bool LaunchApp(I64 idx)
     RelicAppSysInfo;
   else if (idx == 7)
     RelicAppHelp;
+  else if (idx == 8) RelicBrowserApp;
+  else if (idx == 9) RelicPaintApp;
+  else if (idx == 10) RelicCalcApp;
+  else if (idx == 11) RelicCalendarApp;
+  else if (idx == 12) RelicSettingsApp;
+  else if (idx == 13) RelicNotesApp;
   return TRUE;
 }
 
 // ---- Main desktop loop ----
 U0 RelicDesktop()
 {
-  I64 msg_code, arg1, arg2, i;
+  I64 msg_code, arg1, arg2, i, len, n, sc, list[NUM_APPS];
+  I64 last_mx=ms.pos.x,last_my=ms.pos.y;
+  relic_last_input=tS;
 
   SettingsPush;
   AutoComplete(OFF);
+  RelicUIMatte;
   RelicChromeInstall;
   RelicDesktopMode;
   DocClear;
@@ -776,16 +857,43 @@ U0 RelicDesktop()
       msg_code = ScanMsg(&arg1, &arg2,
             1 << MSG_KEY_DOWN | 1 << MSG_MS_L_DOWN);
 
+      if (ms.pos.x!=last_mx || ms.pos.y!=last_my) {
+        relic_last_input=tS; relic_saver=FALSE;
+        last_mx=ms.pos.x; last_my=ms.pos.y;
+      }
+      if (relic_cfg.saver_minutes && tS-relic_last_input>relic_cfg.saver_minutes*60)
+        relic_saver=TRUE;
+      if (msg_code) relic_last_input=tS;
+      if (msg_code && relic_saver) { relic_saver=FALSE; msg_code=0; }
       if (msg_code == MSG_KEY_DOWN) {
-        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC)
-          RelicDesktopRestore;
-        else if (arg1 >= ' ' && arg1 < 127)
+        if (arg1 == CH_ESC || arg1 == CH_SHIFT_ESC) {
+          RelicMenuSet(FALSE); RelicDesktopRestore;
+        } else if (arg1==' ' && (!relic_menu || !relic_search[0])) {
+          RelicMenuSet(!relic_menu); relic_search[0]=0;
+        } else if (relic_menu) {
+          len=StrLen(relic_search);
+          n=RelicMenuList(list);
+          sc=arg2&0xFF;
+          if (sc==SC_CURSOR_LEFT && relic_menu_sel>0) relic_menu_sel--;
+          else if (sc==SC_CURSOR_RIGHT && relic_menu_sel+1<n) relic_menu_sel++;
+          else if (sc==SC_CURSOR_UP && relic_menu_sel>=MENU_COLS)
+            relic_menu_sel-=MENU_COLS;
+          else if (sc==SC_CURSOR_DOWN && relic_menu_sel+MENU_COLS<n)
+            relic_menu_sel+=MENU_COLS;
+          else if (arg1==CH_BACKSPACE && len) {
+            relic_search[len-1]=0; relic_menu_sel=0;
+          } else if (arg1=='\n') {
+            if (relic_menu_sel<n) {
+              relic_pending_app=list[relic_menu_sel];
+              RelicMenuSet(FALSE);
+            }
+          } else if (arg1>=' ' && arg1<127 && arg1!='$$' && len<sizeof(relic_search)-1) {
+            relic_search[len]=arg1; relic_search[len+1]=0; relic_menu_sel=0;
+          }
+        } else if (arg1 >= ' ' && arg1 < 127)
           relic_pending_app = RelicKeyApp(arg1);
       } else if (msg_code == MSG_MS_L_DOWN) {
-        relic_pending_app = RelicDockHit(arg1, arg2);
-        if (relic_pending_app < 0)
-          relic_pending_app = RelicDockHit(ms.pos.x - relic_ox,
-                ms.pos.y - relic_oy);
+        relic_pending_app=RelicDockHit(ms.pos.x-relic_ox,ms.pos.y-relic_oy);
       } else {
         // No message: yield, then reclaim the window. A rogue terminal
         // (child of Adam, not us) may have taken focus; WinToTop+WinFocus
@@ -803,6 +911,7 @@ U0 RelicDesktop()
         FlushMsgs;
         if (LaunchApp(i))
           RelicDesktopRestore;
+        relic_last_input=tS;
       }
     }
   }

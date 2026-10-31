@@ -1,0 +1,18 @@
+U0 help()
+{
+ "\nCOMMANDS\n\n";
+ "Dir;                   List files in this folder\n";
+ "Cd(\"/Home\");           Change folder\n";
+ "Ed(\"Notes.TXT\");       Edit or create a text file\n";
+ "Type(\"Notes.TXT\");     Read a text file\n";
+ "DirMk(\"Work\");         Create a folder\n";
+ "Copy(\"a.TXT\",\"b.TXT\"); Copy a file\n";
+ "Move(\"a.TXT\",\"b.TXT\"); Move or rename a file\n";
+ "Del(\"a.TXT\");          Delete a file\n";
+ "TaskRep;               Show running tasks\n";
+ "MemRep;                Show memory use\n";
+ "Help;                  Full system help\n\n";
+ "Commands are case sensitive. The terminal runs HolyC code.\n";
+ "In a normal terminal, finish commands with a semicolon.\n";
+ "The desktop shell also accepts help without a semicolon.\n";
+}

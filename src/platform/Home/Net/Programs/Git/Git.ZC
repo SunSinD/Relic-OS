@@ -1,0 +1,12 @@
+// Git client for YKD, by y4my4m. Public Domain.
+// Requires the Net stack (HTTP/TLS). Include SSH before Git for ssh urls.
+
+Cd(__DIR__);;
+
+#include "GitSHA1"
+#include "GitProto"
+#include "GitPack"
+
+#ifdef SSHTransportConnect
+#include "GitSSH"
+#endif

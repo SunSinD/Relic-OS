@@ -1,0 +1,76 @@
+//Nothing here draws. ::/StartOS.ZC animates the splash into the framebuffer
+//and hangs YDEWireOverlay on gr.fp_final_screen_update ahead of the WinMgr's
+//first frame. This file holds only the takedown decision.
+
+//Splash exits on input. A positive value adds a timeout in seconds for
+//unattended boots; 0 waits forever.
+#define YDE_SPLASH_SECS		0.0
+#define YDE_SPLASH_STUCK	90.0	//boot did not finish; drop the overlay
+#define YDE_SPLASH_SETTLE	0.5		//settle after boot, see YDESplashDismissTask
+#define RELIC_SPLASH_AUTO	TRUE	//RelicOS: clear once boot settles, no key wait.
+								//The splash covers real compile time only.
+#define YDE_SPLASH_NUDGE	8		//pixels of cursor travel counted as input
+
+
+U0 YDESplashDismissTask()
+{
+	F64	 t0	  = yde_wire_t0, settled = 0.0;	//clock base set at kernel handover
+	I64	 snap = kbd.count, hits = 0;
+	I64	 mx0  = mouse.pos.x, my0 = mouse.pos.y;
+	Bool lb0  = mouse.lb, rb0 = mouse.rb, go = FALSE;
+
+	while (yde_wire_up && !go)
+	{
+		if (!yde_boot_done || settled <= 0.0 || tS - settled < YDE_SPLASH_SETTLE)
+		{//Re-baseline until boot is done and has settled: the kbd driver only
+		//sees keys typed at the boot loader once it initialises, and the mouse
+		//reports garbage buttons until its own init.
+			if (yde_boot_done && settled <= 0.0)
+				settled = tS;
+			snap = kbd.count;
+			lb0  = mouse.lb;
+			rb0  = mouse.rb;
+			mx0  = mouse.pos.x;
+			my0  = mouse.pos.y;
+			hits = 0;
+		}
+		else
+		{//Past the settle: boot is finished and the desktop behind the splash is
+		//built, so input counts from here. lb0/rb0 mean the button was already
+		//down at the baseline; they are cleared on release, never set on press.
+			yde_wire_ready = TRUE;
+			if (RELIC_SPLASH_AUTO)
+				go = TRUE;
+			if (!mouse.lb)
+				lb0 = FALSE;
+			if (!mouse.rb)
+				rb0 = FALSE;
+			//Two consecutive polls: a one-frame glitch is not a press.
+			//Cursor travel past YDE_SPLASH_NUDGE from the baseline is input.
+			if (kbd.count != snap || (mouse.lb && !lb0) || (mouse.rb && !rb0) ||
+				AbsI64(mouse.pos.x - mx0) + AbsI64(mouse.pos.y - my0) >
+					YDE_SPLASH_NUDGE)
+				hits++;
+			else
+				hits = 0;
+			if (hits >= 2)
+				go = TRUE;
+		}
+		if (YDE_SPLASH_SECS > 0.0 && tS - t0 >= YDE_SPLASH_SECS)
+			go = TRUE;
+		//Boot that never sets yde_boot_done has thrown somewhere. Release the
+		//overlay anyway.
+		if (!yde_boot_done && tS - t0 >= YDE_SPLASH_STUCK)
+			go = TRUE;
+		Sleep(33);
+	}
+
+	YDEWireRelease;
+}
+
+U0 YDESplashStart()
+{
+	Spawn(&YDESplashDismissTask, NULL, "YDE Splash");
+}
+
+YDESplashStart;

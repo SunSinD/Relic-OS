@@ -1,0 +1,9396 @@
+// main menu, console, and the game state machine
+//
+// HL's VGUI layout: a tiled backdrop from resource/background, a left-aligned
+// item column, the selected item's help text to its right. dialogs are laid out
+// on the coordinates in valve/resource/*.res, scaled from the 800x600 space the
+// art is authored in. the help page keeps the Quake plaque furniture.
+// MouseRaw freezes mouse.pos; HLMenuMouse integrates raw deltas into a soft
+// canvas cursor.
+
+#define HLST_MENU		0
+#define HLST_PLAYING		1
+#define HLST_CONSOLE		2
+
+#define HLITEM_RESUME	0
+#define HLITEM_PLAYERS	1
+#define HLITEM_NEWGAME	2
+#define HLITEM_SAVE		3
+#define HLITEM_LOAD		4
+#define HLITEM_FIND		5
+#define HLITEM_CREATE	6
+#define HLITEM_OPTIONS	7
+#define HLITEM_DISCONNECT 8
+#define HLITEM_LEAVE		9
+#define HLITEM_QUIT		10
+#define HLITEM_MAX		11
+
+//Item column, as fractions of the canvas.
+#define HLMENU_COL_X		0.15
+#define HLMENU_COL_Y		0.37
+#define HLMENU_HINT_X	0.45
+#define HLMENU_PITCH		2.00
+
+#define HLMENU_X			72
+#define HLMENU_Y			32
+#define HLMENU_ROW_H		20
+#define HLMENU_CURSOR_X	54
+
+#define HLCON_LINES		24
+#define HLCON_WIDTH		40
+#define HLCON_HEIGHT		128
+
+#define HLPAGE_MAIN		0
+#define HLPAGE_OPTIONS	1
+#define HLPAGE_NOTICE	2
+#define HLPAGE_HELP		3
+#define HLPAGE_SINGLE	4
+#define HLPAGE_KEYS		5
+#define HLPAGE_NEWGAME	6
+#define HLPAGE_LOADGAME	7
+#define HLPAGE_SAVEGAME	8
+#define HLPAGE_BROWSER	9
+#define HLPAGE_CREATE	10
+#define HLPAGE_RULES		11
+#define HLPAGE_MPSETUP	12
+#define HLPAGE_MPADV		13
+#define HLPAGE_SPRAY		14
+#define HLPAGE_PLAYERS	15
+
+#define HLDLG_W			800
+#define HLDLG_H			600
+
+//HL keeps an unbounded save list.
+#define HLSAVE_SLOTS		8
+#define HLSAVE_NAME_MAX	48
+
+#define HLSKILL_EASY		0
+#define HLSKILL_MEDIUM	1
+#define HLSKILL_HARD		2
+#define HLSKILL_ROWS		3
+
+#define HLSP_NEWGAME		0
+#define HLSP_LOAD		1
+#define HLSP_SAVE		2
+#define HLSP_ROWS		3
+
+I64  hl_sp_row       = 0;
+Bool hl_menu_save_req = FALSE;
+Bool hl_menu_load_req = FALSE;
+
+#define HLFLASH_DRAIN		1.2
+#define HLFLASH_CHARGE		0.2
+#define HLFLASH_RANGE		1600.0	//trace length, world units
+#define HLFLASH_BACKOFF		4.0		//lift off the impact plane, world units
+#define HLFLASH_RAD_NEAR	110.0
+#define HLFLASH_RAD_FAR		260.0
+#define HLFLASH_DIM_FAR		0.35
+
+#define HLFLASH_DLIGHT_KEY	-1
+
+Bool hl_flash_on		= FALSE;
+I64  hl_flash_battery	= 100;
+F64  hl_flash_next		= 0.0;
+
+I64  hl_con_wpn_seen	= -1;
+I64  hl_con_wpn_prev	= -1;
+
+F64  hl_con_fov_last	= 90.0;
+
+#define HLHELP_PAGES		6
+
+#define HLBR_TAB_INTERNET	0
+#define HLBR_TAB_LAN		1
+#define HLBR_TAB_COUNT		2
+
+#define HLBR_SORT_NAME		0
+#define HLBR_SORT_MAP		1
+#define HLBR_SORT_PLAYERS	2
+#define HLBR_SORT_PING		3
+#define HLBR_SORT_COUNT		4
+
+#define HLBR_STRIP		0
+#define HLBR_REFRESH		1
+#define HLBR_ADDRESS		2
+#define HLBR_HEAD		3
+#define HLBR_LIST		4
+
+#define HLCS_MAP			0
+#define HLCS_HOSTNAME	1
+#define HLCS_MAXPLAYERS	2	//maxplayers, NUMBER 1..32
+#define HLCS_PASSWORD	3
+#define HLCS_RULES		4
+#define HLCS_START		5
+#define HLCS_ROWS		6
+
+#define HLR_TEAMLIST		0
+#define HLR_FRAGLIMIT	1	//mp_fraglimit, NUMBER 0..
+#define HLR_TIMELIMIT	2	//mp_timelimit, NUMBER 0.. minutes
+#define HLR_FALLDAMAGE	3
+#define HLR_TEAMPLAY		4
+#define HLR_FRIENDLYFIRE	5
+#define HLR_WEAPONSTAY	6
+#define HLR_FORCERESPAWN	7
+#define HLR_FOOTSTEPS	8
+#define HLR_FLASHLIGHT	9
+#define HLR_AUTOCROSSHAIR 10
+#define HLR_CLOSE		11
+#define HLR_ROWS			12
+
+#define HLPS_NAME		0
+#define HLPS_MODEL		1
+#define HLPS_PRIMARY		2
+#define HLPS_SECONDARY	3
+#define HLPS_SPRAY		4
+#define HLPS_SPRAYCOLOR	5
+#define HLPS_HIMODELS	6
+#define HLPS_ADVANCED	7
+#define HLPS_CLOSE		8
+#define HLPS_ROWS		9
+
+#define HLADV_DECALS		0	//mp_decals, NUMBER 0..4096, default 300
+#define HLADV_CLOSE		1
+#define HLADV_ROWS		2
+
+#define HLKEY_MOUSE1		0x100
+#define HLKEY_MOUSE2		0x101
+#define HLKEY_MOUSE3		0x102
+#define HLKEY_MOUSE4		0x103
+#define HLKEY_MOUSE5		0x104
+#define HLKEY_MWHEELUP		0x105
+#define HLKEY_MWHEELDOWN	0x106
+#define HLKEY_MAX			0x107
+
+#define HLKEY_CMD_MAX		40
+
+U8		hl_key_bind[HLKEY_MAX * HLKEY_CMD_MAX];
+Bool	hl_key_held[HLKEY_MAX];
+
+#define HLIN_FORWARD		0
+#define HLIN_BACK		1
+#define HLIN_LEFT		2
+#define HLIN_RIGHT		3
+#define HLIN_MOVELEFT	4
+#define HLIN_MOVERIGHT	5
+#define HLIN_JUMP		6
+#define HLIN_DUCK		7
+#define HLIN_SPEED		8
+#define HLIN_USE			9
+#define HLIN_ATTACK		10
+#define HLIN_ATTACK2		11
+#define HLIN_RELOAD		12
+#define HLIN_SCORE		13
+#define HLIN_LOOKUP		14
+#define HLIN_LOOKDOWN	15
+#define HLIN_KLOOK		16
+#define HLIN_STRAFE		17
+#define HLIN_MOVEUP		18
+#define HLIN_MOVEDOWN	19
+#define HLIN_MLOOK		20
+#define HLIN_VOICE		21
+#define HLIN_COUNT		22
+
+I64		hl_in_count[HLIN_COUNT];
+I64		hl_in_state;
+
+I64		hl_in_slot_want;		//slot1..slot5 as 1..5, 0 for none
+I64		hl_in_cycle_want;		//invnext +1, invprev -1, 0 for none
+Bool	hl_in_lastinv_want;
+Bool	hl_in_centerview_want;
+I64		hl_in_msg_want;		//1 messagemode, 2 messagemode2, 0 none
+
+Bool	hl_in_wpn_direct;
+
+Bool	hl_in_voice_said;
+Bool	hl_in_spray_said;
+
+Bool	hl_paused;
+
+I64		hl_opt_crosshair	= 1;
+I64		hl_keys_row		= 0;
+I64		hl_keys_top		= 0;
+Bool	hl_keys_capture	= FALSE;
+
+U8 *HLBindGet(I64 k)
+{
+	if (k <= 0 || k >= HLKEY_MAX)
+		return hl_key_bind;
+
+	return hl_key_bind + k * HLKEY_CMD_MAX;
+}
+
+U0 HLBindSet(I64 k, U8 *cmd)
+{
+	if (k <= 0 || k >= HLKEY_MAX)
+		return;
+
+	HLStrCopy(hl_key_bind + k * HLKEY_CMD_MAX, cmd, HLKEY_CMD_MAX);
+}
+
+U0 HLBindClear(I64 k)
+{
+	if (k <= 0 || k >= HLKEY_MAX)
+		return;
+
+	hl_key_bind[k * HLKEY_CMD_MAX] = 0;
+}
+
+U0 HLBindClearAll()
+{
+	I64 i;
+
+	for (i = 0; i < HLKEY_MAX; i++)
+	{
+		hl_key_bind[i * HLKEY_CMD_MAX] = 0;
+		hl_key_held[i]                 = FALSE;
+	}
+}
+
+I64 HLKeyFromName(U8 *name)
+{
+	I64 ch;
+
+	if (!name[0])					return 0;
+
+	if (!StrICompare(name, "TAB"))		return SC_TAB;
+	if (!StrICompare(name, "ENTER"))		return SC_ENTER;
+	if (!StrICompare(name, "ESCAPE"))	return SC_ESC;
+	if (!StrICompare(name, "SPACE"))		return Char2ScanCode(' ') & 0x7F;
+	if (!StrICompare(name, "BACKSPACE"))	return SC_BACKSPACE;
+	if (!StrICompare(name, "UPARROW"))	return SC_CURSOR_UP;
+	if (!StrICompare(name, "DOWNARROW"))	return SC_CURSOR_DOWN;
+	if (!StrICompare(name, "LEFTARROW"))	return SC_CURSOR_LEFT;
+	if (!StrICompare(name, "RIGHTARROW"))	return SC_CURSOR_RIGHT;
+	if (!StrICompare(name, "ALT"))		return SC_ALT;
+	if (!StrICompare(name, "CTRL"))		return SC_CTRL;
+	if (!StrICompare(name, "SHIFT"))		return SC_SHIFT;
+	if (!StrICompare(name, "CAPSLOCK"))	return SC_CAPS;
+	if (!StrICompare(name, "INS"))		return SC_INS;
+	if (!StrICompare(name, "DEL"))		return SC_DELETE;
+	if (!StrICompare(name, "PGDN"))		return SC_PAGE_DOWN;
+	if (!StrICompare(name, "PGUP"))		return SC_PAGE_UP;
+	if (!StrICompare(name, "HOME"))		return SC_HOME;
+	if (!StrICompare(name, "END"))		return SC_END;
+	if (!StrICompare(name, "PAUSE"))		return SC_PAUSE;
+
+	if (!StrICompare(name, "F1"))		return SC_F1;
+	if (!StrICompare(name, "F2"))		return SC_F2;
+	if (!StrICompare(name, "F3"))		return SC_F3;
+	if (!StrICompare(name, "F4"))		return SC_F4;
+	if (!StrICompare(name, "F5"))		return SC_F5;
+	if (!StrICompare(name, "F6"))		return SC_F6;
+	if (!StrICompare(name, "F7"))		return SC_F7;
+	if (!StrICompare(name, "F8"))		return SC_F8;
+	if (!StrICompare(name, "F9"))		return SC_F9;
+	if (!StrICompare(name, "F10"))		return SC_F10;
+	if (!StrICompare(name, "F11"))		return SC_F11;
+	if (!StrICompare(name, "F12"))		return SC_F12;
+
+	if (!StrICompare(name, "MOUSE1"))	return HLKEY_MOUSE1;
+	if (!StrICompare(name, "MOUSE2"))	return HLKEY_MOUSE2;
+	if (!StrICompare(name, "MOUSE3"))	return HLKEY_MOUSE3;
+	if (!StrICompare(name, "MOUSE4"))	return HLKEY_MOUSE4;
+	if (!StrICompare(name, "MOUSE5"))	return HLKEY_MOUSE5;
+	if (!StrICompare(name, "MWHEELUP"))	return HLKEY_MWHEELUP;
+	if (!StrICompare(name, "MWHEELDOWN"))	return HLKEY_MWHEELDOWN;
+
+	if (name[0] == '\\' && name[1] == '\\' && !name[2])
+		return Char2ScanCode('\\') & 0x7F;
+
+	if (!name[1])
+	{
+		ch = name[0];
+		if (ch >= 'A' && ch <= 'Z')
+			ch += 32;
+
+		return Char2ScanCode(ch) & 0x7F;
+	}
+
+	if (name[0] == '0' && (name[1] == 'x' || name[1] == 'X'))
+		return Str2I64(name + 2, 16);
+
+	return 0;
+}
+
+U0 HLKeyName(U8 *out, I64 k)
+{
+	I64 ch;
+
+	if (k <= 0 || k >= HLKEY_MAX)
+	{
+		out[0] = 0;
+		return;
+	}
+
+	if (k == SC_TAB)			{ StrPrint(out, "TAB");		return; }
+	if (k == SC_ENTER)			{ StrPrint(out, "ENTER");		return; }
+	if (k == SC_ESC)			{ StrPrint(out, "ESCAPE");	return; }
+	if (k == SC_BACKSPACE)		{ StrPrint(out, "BACKSPACE");	return; }
+	if (k == SC_CURSOR_UP)		{ StrPrint(out, "UPARROW");	return; }
+	if (k == SC_CURSOR_DOWN)	{ StrPrint(out, "DOWNARROW");	return; }
+	if (k == SC_CURSOR_LEFT)	{ StrPrint(out, "LEFTARROW");	return; }
+	if (k == SC_CURSOR_RIGHT)	{ StrPrint(out, "RIGHTARROW");	return; }
+	if (k == SC_ALT)			{ StrPrint(out, "ALT");		return; }
+	if (k == SC_CTRL)			{ StrPrint(out, "CTRL");		return; }
+	if (k == SC_SHIFT)			{ StrPrint(out, "SHIFT");		return; }
+	if (k == SC_CAPS)			{ StrPrint(out, "CAPSLOCK");	return; }
+	if (k == SC_INS)			{ StrPrint(out, "INS");		return; }
+	if (k == SC_DELETE)			{ StrPrint(out, "DEL");		return; }
+	if (k == SC_PAGE_DOWN)		{ StrPrint(out, "PGDN");		return; }
+	if (k == SC_PAGE_UP)		{ StrPrint(out, "PGUP");		return; }
+	if (k == SC_HOME)			{ StrPrint(out, "HOME");		return; }
+	if (k == SC_END)			{ StrPrint(out, "END");		return; }
+	if (k == SC_PAUSE)			{ StrPrint(out, "PAUSE");		return; }
+
+	if (k == SC_F1)		{ StrPrint(out, "F1");	return; }
+	if (k == SC_F2)		{ StrPrint(out, "F2");	return; }
+	if (k == SC_F3)		{ StrPrint(out, "F3");	return; }
+	if (k == SC_F4)		{ StrPrint(out, "F4");	return; }
+	if (k == SC_F5)		{ StrPrint(out, "F5");	return; }
+	if (k == SC_F6)		{ StrPrint(out, "F6");	return; }
+	if (k == SC_F7)		{ StrPrint(out, "F7");	return; }
+	if (k == SC_F8)		{ StrPrint(out, "F8");	return; }
+	if (k == SC_F9)		{ StrPrint(out, "F9");	return; }
+	if (k == SC_F10)		{ StrPrint(out, "F10");	return; }
+	if (k == SC_F11)		{ StrPrint(out, "F11");	return; }
+	if (k == SC_F12)		{ StrPrint(out, "F12");	return; }
+
+	if (k == HLKEY_MOUSE1)		{ StrPrint(out, "MOUSE1");	return; }
+	if (k == HLKEY_MOUSE2)		{ StrPrint(out, "MOUSE2");	return; }
+	if (k == HLKEY_MOUSE3)		{ StrPrint(out, "MOUSE3");	return; }
+	if (k == HLKEY_MOUSE4)		{ StrPrint(out, "MOUSE4");	return; }
+	if (k == HLKEY_MOUSE5)		{ StrPrint(out, "MOUSE5");	return; }
+	if (k == HLKEY_MWHEELUP)	{ StrPrint(out, "MWHEELUP");	return; }
+	if (k == HLKEY_MWHEELDOWN)	{ StrPrint(out, "MWHEELDOWN");	return; }
+
+	if (k == (Char2ScanCode(' ') & 0x7F))
+	{
+		StrPrint(out, "SPACE");
+		return;
+	}
+
+	ch = ScanCode2Char(k);
+	if (ch > 32 && ch < 127)
+	{
+		StrPrint(out, "%c", ch);
+		return;
+	}
+
+	StrPrint(out, "0x%02X", k);
+}
+
+Bool HLInDown(I64 b)
+{
+	if (b < 0 || b >= HLIN_COUNT)
+		return FALSE;
+
+	return ToBool(hl_in_count[b] > 0);
+}
+
+U0 HLInPublish()
+{
+	I64 i;
+
+	hl_in_state = 0;
+
+	for (i = 0; i < HLIN_COUNT; i++)
+	{
+		if (hl_in_count[i] > 0)
+			Bts(&hl_in_state, i);
+	}
+}
+
+U0 HLInClearAll()
+{
+	I64 i;
+
+	for (i = 0; i < HLIN_COUNT; i++)
+		hl_in_count[i] = 0;
+
+	hl_in_state           = 0;
+	hl_in_slot_want       = 0;
+	hl_in_cycle_want      = 0;
+	hl_in_lastinv_want    = FALSE;
+	hl_in_centerview_want = FALSE;
+	hl_in_msg_want        = 0;
+
+}
+
+I64 HLInBitOf(U8 *cmd)
+{
+	if (!StrICompare(cmd, "forward"))	return HLIN_FORWARD;
+	if (!StrICompare(cmd, "back"))		return HLIN_BACK;
+	if (!StrICompare(cmd, "left"))		return HLIN_LEFT;
+	if (!StrICompare(cmd, "right"))		return HLIN_RIGHT;
+	if (!StrICompare(cmd, "moveleft"))	return HLIN_MOVELEFT;
+	if (!StrICompare(cmd, "moveright"))	return HLIN_MOVERIGHT;
+	if (!StrICompare(cmd, "jump"))		return HLIN_JUMP;
+	if (!StrICompare(cmd, "duck"))		return HLIN_DUCK;
+	if (!StrICompare(cmd, "speed"))		return HLIN_SPEED;
+	if (!StrICompare(cmd, "use"))		return HLIN_USE;
+	if (!StrICompare(cmd, "attack"))		return HLIN_ATTACK;
+	if (!StrICompare(cmd, "attack2"))	return HLIN_ATTACK2;
+	if (!StrICompare(cmd, "reload"))		return HLIN_RELOAD;
+	if (!StrICompare(cmd, "showscores"))	return HLIN_SCORE;
+	if (!StrICompare(cmd, "lookup"))		return HLIN_LOOKUP;
+	if (!StrICompare(cmd, "lookdown"))	return HLIN_LOOKDOWN;
+	if (!StrICompare(cmd, "klook"))		return HLIN_KLOOK;
+	if (!StrICompare(cmd, "strafe"))		return HLIN_STRAFE;
+	if (!StrICompare(cmd, "moveup"))		return HLIN_MOVEUP;
+	if (!StrICompare(cmd, "movedown"))	return HLIN_MOVEDOWN;
+	if (!StrICompare(cmd, "mlook"))		return HLIN_MLOOK;
+	if (!StrICompare(cmd, "voicerecord"))	return HLIN_VOICE;
+
+	return -1;
+}
+
+I64 HLBindKeyOfAction(U8 *cmd, I64 nth)
+{
+	I64 k;
+	I64 seen = 0;
+
+	if (!cmd[0])
+		return 0;
+
+	for (k = 1; k < HLKEY_MAX; k++)
+	{
+		if (!StrICompare(hl_key_bind + k * HLKEY_CMD_MAX, cmd))
+		{
+			if (seen == nth)
+				return k;
+			seen++;
+		}
+	}
+
+	return 0;
+}
+
+Bool HLBindActionDown(U8 *cmd)
+{
+	I64 k;
+
+	for (k = 1; k < 0x100; k++)
+	{
+		if (!StrICompare(hl_key_bind + k * HLKEY_CMD_MAX, cmd))
+		{
+			if (Bt(kbd.down_bitmap, k))
+				return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+#define HLACT_MAX			64
+#define HLACT_CMD_MAX		20
+#define HLACT_LBL_MAX		44
+
+#define HLACT_ACTION			0
+#define HLACT_HEADER			1
+#define HLACT_RULE			2
+
+U8		hl_act_cmd[HLACT_MAX * HLACT_CMD_MAX];
+U8		hl_act_lbl[HLACT_MAX * HLACT_LBL_MAX];
+U8		hl_act_kind[HLACT_MAX];
+I64		hl_act_count;
+Bool	hl_act_from_file;
+
+I64 HLQuotedField(U8 *out, U8 *src, I64 i, I64 max)
+{
+	I64 n = 0;
+
+	out[0] = 0;
+
+	while (src[i] && src[i] != '"')
+		i++;
+
+	if (!src[i])
+		return i;
+
+	i++;
+
+	while (src[i] && src[i] != '"')
+	{
+		if (n < max - 1)
+		{
+			out[n] = src[i];
+			n++;
+		}
+		i++;
+	}
+
+	out[n] = 0;
+
+	if (src[i])
+		i++;
+
+	return i;
+}
+
+U0 HLActAdd(U8 *cmd, U8 *label, I64 kind)
+{
+	if (hl_act_count >= HLACT_MAX)
+		return;
+
+	HLStrCopy(hl_act_cmd + hl_act_count * HLACT_CMD_MAX, cmd, HLACT_CMD_MAX);
+	HLStrCopy(hl_act_lbl + hl_act_count * HLACT_LBL_MAX, label, HLACT_LBL_MAX);
+	hl_act_kind[hl_act_count] = kind;
+	hl_act_count++;
+}
+
+U8 *HLLocLoad(I64 *_size)
+{
+	U8	*raw;
+	U8	*out;
+	I64	 size = 0;
+	I64	 i;
+	I64	 n = 0;
+
+	*_size = 0;
+
+	raw = HLFileLoad("resource/valve_english.txt", &size);
+	if (!raw)
+		return NULL;
+
+	if (size < 4)
+	{
+		Free(raw);
+		return NULL;
+	}
+
+	i = 0;
+	if (raw[0] == 0xFF && raw[1] == 0xFE)
+		i = 2;
+
+	out = MAlloc(size / 2 + 2);
+
+	while (i + 1 < size)
+	{
+		if (raw[i + 1])
+			out[n] = '?';
+		else
+			out[n] = raw[i];
+
+		n++;
+		i += 2;
+	}
+
+	out[n] = 0;
+	Free(raw);
+
+	*_size = n;
+	return out;
+}
+
+U0 HLLocFind(U8 *out, I64 max, U8 *loc, I64 loc_size, U8 *token)
+{
+	U8	pat[64];
+	I64	i;
+	I64	plen;
+
+	HLStrCopy(out, token, max);
+
+	if (!loc || loc_size <= 0)
+		return;
+
+	StrPrint(pat, "\"%s\"", token);
+	plen = StrLen(pat);
+
+	for (i = 0; i + plen < loc_size; i++)
+	{
+		if (loc[i] != '"' || loc[i + 1] != pat[1])
+			goto qlf_next;
+
+		if (!StrNICompare(loc + i, pat, plen))
+		{
+			HLQuotedField(out, loc, i + plen, max);
+			return;
+		}
+
+qlf_next:
+	}
+}
+
+U0 HLActFallback()
+{
+	HLActAdd("blank", "MOVEMENT",           HLACT_HEADER);
+	HLActAdd("+forward",   "Move forward",  HLACT_ACTION);
+	HLActAdd("+back",      "Move back",     HLACT_ACTION);
+	HLActAdd("+left",      "Turn left",     HLACT_ACTION);
+	HLActAdd("+right",     "Turn right",    HLACT_ACTION);
+	HLActAdd("+moveleft",  "Move left (strafe)",  HLACT_ACTION);
+	HLActAdd("+moveright", "Move right (strafe)", HLACT_ACTION);
+	HLActAdd("+jump",      "Jump",          HLACT_ACTION);
+	HLActAdd("+duck",      "Duck",          HLACT_ACTION);
+	HLActAdd("+moveup",    "Swim up",       HLACT_ACTION);
+	HLActAdd("+movedown",  "Swim down",     HLACT_ACTION);
+	HLActAdd("+lookup",    "Look up",       HLACT_ACTION);
+	HLActAdd("+lookdown",  "Look down",     HLACT_ACTION);
+	HLActAdd("force_centerview", "Look straight ahead", HLACT_ACTION);
+	HLActAdd("+strafe",    "Strafe modifier",        HLACT_ACTION);
+	HLActAdd("+mlook",     "Mouse look modifier",    HLACT_ACTION);
+	HLActAdd("+klook",     "Keyboard look modifier", HLACT_ACTION);
+	HLActAdd("+use",       "Use items",     HLACT_ACTION);
+
+	HLActAdd("blank", "COMMUNICATION",      HLACT_HEADER);
+	HLActAdd("+voicerecord", "Use voice communication", HLACT_ACTION);
+	HLActAdd("messagemode",  "Chat message", HLACT_ACTION);
+	HLActAdd("messagemode2", "Team message", HLACT_ACTION);
+
+	HLActAdd("blank", "COMBAT",             HLACT_HEADER);
+	HLActAdd("+attack",    "Primary attack",   HLACT_ACTION);
+	HLActAdd("+attack2",   "Secondary attack", HLACT_ACTION);
+	HLActAdd("+reload",    "Reload weapon",    HLACT_ACTION);
+	HLActAdd("+speed",     "Walk",             HLACT_ACTION);
+	HLActAdd("impulse 100", "Flashlight",      HLACT_ACTION);
+	HLActAdd("impulse 201", "Spray logo",      HLACT_ACTION);
+	HLActAdd("slot1",      "Weapon category 1", HLACT_ACTION);
+	HLActAdd("slot2",      "Weapon category 2", HLACT_ACTION);
+	HLActAdd("slot3",      "Weapon category 3", HLACT_ACTION);
+	HLActAdd("slot4",      "Weapon category 4", HLACT_ACTION);
+	HLActAdd("slot5",      "Weapon category 5", HLACT_ACTION);
+	HLActAdd("invprev",    "Previous weapon",  HLACT_ACTION);
+	HLActAdd("invnext",    "Next weapon",      HLACT_ACTION);
+	HLActAdd("lastinv",    "Last weapon used", HLACT_ACTION);
+
+	HLActAdd("blank", "MISCELLANEOUS",      HLACT_HEADER);
+	HLActAdd("+showscores", "Display multiplayer scores", HLACT_ACTION);
+	HLActAdd("snapshot",   "Take screen shot", HLACT_ACTION);
+	HLActAdd("save quick", "Quick save",       HLACT_ACTION);
+	HLActAdd("load quick", "Quick load",       HLACT_ACTION);
+	HLActAdd("pause",      "Pause game",       HLACT_ACTION);
+	HLActAdd("quit",       "Quit game",        HLACT_ACTION);
+}
+
+U0 HLActLoad()
+{
+	U8	*raw;
+	U8	*loc;
+	U8	 line[160];
+	U8	 cmd[HLACT_CMD_MAX];
+	U8	 tok[64];
+	U8	 label[HLACT_LBL_MAX];
+	I64	 size = 0;
+	I64	 loc_size = 0;
+	I64	 i = 0;
+	I64	 n;
+	I64	 p;
+	I64	 kind;
+
+	hl_act_count     = 0;
+	hl_act_from_file = FALSE;
+
+	raw = HLFileLoad("gfx/shell/kb_act.lst", &size);
+	if (!raw || size <= 0)
+	{
+		if (raw)
+			Free(raw);
+
+		HLActFallback;
+		return;
+	}
+
+	loc = HLLocLoad(&loc_size);
+
+	while (i < size)
+	{
+		n = 0;
+		while (i < size && raw[i] != '\n' && raw[i] != '\r' && n < 159)
+		{
+			line[n] = raw[i];
+			n++;
+			i++;
+		}
+		line[n] = 0;
+
+		while (i < size && raw[i] != '\n' && raw[i] != '\r')
+			i++;
+		while (i < size && (raw[i] == '\n' || raw[i] == '\r'))
+			i++;
+
+		if (!n)
+			goto qal_next;
+
+		p = HLQuotedField(cmd, line, 0, HLACT_CMD_MAX);
+		p = HLQuotedField(tok, line, p, 64);
+
+		if (!cmd[0])
+			goto qal_next;
+
+		kind = HLACT_ACTION;
+		if (!StrICompare(cmd, "blank"))
+		{
+			if (tok[0] == '#')
+				kind = HLACT_HEADER;
+			else
+				kind = HLACT_RULE;
+		}
+
+		if (tok[0] == '#')
+			HLLocFind(label, HLACT_LBL_MAX, loc, loc_size, tok + 1);
+		else
+			HLStrCopy(label, tok, HLACT_LBL_MAX);
+
+		if (kind != HLACT_RULE)
+			HLActAdd(cmd, label, kind);
+
+qal_next:
+	}
+
+	Free(raw);
+	if (loc)
+		Free(loc);
+
+	hl_act_from_file = TRUE;
+
+	if (hl_act_count < 2)
+	{
+		hl_act_count     = 0;
+		hl_act_from_file = FALSE;
+		HLActFallback;
+	}
+}
+
+U0 HLBindDefFallback()
+{
+	HLBindSet(HLKeyFromName("k"),          "+voicerecord");
+	HLBindSet(HLKeyFromName("w"),          "+forward");
+	HLBindSet(HLKeyFromName("UPARROW"),    "+forward");
+	HLBindSet(HLKeyFromName("s"),          "+back");
+	HLBindSet(HLKeyFromName("DOWNARROW"),  "+back");
+	HLBindSet(HLKeyFromName("LEFTARROW"),  "+left");
+	HLBindSet(HLKeyFromName("RIGHTARROW"), "+right");
+	HLBindSet(HLKeyFromName("a"),          "+moveleft");
+	HLBindSet(HLKeyFromName(","),          "+moveleft");
+	HLBindSet(HLKeyFromName("d"),          "+moveright");
+	HLBindSet(HLKeyFromName("."),          "+moveright");
+	HLBindSet(HLKeyFromName("SPACE"),      "+jump");
+	HLBindSet(HLKeyFromName("CTRL"),       "+duck");
+	HLBindSet(HLKeyFromName("TAB"),        "+showscores");
+	HLBindSet(HLKeyFromName("e"),          "+use");
+	HLBindSet(HLKeyFromName("v"),          "+moveup");
+	HLBindSet(HLKeyFromName("'"),          "+moveup");
+	HLBindSet(HLKeyFromName("c"),          "+movedown");
+	HLBindSet(HLKeyFromName("/"),          "+movedown");
+	HLBindSet(HLKeyFromName("PGUP"),       "+lookup");
+	HLBindSet(HLKeyFromName("PGDN"),       "+lookdown");
+	HLBindSet(HLKeyFromName("END"),        "force_centerview");
+	HLBindSet(HLKeyFromName("ALT"),        "+strafe");
+	HLBindSet(HLKeyFromName("INS"),        "+klook");
+	HLBindSet(HLKeyFromName(";"),          "+mlook");
+	HLBindSet(HLKeyFromName("r"),          "+reload");
+	HLBindSet(HLKeyFromName("SHIFT"),      "+speed");
+	HLBindSet(HLKeyFromName("MOUSE1"),     "+attack");
+	HLBindSet(HLKeyFromName("ENTER"),      "+attack");
+	HLBindSet(HLKeyFromName("MOUSE2"),     "+attack2");
+	HLBindSet(HLKeyFromName("\\"),         "+attack2");
+	HLBindSet(HLKeyFromName("f"),          "impulse 100");
+	HLBindSet(HLKeyFromName("1"),          "slot1");
+	HLBindSet(HLKeyFromName("2"),          "slot2");
+	HLBindSet(HLKeyFromName("3"),          "slot3");
+	HLBindSet(HLKeyFromName("4"),          "slot4");
+	HLBindSet(HLKeyFromName("5"),          "slot5");
+	HLBindSet(HLKeyFromName("MWHEELUP"),   "invprev");
+	HLBindSet(HLKeyFromName("["),          "invprev");
+	HLBindSet(HLKeyFromName("MWHEELDOWN"), "invnext");
+	HLBindSet(HLKeyFromName("]"),          "invnext");
+	HLBindSet(HLKeyFromName("q"),          "lastinv");
+	HLBindSet(HLKeyFromName("F5"),         "snapshot");
+	HLBindSet(HLKeyFromName("F6"),         "save quick");
+	HLBindSet(HLKeyFromName("F7"),         "load quick");
+	HLBindSet(HLKeyFromName("F10"),        "quit");
+	HLBindSet(HLKeyFromName("PAUSE"),      "pause");
+	HLBindSet(HLKeyFromName("ESCAPE"),     "escape");
+	HLBindSet(HLKeyFromName("~"),          "toggleconsole");
+	HLBindSet(HLKeyFromName("`"),          "toggleconsole");
+	HLBindSet(HLKeyFromName("t"),          "impulse 201");
+	HLBindSet(HLKeyFromName("y"),          "messagemode");
+	HLBindSet(HLKeyFromName("u"),          "messagemode2");
+}
+
+Bool hl_bind_def_from_file;
+
+U0 HLBindDefaults()
+{
+	U8	*raw;
+	U8	 line[160];
+	U8	 keyname[32];
+	U8	 cmd[HLKEY_CMD_MAX];
+	I64	 size = 0;
+	I64	 i = 0;
+	I64	 n;
+	I64	 p;
+	I64	 k;
+	I64	 got = 0;
+
+	HLBindClearAll;
+	hl_bind_def_from_file = FALSE;
+
+	raw = HLFileLoad("gfx/shell/kb_def.lst", &size);
+	if (!raw || size <= 0)
+	{
+		if (raw)
+			Free(raw);
+
+		HLBindDefFallback;
+		return;
+	}
+
+	while (i < size)
+	{
+		n = 0;
+		while (i < size && raw[i] != '\n' && raw[i] != '\r' && n < 159)
+		{
+			line[n] = raw[i];
+			n++;
+			i++;
+		}
+		line[n] = 0;
+
+		while (i < size && raw[i] != '\n' && raw[i] != '\r')
+			i++;
+		while (i < size && (raw[i] == '\n' || raw[i] == '\r'))
+			i++;
+
+		if (!n)
+			goto qbd_next;
+
+		p = HLQuotedField(keyname, line, 0, 32);
+		p = HLQuotedField(cmd, line, p, HLKEY_CMD_MAX);
+
+		if (!keyname[0] || !cmd[0])
+			goto qbd_next;
+
+		k = HLKeyFromName(keyname);
+		if (k > 0)
+		{
+			HLBindSet(k, cmd);
+			got++;
+		}
+
+qbd_next:
+	}
+
+	Free(raw);
+
+	if (got < 8)
+	{
+		HLBindClearAll;
+		HLBindDefFallback;
+		return;
+	}
+
+	hl_bind_def_from_file = TRUE;
+}
+
+
+#define HLALIAS_MAX		32
+#define HLALIAS_NAME		64
+#define HLALIAS_TEXT		128
+#define HLALIAS_DEPTH	8
+
+U8	hl_alias_name[HLALIAS_MAX * HLALIAS_NAME];
+U8	hl_alias_text[HLALIAS_MAX * HLALIAS_TEXT];
+I64	hl_alias_count = 0;
+I64	hl_alias_depth = 0;
+
+U0 HLAliasInit()
+{
+	I64 i;
+
+	for (i = 0; i < HLALIAS_MAX; i++)
+	{
+		hl_alias_name[i * HLALIAS_NAME] = 0;
+		hl_alias_text[i * HLALIAS_TEXT] = 0;
+	}
+
+	hl_alias_count = 0;
+	hl_alias_depth = 0;
+}
+
+I64 HLAliasFind(U8 *name)
+{//index or -1
+	I64 i;
+
+	for (i = 0; i < hl_alias_count; i++)
+	{
+		if (!StrICompare(hl_alias_name + i * HLALIAS_NAME, name))
+			return i;
+	}
+
+	return -1;
+}
+
+#define HLTAB_MULTI		0
+#define HLTAB_KEYBOARD	1
+#define HLTAB_AIM		2
+#define HLTAB_AUDIO		3
+#define HLTAB_VIDEO		4
+#define HLTAB_COUNT		5
+
+//Row 0 of every page is the tab strip itself
+#define HLOPT_STRIP		0
+
+#define HLMUL_SETUP		1
+#define HLMUL_ADVANCED	2
+#define HLMUL_CLOSE		3
+
+#define HLKB_BINDINGS	1
+#define HLKB_DEFAULTS	2
+#define HLKB_ALWAYSRUN	3
+#define HLKB_CLOSE		4
+
+#define HLAIM_SENS		1
+#define HLAIM_INVERT		2
+#define HLAIM_CLOSE		3
+
+#define HLAUD_SFX		1
+#define HLAUD_MP3		2
+#define HLAUD_CLOSE		3
+
+#define HLVID_RES		1
+#define HLVID_WINDOWED	2
+#define HLVID_GAMMA		3
+#define HLVID_MTBLIT	4
+#define HLVID_HUDSIZE	5
+#define HLVID_CLOSE		6
+
+#define HLRES_COUNT		8
+I64 hl_res_w[HLRES_COUNT] = {320, 400, 512, 640, 800, 854, 960, 1280};
+I64 hl_res_h[HLRES_COUNT] = {240, 300, 384, 480, 600, 480, 540,  720};
+
+I64		hl_state			= HLST_MENU;
+I64		hl_menu_row		= 0;
+I64		hl_menu_page		= HLPAGE_MAIN;
+I64		hl_opt_row		= 0;
+I64		hl_opt_tab		= HLTAB_MULTI;
+Bool	hl_menu_ingame	= FALSE;
+Bool	hl_quit_request	= FALSE;
+Bool	hl_menu_leave_req	= FALSE;
+
+I64		hl_skill_row		= HLSKILL_MEDIUM;
+I64		hl_slot_row		= 0;
+I64		hl_menu_slot		= 0;
+Bool	hl_slot_used[HLSAVE_SLOTS];
+U8		hl_slot_map[HLSAVE_SLOTS * HLSAVE_NAME_MAX];
+U8		hl_notice[64];
+
+#define HLMAP_MAX		192
+#define HLMAP_NAME_MAX	40
+
+U8		hl_menu_maps[HLMAP_MAX * HLMAP_NAME_MAX];
+I64		hl_map_count;
+Bool	hl_map_scanned;
+
+#define HLPM_MAX			32
+#define HLPM_NAME_MAX	24
+
+U8		hl_pm_name[HLPM_MAX * HLPM_NAME_MAX];
+I64		hl_pm_count;
+Bool	hl_pm_scanned;
+
+#define HLLOGO_MAX		96
+#define HLLOGO_NAME_MAX	24
+
+U8		hl_logo_name[HLLOGO_MAX * HLLOGO_NAME_MAX];
+I64		hl_logo_count;
+Bool	hl_logo_scanned;
+I64		hl_logo_sel;		//index into hl_logo_name; -1 when the file is unknown
+I64		hl_logo_top;
+
+#define HLLOGOC_COUNT	11
+#define HLLOGOC_NAME_MAX	12
+
+U8		hl_logo_color_name[HLLOGOC_COUNT * HLLOGOC_NAME_MAX];
+I64		hl_logo_color;
+
+I64		hl_cs_row;
+I64		hl_cs_map;
+I64		hl_cs_maxplayers;	//settings.scr NUMBER 1..32
+U8		hl_cs_password[24];
+
+I64		hl_rule_row;
+U8		hl_rule_teamlist[32];
+I64		hl_rule_fraglimit;
+I64		hl_rule_timelimit;
+I64		hl_rule_falldamage;		//mp_falldamage, 0 Normal 1 Realistic
+Bool	hl_rule_teamplay;
+Bool	hl_rule_friendlyfire;
+Bool	hl_rule_weaponstay;
+Bool	hl_rule_forcerespawn;
+Bool	hl_rule_footsteps;
+Bool	hl_rule_flashlight;
+Bool	hl_rule_autocrosshair;
+
+I64		hl_adv_row;
+I64		hl_adv_decals;		//mp_decals, 0..4096
+
+I64		hl_br_tab;
+I64		hl_br_row;
+I64		hl_br_top;
+I64		hl_br_sort;
+Bool	hl_br_sort_desc;
+I64		hl_br_vis;
+
+I64		hl_br_order[HLNET_SLIST_MAX];
+
+U8		*hl_edit_buf;
+I64		 hl_edit_max;
+I64		 hl_edit_len;
+Bool	 hl_edit_digits;
+
+U8		hl_setup_name[16];
+
+U8		hl_game_dir[32];
+
+I64		hl_setup_top		= 0;	//shirt, 0-13
+I64		hl_setup_bottom	= 0;	//trousers, 0-13
+
+I64		hl_setup_topcolor	= 0;
+I64		hl_setup_bottomcolor = 0;
+
+U8		hl_setup_model[HLPM_NAME_MAX];
+
+Bool	hl_setup_himodels	= FALSE;
+
+U8		hl_setup_logo[HLLOGO_NAME_MAX];
+
+I64		hl_ps_row			= 0;
+Bool	hl_setup_editing	= FALSE;
+Bool	hl_setup_ate_enter = FALSE;
+
+I64		hl_lan_row		= 0;
+U8		hl_lan_addr[24];
+Bool	hl_lan_editing	= FALSE;
+I64		hl_lan_len		= 0;
+Bool	hl_lan_ate_enter	= FALSE;
+I64		hl_setup_len		= 0;
+
+Bool	hl_mp_start_dm	= FALSE;
+
+F64		hl_opt_sensitivity	= 0.12;		//degrees of view per mouse count
+I64		hl_opt_volume		= 80;		//0-100, pushed straight to the mixer
+I64		hl_opt_res			= 0;
+Bool	hl_opt_fullscreen	= TRUE;
+F64		hl_opt_gamma			= 1.0;		//1.0 untouched, lower is brighter
+
+Bool	hl_opt_gunclip		= FALSE;
+Bool	hl_res_dirty			= FALSE;
+
+CHLPic	hl_pic_qplaque;
+CHLPic	hl_pic_conback;
+CHLPic	hl_pic_help[HLHELP_PAGES];
+I64		hl_help_page = 0;
+CHLPic	hl_pic_sp_menu;
+CHLPic	hl_pic_cursor[6];
+CHLPic	hl_pic_p_single;
+CHLPic	hl_pic_p_multi;
+CHLPic	hl_pic_p_option;
+
+U8		hl_con_text[HLCON_LINES * HLCON_WIDTH];
+
+F64		hl_con_time[HLCON_LINES];
+
+#define HLCON_NOTIFY_LINES	4
+#define HLCON_NOTIFY_TIME	3.0
+I64		hl_con_line		= 0;
+Bool	hl_con_ready		= FALSE;
+
+#define HLMSND_MOVE		"common/wpn_moveselect.wav"
+#define HLMSND_ENTER		"common/wpn_select.wav"
+#define HLMSND_VALUE		"common/wpn_hudon.wav"
+
+#define HLCFG_PATH	"HL1CFG.TXT"
+
+U0 HLMpInit()
+{
+	I64 i;
+
+	hl_map_count   = 0;
+	hl_map_scanned = FALSE;
+	hl_menu_maps[0] = 0;
+
+	hl_pm_count   = 0;
+	hl_pm_scanned = FALSE;
+	hl_pm_name[0] = 0;
+
+	hl_logo_count   = 0;
+	hl_logo_scanned = FALSE;
+	hl_logo_name[0] = 0;
+	hl_logo_sel     = -1;
+	hl_logo_top     = 0;
+	hl_logo_color   = 0;
+
+	for (i = 0; i < HLLOGOC_COUNT; i++)
+		hl_logo_color_name[i * HLLOGOC_NAME_MAX] = 0;
+
+	HLStrCopy(&hl_logo_color_name[0 * HLLOGOC_NAME_MAX], "FullColor",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[1 * HLLOGOC_NAME_MAX], "Orange",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[2 * HLLOGOC_NAME_MAX], "Yellow",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[3 * HLLOGOC_NAME_MAX], "Blue",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[4 * HLLOGOC_NAME_MAX], "Ltblue",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[5 * HLLOGOC_NAME_MAX], "Green",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[6 * HLLOGOC_NAME_MAX], "Red",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[7 * HLLOGOC_NAME_MAX], "Brown",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[8 * HLLOGOC_NAME_MAX], "Ltgray",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[9 * HLLOGOC_NAME_MAX], "Dkgray",
+		HLLOGOC_NAME_MAX);
+	HLStrCopy(&hl_logo_color_name[10 * HLLOGOC_NAME_MAX], "Steel",
+		HLLOGOC_NAME_MAX);
+
+	hl_cs_row         = 0;
+	hl_cs_map         = 0;
+	hl_cs_password[0] = 0;
+
+	hl_cs_maxplayers = HLSV_MAX_CLIENTS;
+
+	hl_rule_row = 0;
+	HLStrCopy(hl_rule_teamlist, "robo;hgrunt", 32);
+	hl_rule_fraglimit     = 0;
+	hl_rule_timelimit     = 0;
+	hl_rule_falldamage    = 0;
+	hl_rule_teamplay      = FALSE;
+	hl_rule_friendlyfire  = FALSE;
+	hl_rule_weaponstay    = FALSE;
+	hl_rule_forcerespawn  = FALSE;
+	hl_rule_footsteps     = TRUE;
+	hl_rule_flashlight    = FALSE;
+	hl_rule_autocrosshair = FALSE;
+
+	hl_adv_row    = 0;
+	hl_adv_decals = 300;
+
+	hl_br_tab       = HLBR_TAB_LAN;
+	hl_br_row       = HLBR_REFRESH;
+	hl_br_top       = 0;
+	hl_br_sort      = HLBR_SORT_PING;
+	hl_br_sort_desc = FALSE;
+	hl_br_vis       = 8;
+
+	for (i = 0; i < HLNET_SLIST_MAX; i++)
+		hl_br_order[i] = i;
+
+	hl_ps_row            = 0;
+	hl_setup_topcolor    = 0;
+	hl_setup_bottomcolor = 0;
+	hl_setup_himodels    = FALSE;
+
+	HLStrCopy(hl_setup_model, "gordon", HLPM_NAME_MAX);
+	HLStrCopy(hl_setup_logo, "lambda", HLLOGO_NAME_MAX);
+
+	hl_edit_buf    = NULL;
+	hl_edit_max    = 0;
+	hl_edit_len    = 0;
+	hl_edit_digits = FALSE;
+}
+
+U0 HLSetupDefaults()
+{
+	HLBindClearAll;
+	HLInClearAll;
+	hl_in_wpn_direct      = TRUE;
+	hl_in_voice_said      = FALSE;
+	hl_in_spray_said      = FALSE;
+	hl_paused             = FALSE;
+	hl_act_count          = 0;
+	hl_act_from_file      = FALSE;
+	hl_bind_def_from_file = FALSE;
+
+	HLHostNameInit;
+	HLAliasInit;
+
+	HLSlistInit;
+
+	HLMpInit;
+
+	hl_opt_crosshair = 1;
+
+	HLStrCopy(hl_setup_name, "player", 16);
+	hl_setup_top     = 0;
+	hl_setup_bottom  = 0;
+	hl_setup_editing   = FALSE;
+	hl_setup_ate_enter = FALSE;
+	hl_setup_len       = 6;
+
+	HLStrCopy(hl_lan_addr, "10.0.0.1", 24);
+	hl_lan_len       = 8;
+	hl_lan_row       = 0;
+	hl_lan_editing   = FALSE;
+	hl_lan_ate_enter = FALSE;
+	hl_mp_start_dm   = FALSE;
+
+	hl_game_dir[0]   = 0;
+}
+
+U0 HLSetupColorApply()
+{
+	hl_setup_topcolor    = ClampI64(hl_setup_topcolor, 0, 255);
+	hl_setup_bottomcolor = ClampI64(hl_setup_bottomcolor, 0, 255);
+
+	hl_setup_top    = hl_setup_topcolor * 14 / 256;
+	hl_setup_bottom = hl_setup_bottomcolor * 14 / 256;
+
+	hl_setup_top    = ClampI64(hl_setup_top, 0, 13);
+	hl_setup_bottom = ClampI64(hl_setup_bottom, 0, 13);
+}
+
+I64 HLLogoColorIndex(U8 *name)
+{
+	I64 i;
+
+	for (i = 0; i < HLLOGOC_COUNT; i++)
+	{
+		if (!StrICompare(&hl_logo_color_name[i * HLLOGOC_NAME_MAX], name))
+			return i;
+	}
+
+	return 0;
+}
+
+#define HLCFG_MAX	8192
+
+U0 HLCfgSave()
+{
+	U8	 buf[512];
+	U8	 line[96];
+	U8	 keyname[32];
+	U8	*out;
+	I64	 len;
+	I64	 n;
+	I64	 k;
+
+	StrPrint(buf,
+		"sensitivity %d\n"
+		"volume %d\n"
+		"res %d\n"
+		"fullscreen %d\n"
+		"gamma %d\n"
+		"gunclip %d\n"
+		"musicvol %d\n"
+		"hostname %s\n"
+		"crosshair %d\n"
+		"topcolor %d\n"
+		"bottomcolor %d\n"
+		"name %s\n"
+		"model %s\n"
+		"cl_himodels %d\n"
+		"cl_logofile %s\n"
+		"cl_logocolor %s\n"
+		"mp_decals %d\n"
+		"game %s\n",
+		ToI64(hl_opt_sensitivity * 1000.0),
+		hl_opt_volume,
+		hl_opt_res,
+		ToI64(hl_opt_fullscreen),
+		ToI64(hl_opt_gamma * 1000.0),
+		ToI64(hl_opt_gunclip),
+		ToI64(hl_music_volume * 1000.0),
+		hl_host_name,
+		hl_opt_crosshair,
+		hl_setup_topcolor,
+		hl_setup_bottomcolor,
+		hl_setup_name,
+		hl_setup_model,
+		ToI64(hl_setup_himodels),
+		hl_setup_logo,
+		&hl_logo_color_name[hl_logo_color * HLLOGOC_NAME_MAX],
+		hl_adv_decals,
+		hl_game_dir);
+
+	if (!hl_disk_writes)
+		return;
+
+	out = MAlloc(HLCFG_MAX);
+	len = StrLen(buf);
+	MemCopy(out, buf, len);
+
+	StrPrint(line, "unbindall\n");
+	n = StrLen(line);
+	MemCopy(out + len, line, n);
+	len += n;
+
+	for (k = 1; k < HLKEY_MAX; k++)
+	{
+		if (!hl_key_bind[k * HLKEY_CMD_MAX])
+			goto qcs_next;
+
+		HLKeyName(keyname, k);
+		if (!keyname[0])
+			goto qcs_next;
+
+		StrPrint(line, "bind \"%s\" \"%s\"\n", keyname,
+			hl_key_bind + k * HLKEY_CMD_MAX);
+
+		n = StrLen(line);
+		if (len + n >= HLCFG_MAX)
+			goto qcs_next;
+
+		MemCopy(out + len, line, n);
+		len += n;
+
+qcs_next:
+	}
+
+	FileWrite(HLCFG_PATH, out, len);
+	Free(out);
+}
+
+I64 HLCfgValue(U8 *line)
+{//the integer after the first space, or 0
+	I64 i = 0;
+
+	while (line[i] && line[i] != ' ')
+		i++;
+	while (line[i] == ' ')
+		i++;
+
+	return Str2I64(line + i);
+}
+
+U0 HLCfgLoad()
+{
+	U8	*raw;
+	U8	 line[128];
+	I64	 size = 0;
+	I64	 i    = 0;
+	I64	 n;
+	I64	 v;
+
+	raw = FileRead(HLCFG_PATH, &size);
+	if (!raw)
+		return;
+
+	while (i < size)
+	{
+		n = 0;
+		while (i < size && raw[i] != '\n' && raw[i] != '\r' && n < 127)
+		{
+			line[n] = raw[i];
+			n++;
+			i++;
+		}
+		line[n] = 0;
+
+		while (i < size && (raw[i] == '\n' || raw[i] == '\r'))
+			i++;
+
+		if (!n)
+			goto qcl_next;
+
+		v = HLCfgValue(line);
+
+		if (!StrNICompare(line, "sensitivity ", 12))
+			hl_opt_sensitivity = ToF64(v) / 1000.0;
+		else if (!StrNICompare(line, "volume ", 7))
+			hl_opt_volume = ClampI64(v, 0, 100);
+		else if (!StrNICompare(line, "res ", 4))
+			hl_opt_res = ClampI64(v, 0, HLRES_COUNT - 1);
+		else if (!StrNICompare(line, "gunclip ", 8))
+			hl_opt_gunclip = ToBool(v != 0);
+		else if (!StrNICompare(line, "musicvol ", 9))
+			hl_music_volume = ToF64(v) / 1000.0;
+		else if (!StrNICompare(line, "hostname ", 9))
+			HLStrCopy(hl_host_name, line + 9, 32);
+		else if (!StrNICompare(line, "crosshair ", 10))
+			hl_opt_crosshair = v;
+		else if (!StrNICompare(line, "topcolor ", 9))
+			hl_setup_topcolor = ClampI64(v, 0, 255);
+		else if (!StrNICompare(line, "bottomcolor ", 12))
+			hl_setup_bottomcolor = ClampI64(v, 0, 255);
+		else if (!StrNICompare(line, "name ", 5))
+			HLStrCopy(hl_setup_name, line + 5, 16);
+		else if (!StrNICompare(line, "model ", 6))
+			HLStrCopy(hl_setup_model, line + 6, HLPM_NAME_MAX);
+		else if (!StrNICompare(line, "cl_himodels ", 12))
+			hl_setup_himodels = ToBool(v != 0);
+		else if (!StrNICompare(line, "cl_logofile ", 12))
+			HLStrCopy(hl_setup_logo, line + 12, HLLOGO_NAME_MAX);
+		else if (!StrNICompare(line, "cl_logocolor ", 13))
+			hl_logo_color = HLLogoColorIndex(line + 13);
+		else if (!StrNICompare(line, "mp_decals ", 10))
+			hl_adv_decals = ClampI64(v, 0, 4096);
+		else if (!StrNICompare(line, "game ", 5))
+			HLStrCopy(hl_game_dir, line + 5, 32);
+		else if (!StrNICompare(line, "fullscreen ", 11))
+			hl_opt_fullscreen = ToBool(v);
+		else if (!StrNICompare(line, "gamma ", 6))
+			hl_opt_gamma = ToF64(v) / 1000.0;
+
+qcl_next:
+	}
+
+	Free(raw);
+
+	if (hl_opt_sensitivity < 0.02)	hl_opt_sensitivity = 0.02;
+	if (hl_opt_sensitivity > 0.60)	hl_opt_sensitivity = 0.60;
+
+	HLSetupColorApply;
+
+	hl_snd_master = ToF64(hl_opt_volume) / 100.0;
+	HLPalSetGamma(hl_opt_gamma);
+}
+
+I64 HLBindArg(U8 *out, U8 *src, I64 i, I64 max)
+{
+	I64 n = 0;
+
+	out[0] = 0;
+
+	while (src[i] == ' ' || src[i] == '\t')
+		i++;
+
+	if (src[i] == '"')
+	{
+		i++;
+		while (src[i] && src[i] != '"')
+		{
+			if (n < max - 1)
+			{
+				out[n] = src[i];
+				n++;
+			}
+			i++;
+		}
+		out[n] = 0;
+
+		if (src[i])
+			i++;
+
+		return i;
+	}
+
+	while (src[i] && src[i] != ' ' && src[i] != '\t')
+	{
+		if (n < max - 1)
+		{
+			out[n] = src[i];
+			n++;
+		}
+		i++;
+	}
+
+	out[n] = 0;
+	return i;
+}
+
+Bool HLBindScriptLine(U8 *line)
+{
+	U8	keyname[32];
+	U8	cmd[HLKEY_CMD_MAX];
+	I64	i;
+	I64	k;
+
+	if (!StrNICompare(line, "unbindall", 9))
+	{
+		HLBindClearAll;
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "unbind ", 7))
+	{
+		HLBindArg(keyname, line, 7, 32);
+		HLBindClear(HLKeyFromName(keyname));
+		return TRUE;
+	}
+
+	if (StrNICompare(line, "bind ", 5) && StrNICompare(line, "bind\t", 5))
+		return FALSE;
+
+	i = HLBindArg(keyname, line, 5, 32);
+	HLBindArg(cmd, line, i, HLKEY_CMD_MAX);
+
+	k = HLKeyFromName(keyname);
+	if (k <= 0)
+		return TRUE;
+
+	if (!cmd[0])
+		HLBindClear(k);
+	else
+		HLBindSet(k, cmd);
+
+	return TRUE;
+}
+
+U0 HLBindExecScript(U8 *name)
+{
+	U8	*raw;
+	U8	 line[160];
+	I64	 size = 0;
+	I64	 i = 0;
+	I64	 n;
+	I64	 c;
+
+	raw = HLFileLoad(name, &size);
+	if (!raw)
+		return;
+
+	while (i < size)
+	{
+		n = 0;
+		while (i < size && raw[i] != '\n' && raw[i] != '\r' && n < 159)
+		{
+			line[n] = raw[i];
+			n++;
+			i++;
+		}
+		line[n] = 0;
+
+		while (i < size && raw[i] != '\n' && raw[i] != '\r')
+			i++;
+		while (i < size && (raw[i] == '\n' || raw[i] == '\r'))
+			i++;
+
+		for (c = 0; c < n - 1; c++)
+		{
+			if (line[c] == '/' && line[c + 1] == '/')
+			{
+				line[c] = 0;
+				break;
+			}
+		}
+
+		c = 0;
+		while (line[c] == ' ' || line[c] == '\t')
+			c++;
+
+		if (line[c])
+			HLBindScriptLine(line + c);
+	}
+
+	Free(raw);
+}
+
+U0 HLBindUserLoad()
+{
+	U8	*raw;
+	U8	 line[160];
+	I64	 size = 0;
+	I64	 i = 0;
+	I64	 n;
+
+	raw = FileRead(HLCFG_PATH, &size);
+	if (!raw)
+		return;
+
+	while (i < size)
+	{
+		n = 0;
+		while (i < size && raw[i] != '\n' && raw[i] != '\r' && n < 159)
+		{
+			line[n] = raw[i];
+			n++;
+			i++;
+		}
+		line[n] = 0;
+
+		while (i < size && (raw[i] == '\n' || raw[i] == '\r'))
+			i++;
+
+		if (n)
+			HLBindScriptLine(line);
+	}
+
+	Free(raw);
+}
+
+U0 HLBindStartup()
+{
+	HLInClearAll;
+	hl_in_wpn_direct = TRUE;
+	hl_in_voice_said = FALSE;
+	hl_in_spray_said = FALSE;
+
+	HLActLoad;
+	HLBindDefaults;
+	HLBindExecScript("config.cfg");
+	HLBindUserLoad;
+}
+
+//the menu is authored for 320x200.
+#define HLMENU_VW	320
+
+//M_DrawSlider's conchars pieces
+#define HLSLIDER_CELLS	10
+
+I64	 hl_bg_w		= 800;
+I64	 hl_bg_h		= 600;
+
+I64	 hl_bg_dst_w	= 0;
+I64	 hl_bg_dst_h	= 0;
+I64	 hl_bg_off_x	= 0;
+I64	 hl_bg_off_y	= 0;
+
+hl_bg_w     = 800;
+hl_bg_h     = 600;
+hl_bg_dst_w = 0;
+hl_bg_dst_h = 0;
+hl_bg_off_x = 0;
+hl_bg_off_y = 0;
+#define HLBG_PITCH	256
+
+U32	*hl_menu_bg		= NULL;
+I64	 hl_menu_bg_w	= 0;
+I64	 hl_menu_bg_h	= 0;
+Bool hl_menu_bg_art	= FALSE;
+
+hl_menu_bg     = NULL;
+hl_menu_bg_w   = 0;
+hl_menu_bg_h   = 0;
+hl_menu_bg_art = FALSE;
+
+U0 HLMenuBgCoverFit()
+{
+	if (hl_bg_w < 1 || hl_bg_h < 1 || hl_menu_bg_w < 1 || hl_menu_bg_h < 1)
+		return;
+
+	if (hl_menu_bg_w * hl_bg_h >= hl_menu_bg_h * hl_bg_w)
+	{
+		hl_bg_dst_w = hl_menu_bg_w;
+		hl_bg_dst_h = hl_menu_bg_w * hl_bg_h / hl_bg_w;
+	}
+	else
+	{
+		hl_bg_dst_h = hl_menu_bg_h;
+		hl_bg_dst_w = hl_menu_bg_h * hl_bg_w / hl_bg_h;
+	}
+
+	hl_bg_off_x = (hl_menu_bg_w - hl_bg_dst_w) / 2;
+	hl_bg_off_y = (hl_menu_bg_h - hl_bg_dst_h) / 2;
+}
+
+Bool HLMenuBgTile(U8 *name, I64 ox, I64 oy)
+{
+	U8	 path[160];
+	CDC	*img;
+	U32	*src;
+	U32	*dst;
+	U32	 pix;
+	Bool lit = FALSE;
+	I64	 tw;
+	I64	 th;
+	I64	 dx0;
+	I64	 dx1;
+	I64	 dy0;
+	I64	 dy1;
+	I64	 dx;
+	I64	 dy;
+	I64	 sx;
+	I64	 sy;
+
+	if (!HLFileResolve(name, path))
+		return FALSE;
+
+	img = TGARead(path);
+
+	if (!img)
+		return FALSE;
+
+	tw = img->width;
+	th = img->height;
+
+	if (tw < 1 || th < 1)
+		goto qbt_done;
+
+	//Destination rect for this tile's slot in the 800x600 composite.
+	dx0 = hl_bg_off_x + ox * hl_bg_dst_w / hl_bg_w;
+	dx1 = hl_bg_off_x + (ox + tw) * hl_bg_dst_w / hl_bg_w;
+	dy0 = hl_bg_off_y + oy * hl_bg_dst_h / hl_bg_h;
+	dy1 = hl_bg_off_y + (oy + th) * hl_bg_dst_h / hl_bg_h;
+
+	if (dx0 < 0)	dx0 = 0;
+	if (dy0 < 0)	dy0 = 0;
+
+	if (dx1 > hl_menu_bg_w)	dx1 = hl_menu_bg_w;
+	if (dy1 > hl_menu_bg_h)	dy1 = hl_menu_bg_h;
+
+	for (dy = dy0; dy < dy1; dy++)
+	{
+		if (dy < 0 || dy >= hl_menu_bg_h)
+			goto qbt_next_row;
+
+		sy = (dy - hl_bg_off_y) * hl_bg_h / hl_bg_dst_h - oy;
+
+		if (sy < 0)		sy = 0;
+		if (sy >= th)	sy = th - 1;
+
+		//TGARead has already resolved the vertical origin, so row 0 is the top.
+		src = img->body + sy * img->width_internal;
+		dst = hl_menu_bg + dy * hl_menu_bg_w;
+
+		for (dx = dx0; dx < dx1; dx++)
+		{
+			if (dx < 0 || dx >= hl_menu_bg_w)
+				goto qbt_next_col;
+
+			sx = (dx - hl_bg_off_x) * hl_bg_w / hl_bg_dst_w - ox;
+
+			if (sx < 0)		sx = 0;
+			if (sx >= tw)	sx = tw - 1;
+
+			pix     = src[sx] & 0x00FFFFFF;
+			dst[dx] = pix;
+
+			if (pix)
+				lit = TRUE;
+
+qbt_next_col:
+		}
+
+qbt_next_row:
+	}
+
+qbt_done:
+	DCDel(img);
+
+	return lit;
+}
+
+U0 HLMenuBgLambda()
+{
+	U8	 path[160];
+	U8	*d;
+	U32	*dst;
+	I64	 size = 0;
+	I64	 ofs;
+	I64	 bw;
+	I64	 bh;
+	I64	 stride;
+	I64	 span;
+	I64	 ox;
+	I64	 oy;
+	I64	 dx;
+	I64	 dy;
+	I64	 sx;
+	I64	 sy;
+	I64	 pal;
+	U8	 texel;
+	I64	 r;
+	I64	 g;
+	I64	 b;
+
+	if (!HLFileResolve("gfx/lambda.bmp", path))
+		return;
+
+	d = FileRead(path, &size);
+
+	if (!d)
+		return;
+
+	if (size < 54 || d[0] != 'B' || d[1] != 'M')
+		goto qbl_done;
+
+	ofs = HLRdI32(d + 10);
+	bw  = HLRdI32(d + 18);
+	bh  = HLRdI32(d + 22);
+
+	//8bpp uncompressed only; that is what the shipped file is.
+	if (d[28] != 8 || d[29] || HLRdI32(d + 30) || bw < 1 || bh < 1)
+		goto qbl_done;
+
+	stride = (bw + 3) & -4;
+	pal    = 54;
+
+	if (ofs + stride * bh > size || pal + 1024 > size)
+		goto qbl_done;
+
+	span = hl_menu_bg_h / 2;
+
+	if (span < 8)
+		goto qbl_done;
+
+	ox = hl_menu_bg_w - span - hl_menu_bg_w / 10;
+	oy = (hl_menu_bg_h - span) / 3;
+
+	for (dy = 0; dy < span; dy++)
+	{
+		if (oy + dy < 0 || oy + dy >= hl_menu_bg_h)
+			goto qbl_next_row;
+
+		sy = dy * bh / span;
+
+		if (sy < 0)		sy = 0;
+		if (sy >= bh)	sy = bh - 1;
+
+		dst = hl_menu_bg + (oy + dy) * hl_menu_bg_w;
+
+		for (dx = 0; dx < span; dx++)
+		{
+			if (ox + dx < 0 || ox + dx >= hl_menu_bg_w)
+				goto qbl_next_col;
+
+			sx = dx * bw / span;
+
+			if (sx < 0)		sx = 0;
+			if (sx >= bw)	sx = bw - 1;
+
+			//Bottom-up: row 0 on disk is the bottom scanline.
+			texel = d[ofs + (bh - 1 - sy) * stride + sx];
+
+			b = d[pal + texel * 4];
+			g = d[pal + texel * 4 + 1];
+			r = d[pal + texel * 4 + 2];
+
+			dst[ox + dx] = ((r >> 2) << 16) | ((g >> 2) << 8) | (b >> 2);
+
+qbl_next_col:
+		}
+
+qbl_next_row:
+	}
+
+qbl_done:
+	Free(d);
+}
+
+Bool hl_menu_bg_warned = FALSE;
+
+hl_menu_bg_warned = FALSE;
+
+U0 HLMenuBgLayout(U8 *layout, Bool *_any)
+{
+	U8	*d;
+	U8	 line[192];
+	U8	 name[128];
+	I64	 size = 0;
+	I64	 pos  = 0;
+	I64	 len;
+	I64	 i;
+	I64	 k;
+	I64	 x;
+	I64	 y;
+
+	*_any = FALSE;
+
+	d = HLFileLoad(layout, &size);
+
+	if (!d)
+		return;
+
+	while (pos < size)
+	{
+		len = 0;
+
+		while (pos < size && d[pos] != '\n' && len < 190)
+		{
+			if (d[pos] != '\r')
+			{
+				line[len] = d[pos];
+				len++;
+			}
+
+			pos++;
+		}
+
+		line[len] = 0;
+
+		while (pos < size && d[pos] != '\n')
+			pos++;
+		if (pos < size)
+			pos++;
+
+		i = 0;
+		while (line[i] == ' ' || line[i] == '\t')
+			i++;
+
+		if (!line[i])
+			goto qbl_next_line;
+
+		if (!StrNICompare(&line[i], "resolution", 10))
+		{
+			i += 10;
+
+			while (line[i] == ' ' || line[i] == '\t')
+				i++;
+
+			x = Str2I64(&line[i]);
+
+			while (line[i] && line[i] != ' ' && line[i] != '\t')
+				i++;
+			while (line[i] == ' ' || line[i] == '\t')
+				i++;
+
+			y = Str2I64(&line[i]);
+
+			if (x > 0 && y > 0)
+			{
+				hl_bg_w = x;
+				hl_bg_h = y;
+
+				HLMenuBgCoverFit;
+			}
+
+			goto qbl_next_line;
+		}
+
+		k = 0;
+		while (line[i] && line[i] != ' ' && line[i] != '\t' && k < 127)
+		{
+			name[k] = line[i];
+			k++;
+			i++;
+		}
+
+		name[k] = 0;
+
+		if (!k)
+			goto qbl_next_line;
+
+		while (line[i] == ' ' || line[i] == '\t')
+			i++;
+		while (line[i] && line[i] != ' ' && line[i] != '\t')
+			i++;
+		while (line[i] == ' ' || line[i] == '\t')
+			i++;
+
+		x = Str2I64(&line[i]);
+
+		while (line[i] && line[i] != ' ' && line[i] != '\t')
+			i++;
+		while (line[i] == ' ' || line[i] == '\t')
+			i++;
+
+		y = Str2I64(&line[i]);
+
+		if (HLMenuBgTile(name, x, y))
+		{
+			*_any = TRUE;
+		}
+
+qbl_next_line:
+	}
+
+	Free(d);
+}
+
+#define HLBG_GAIN_MAX	4
+
+U0 HLMenuBgNormalize()
+{
+	U8	 tab[256];
+	U32	*p;
+	U32	 pix;
+	I64	 n;
+	I64	 i;
+	I64	 peak = 0;
+	I64	 c;
+	I64	 r;
+	I64	 g;
+	I64	 b;
+
+	if (!hl_menu_bg || hl_menu_bg_w < 1 || hl_menu_bg_h < 1)
+		return;
+
+	n = hl_menu_bg_w * hl_menu_bg_h;
+	p = hl_menu_bg;
+
+	for (i = 0; i < n; i++)
+	{
+		pix = p[i];
+
+		c = (pix >> 16) & 0xFF;
+		if (c > peak)	peak = c;
+
+		c = (pix >> 8) & 0xFF;
+		if (c > peak)	peak = c;
+
+		c = pix & 0xFF;
+		if (c > peak)	peak = c;
+	}
+
+	if (peak < 1 || peak >= 255 || peak * HLBG_GAIN_MAX < 255)
+		return;
+
+	for (i = 0; i < 256; i++)
+	{
+		c = i * 255 / peak;
+
+		if (c > 255)
+			c = 255;
+
+		tab[i] = c;
+	}
+
+	for (i = 0; i < n; i++)
+	{
+		pix = p[i];
+
+		r = tab[(pix >> 16) & 0xFF];
+		g = tab[(pix >> 8) & 0xFF];
+		b = tab[pix & 0xFF];
+
+		p[i] = (r << 16) | (g << 8) | b;
+	}
+}
+
+U0 HLMenuBgBuild(I64 w, I64 h)
+{
+	Bool any = FALSE;
+
+	if (hl_menu_bg)
+		Free(hl_menu_bg);
+
+	hl_menu_bg     = NULL;
+	hl_menu_bg_w   = 0;
+	hl_menu_bg_h   = 0;
+	hl_menu_bg_art = FALSE;
+
+	if (w < 1 || h < 1)
+		return;
+
+	hl_menu_bg   = MAlloc(w * h * sizeof(U32));
+	hl_menu_bg_w = w;
+	hl_menu_bg_h = h;
+
+	MemSet(hl_menu_bg, 0, w * h * sizeof(U32));
+
+	hl_bg_w = 800;
+	hl_bg_h = 600;
+
+	HLMenuBgCoverFit;
+	HLMenuBgLayout("resource/HD_BackgroundLayout.txt", &any);
+
+	if (!any)
+	{
+		MemSet(hl_menu_bg, 0, w * h * sizeof(U32));
+
+		hl_bg_w = 800;
+		hl_bg_h = 600;
+		HLMenuBgCoverFit;
+		HLMenuBgLayout("resource/BackgroundLayout.txt", &any);
+	}
+
+	if (!hl_menu_bg_warned)
+	{
+		hl_menu_bg_warned = TRUE;
+
+		if (any)
+			"HLMenu: backdrop composited from a %d x %d layout\n",
+				hl_bg_w, hl_bg_h;
+		else
+			"HLMenu: no background art in resource/ - menu draws the lambda\n";
+	}
+
+	if (any)
+	{
+		HLMenuBgNormalize;
+		hl_menu_bg_art = TRUE;
+		return;
+	}
+
+	MemSet(hl_menu_bg, 0, w * h * sizeof(U32));
+
+	HLMenuBgLambda;
+}
+
+U0 HLMenuBgDraw(CHLCanvas *c)
+{
+	I64 y;
+
+	if (hl_menu_bg_w != c->width || hl_menu_bg_h != c->height)
+		HLMenuBgBuild(c->width, c->height);
+
+	if (hl_menu_bg && hl_menu_bg_w == c->width && hl_menu_bg_h == c->height)
+	{
+		for (y = 0; y < c->height; y++)
+			MemCopy(c->pixels + y * c->width,
+				hl_menu_bg + y * hl_menu_bg_w,
+				c->width * sizeof(U32));
+
+		return;
+	}
+
+	MemSet(c->pixels, 0, c->width * c->height * sizeof(U32));
+
+	if (hl_pic_conback.pixels)
+		HLPicDrawFill(c, &hl_pic_conback);
+}
+
+CHLSpr	*hl_menu_logo		= NULL;
+I64		 hl_menu_logo_res	= 0;
+Bool	 hl_menu_logo_tried	= FALSE;
+
+hl_menu_logo		= NULL;
+hl_menu_logo_res	= 0;
+hl_menu_logo_tried	= FALSE;
+
+U0 HLMenuLogoLoad(I64 canvas_width)
+{
+	U8	path[64];
+	I64	res = 320;
+
+	if (canvas_width >= 640)
+		res = 640;
+
+	if (hl_menu_logo_tried && hl_menu_logo_res == res)
+		return;
+
+	if (hl_menu_logo)
+		HLSprFree(hl_menu_logo);
+
+	hl_menu_logo		= NULL;
+	hl_menu_logo_res	= res;
+	hl_menu_logo_tried	= TRUE;
+
+	StrPrint(path, "sprites/%d_logo.spr", res);
+
+	hl_menu_logo = HLSprLoad(path);
+
+	if (!hl_menu_logo && res >= 640)
+		hl_menu_logo = HLSprLoad("sprites/logo.spr");
+
+	if (!hl_menu_logo && res < 640)
+		hl_menu_logo = HLSprLoad("sprites/small_logo.spr");
+}
+
+//Width of the wordmark as a fraction of the canvas
+#define HLMENU_LOGO_W	0.3875
+
+//Frames 0..12 of *_logo.spr are the HALF-LIFE ident;
+#define HLMENU_LOGO_HL_FRAMES	13
+
+#define HLMENU_LOGO_Y	0.16
+
+U0 HLMenuLogoDraw(CHLCanvas *c)
+{
+	CHLSprFrame	*fr;
+	I64			 frame;
+	I64			 span;
+	I64			 dw;
+	I64			 dh;
+
+	if (!hl_menu_logo || hl_menu_logo->num_frames < 1)
+		return;
+
+	if (hl_menu_logo->interval <= 0.0)
+		return;
+
+	span = HLMENU_LOGO_HL_FRAMES;
+
+	if (span > hl_menu_logo->num_frames)
+		span = hl_menu_logo->num_frames;
+
+	frame = ToI64(tS / hl_menu_logo->interval) % span;
+	fr    = &hl_menu_logo->frames[frame];
+
+	if (fr->width < 1 || fr->height < 1)
+		return;
+
+	dw = ToI64(c->width * HLMENU_LOGO_W);
+	dh = dw * fr->height / fr->width;
+
+	HLSprDrawRect(c, hl_menu_logo, frame,
+		ToI64(c->width * HLMENU_COL_X), ToI64(c->height * HLMENU_LOGO_Y),
+		0, 0, fr->width, fr->height, 255, 255, 255, dw, dh);
+}
+
+#define HLMENU_C_ITEM	0x00C4B550
+#define HLMENU_C_SEL		0x00FFFFFF
+#define HLMENU_C_HINT	0x00A0AA95
+
+I64 HLMenuTexelLum(U8 *pal, U8 texel)
+{//Brightest channel of a palette entry, 0..255.
+	U32 rgb;
+	I64 r;
+	I64 g;
+	I64 b;
+
+	if (pal)
+	{
+		r = pal[texel * 3];
+		g = pal[texel * 3 + 1];
+		b = pal[texel * 3 + 2];
+	}
+	else
+	{
+		rgb = HLPalColor(texel);
+		r   = (rgb >> 16) & 255;
+		g   = (rgb >> 8) & 255;
+		b   = rgb & 255;
+	}
+
+	if (g > r)	r = g;
+	if (b > r)	r = b;
+
+	return r;
+}
+
+U0 HLMenuCharColor(CHLCanvas *c, I64 x, I64 y, I64 ch, I64 rgb)
+{
+	U8	*base;
+	U8	*pal;
+	U8	*src;
+	U32	*dst;
+	I64	 ofs;
+	I64	 gx;
+	I64	 gy;
+	I64	 gw;
+	I64	 gh;
+	I64	 sx;
+	I64	 sy;
+	I64	 px;
+	I64	 py;
+	I64	 stride;
+	I64	 lim;
+	I64	 cut;
+	I64	 lum;
+	I64	 cr;
+	I64	 cg;
+	I64	 cb;
+	U8	 texel;
+
+	ch &= 255;
+
+	if (ch == 32)
+		return;
+
+	cr = (rgb >> 16) & 255;
+	cg = (rgb >> 8) & 255;
+	cb = rgb & 255;
+
+	if (hl_font.ready)
+	{
+		if (!hl_font.pixels)
+			return;
+
+		ofs    = hl_font.start[ch];
+		gw     = hl_font.cwidth[ch];
+		gh     = hl_font.row_height;
+		stride = HLFONT_WIDTH;
+		gx     = ofs % HLFONT_WIDTH;
+		gy     = ofs / HLFONT_WIDTH;
+		lim    = hl_font.height;
+		pal    = hl_font.palette;
+		cut    = HLSPR_TRANSPARENT;
+		base   = hl_font.pixels;
+	}
+	else
+	{
+		if (!hl_conchars)
+			return;
+
+		gw     = HLCHAR_W;
+		gh     = HLCHAR_H;
+		stride = 128;
+		gx     = (ch & 15) * HLCHAR_W;
+		gy     = (ch >> 4) * HLCHAR_H;
+		lim    = 128;
+		pal    = NULL;
+		cut    = 0;
+		base   = hl_conchars;
+	}
+
+	if (gw < 1)
+		return;
+
+	for (sy = 0; sy < gh; sy++)
+	{
+		py = y + sy;
+
+		if (py < 0 || py >= c->height)
+			goto qmc_next_row;
+		if (gy + sy >= lim)
+			goto qmc_next_row;
+
+		src = base + (gy + sy) * stride + gx;
+		dst = c->pixels + py * c->width;
+
+		for (sx = 0; sx < gw; sx++)
+		{
+			px = x + sx;
+
+			if (px < 0 || px >= c->width)
+				goto qmc_next_col;
+			if (gx + sx >= stride)
+				goto qmc_next_col;
+
+			texel = src[sx];
+
+			if (texel == cut)
+				goto qmc_next_col;
+
+			lum = HLMenuTexelLum(pal, texel);
+
+			dst[px] = ((cr * lum / 255) << 16) |
+					  ((cg * lum / 255) << 8) |
+					   (cb * lum / 255);
+
+qmc_next_col:
+		}
+
+qmc_next_row:
+	}
+}
+
+U0 HLMenuStrColor(CHLCanvas *c, I64 x, I64 y, U8 *s, I64 rgb)
+{
+	I64 i  = 0;
+	I64 cx = x;
+
+	while (s[i])
+	{
+		HLMenuCharColor(c, cx, y, s[i], rgb);
+		cx += HLFontCharWidth(s[i]);
+		i++;
+	}
+}
+
+
+I64 HLDlgX(CHLCanvas *c, I64 x)
+{
+	return x * c->width / HLDLG_W;
+}
+
+I64 HLDlgY(CHLCanvas *c, I64 y)
+{
+	return y * c->height / HLDLG_H;
+}
+
+I64 HLMenuLineH()
+{
+	if (hl_font.ready)
+		return hl_font.row_height + 2;
+
+	return HLCHAR_H + 2;
+}
+
+U0 HLMenuPanel(CHLCanvas *c, I64 x, I64 y, I64 w, I64 h, U8 *title)
+{
+	U32	*dst;
+	I64	 px;
+	I64	 py;
+	I64	 r;
+	I64	 g;
+	I64	 b;
+	U32	 s;
+
+	if (w < 2 || h < 2)
+		return;
+
+	for (py = y; py < y + h; py++)
+	{
+		if (py < 0 || py >= c->height)
+			goto qmp_next_row;
+
+		dst = c->pixels + py * c->width;
+
+		for (px = x; px < x + w; px++)
+		{
+			if (px < 0 || px >= c->width)
+				goto qmp_next_col;
+
+			s = dst[px];
+			r = (s >> 16) & 255;
+			g = (s >> 8) & 255;
+			b = s & 255;
+
+			//131 = 255 - 124.
+			r = (r * 131 + 90 * 124) / 255;
+			g = (g * 131 + 106 * 124) / 255;
+			b = (b * 131 + 80 * 124) / 255;
+
+			dst[px] = (r << 16) | (g << 8) | b;
+
+qmp_next_col:
+		}
+
+qmp_next_row:
+	}
+
+	for (px = x; px < x + w; px++)
+	{
+		if (px < 0 || px >= c->width)
+			goto qmp_next_edge_x;
+
+		if (y >= 0 && y < c->height)
+			c->pixels[y * c->width + px] = HLMENU_C_HINT;
+		if (y + h - 1 >= 0 && y + h - 1 < c->height)
+			c->pixels[(y + h - 1) * c->width + px] = HLMENU_C_HINT;
+
+qmp_next_edge_x:
+	}
+
+	for (py = y; py < y + h; py++)
+	{
+		if (py < 0 || py >= c->height)
+			goto qmp_next_edge_y;
+
+		if (x >= 0 && x < c->width)
+			c->pixels[py * c->width + x] = HLMENU_C_HINT;
+		if (x + w - 1 >= 0 && x + w - 1 < c->width)
+			c->pixels[py * c->width + x + w - 1] = HLMENU_C_HINT;
+
+qmp_next_edge_y:
+	}
+
+	if (title)
+		HLMenuStrColor(c, x + 8, y + 4, title, HLMENU_C_SEL);
+}
+
+U0 HLMenuBackdrop(CHLCanvas *c)
+{
+	if (hl_menu_ingame)
+	{
+		HLDrawFadeScreen(c);
+		return;
+	}
+
+	MemSet(c->pixels, 0, c->width * c->height * sizeof(U32));
+
+	if (hl_pic_conback.pixels)
+		HLPicDrawFill(c, &hl_pic_conback);
+}
+
+U0 HLMenuSlider(CHLCanvas *c, I64 x, I64 y, F64 range)
+{
+	I64 i;
+
+	if (range < 0.0)	range = 0.0;
+	if (range > 1.0)	range = 1.0;
+
+	HLCharDraw(c, x - HLCHAR_W, y, 128);
+
+	for (i = 0; i < HLSLIDER_CELLS; i++)
+		HLCharDraw(c, x + i * HLCHAR_W, y, 129);
+
+	HLCharDraw(c, x + HLSLIDER_CELLS * HLCHAR_W, y, 130);
+
+	HLCharDraw(c, x + ToI64((HLSLIDER_CELLS - 1) * HLCHAR_W * range), y, 131);
+}
+
+I64 HLMenuXOfs(CHLCanvas *c)
+{
+	I64 ofs = (c->width - HLMENU_VW) / 2;
+
+	if (ofs < 0)
+		ofs = 0;
+
+	return ofs;
+}
+
+U0 HLMenuSound(U8 *name)
+{
+	HLSndPlayAt(name, hl_snd_listener, 1.0, 0.0, 0, HLCHAN_ITEM);
+}
+
+U0 HLMenuInit()
+{
+	hl_sp_row         = 0;
+	hl_menu_save_req  = FALSE;
+	hl_menu_load_req  = FALSE;
+	hl_menu_leave_req = FALSE;
+	hl_skill_row      = HLSKILL_MEDIUM;
+	hl_slot_row       = 0;
+	hl_menu_slot      = 0;
+	hl_opt_tab        = HLTAB_MULTI;
+	hl_opt_row        = 0;
+	hl_flash_on       = FALSE;
+	hl_flash_battery  = 100;
+	hl_flash_next     = 0.0;
+	hl_con_wpn_seen   = -1;
+	hl_con_wpn_prev   = -1;
+	hl_con_fov_last   = 90.0;
+
+	U8	name[24];
+	I64	i;
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		hl_slot_used[i]                  = FALSE;
+		hl_slot_map[i * HLSAVE_NAME_MAX] = 0;
+	}
+
+	HLPicLoad("gfx/qplaque.lmp", &hl_pic_qplaque);
+	HLPicLoad("gfx/conback.lmp", &hl_pic_conback);
+
+	for (i = 0; i < HLHELP_PAGES; i++)
+	{
+		StrPrint(name, "gfx/help%d.lmp", i);
+		HLPicLoad(name, &hl_pic_help[i]);
+	}
+	HLPicLoad("gfx/sp_menu.lmp", &hl_pic_sp_menu);
+	HLPicLoad("gfx/ttl_sgl.lmp", &hl_pic_p_single);
+	HLPicLoad("gfx/p_multi.lmp", &hl_pic_p_multi);
+	HLPicLoad("gfx/p_option.lmp", &hl_pic_p_option);
+
+	for (i = 0; i < 6; i++)
+	{
+		StrPrint(name, "gfx/menudot%d.lmp", i + 1);
+		HLPicLoad(name, &hl_pic_cursor[i]);
+	}
+
+	for (i = 0; i < HLCON_LINES; i++)
+		hl_con_time[i] = -1000.0;
+
+	for (i = 0; i < HLCON_LINES * HLCON_WIDTH; i++)
+		hl_con_text[i] = 0;
+
+	hl_con_line     = 0;
+	hl_con_ready    = TRUE;
+	hl_state        = HLST_MENU;
+	hl_menu_row     = 0;
+	hl_menu_ingame  = FALSE;
+	hl_quit_request = FALSE;
+}
+
+U0 HLConPrint(U8 *s)
+{
+	I64	 i = 0;
+	I64	 n;
+	U8	*row;
+
+	if (!hl_con_ready)
+		return;
+
+	while (TRUE)
+	{
+		row = hl_con_text + (hl_con_line % HLCON_LINES) * HLCON_WIDTH;
+		n   = 0;
+
+		while (s[i] && n < HLCON_WIDTH - 1)
+		{
+			row[n] = s[i];
+			n++;
+			i++;
+		}
+
+		row[n] = 0;
+		hl_con_time[hl_con_line % HLCON_LINES] = tS;
+		hl_con_line++;
+
+		if (!s[i])
+			return;
+	}
+}
+
+
+#define HLCON_INPUT_MAX	62
+
+U8	 hl_con_input[HLCON_INPUT_MAX + 2];
+I64	 hl_con_input_len	= 0;
+
+#define HLCON_HISTORY	32
+
+U8	 hl_con_hist[HLCON_HISTORY * (HLCON_INPUT_MAX + 2)];
+I64	 hl_con_edit_line	= 0;
+I64	 hl_con_hist_line	= 0;
+
+U0 HLConHistoryInit()
+{
+	I64 i;
+
+	for (i = 0; i < HLCON_HISTORY; i++)
+		hl_con_hist[i * (HLCON_INPUT_MAX + 2)] = 0;
+
+	hl_con_edit_line = 0;
+	hl_con_hist_line = 0;
+}
+
+U0 HLConHistoryRecall(I64 line)
+{
+	U8 *src;
+
+	if (line < 0 || line >= HLCON_HISTORY)
+		return;
+
+	src = &hl_con_hist[line * (HLCON_INPUT_MAX + 2)];
+	HLStrCopy(hl_con_input, src, HLCON_INPUT_MAX + 1);
+	hl_con_input_len = StrLen(hl_con_input);
+}
+U8	 hl_key_prev[256];
+
+Bool hl_msg_mode		= FALSE;
+Bool hl_msg_team		= FALSE;
+U8	 hl_chat_buf[32];
+I64	 hl_chat_len		= 0;
+
+Bool hl_con_want_noclip	= FALSE;
+Bool hl_con_want_quit	= FALSE;
+
+U8 *hl_con_charset = "abcdefghijklmnopqrstuvwxyz0123456789 ./";
+
+U0 HLConInputReset()
+{
+	I64 i;
+
+	for (i = 0; i < 256; i++)
+		hl_key_prev[i] = 0;
+
+	hl_con_input[0]   = 0;
+	hl_con_input_len  = 0;
+	hl_con_want_noclip = FALSE;
+	hl_con_want_quit   = FALSE;
+	hl_msg_mode  = FALSE;
+	hl_msg_team  = FALSE;
+	hl_chat_buf[0] = 0;
+	hl_chat_len    = 0;
+}
+
+Bool HLConKeyEdge(I64 sc)
+{
+	Bool down;
+	Bool was;
+
+	if (sc <= 0 || sc >= 256)
+		return FALSE;
+
+	down = ToBool(Bt(kbd.down_bitmap, sc));
+	was  = ToBool(hl_key_prev[sc]);
+
+	if (down)
+		hl_key_prev[sc] = 1;
+	else
+		hl_key_prev[sc] = 0;
+
+	return ToBool(down && !was);
+}
+
+
+F64  hl_con_fov_want	= 0.0;
+Bool hl_con_want_save	= FALSE;
+Bool hl_con_want_load	= FALSE;
+Bool hl_con_save_ok		= TRUE;
+
+I64 hl_net_mismatch_report = 0;
+U8  hl_con_net_line[128];
+
+U0 HLConDrainProgs()
+{
+	U8	line[128];
+	I64	n = 0;
+	I64	i;
+	U8	c;
+
+	if (hl_bi_print_len < 1)
+		return;
+
+	for (i = 0; i < hl_bi_print_len; i++)
+	{
+		c = hl_bi_print_buf[i];
+
+		if (c == '\n' || n >= 126)
+		{
+			line[n] = 0;
+			if (n > 0)
+				HLConPrint(line);
+			n = 0;
+		}
+
+		if (c != '\n')
+		{
+			line[n] = c;
+			n++;
+		}
+	}
+
+	if (n > 0)
+	{
+		line[n] = 0;
+		HLConPrint(line);
+	}
+
+	hl_bi_print_len    = 0;
+	hl_bi_print_buf[0] = 0;
+}
+
+U32 HLConParseIPV4(U8 *s)
+{//dotted quad to host-order U32, 0 on failure
+	I64 part[4];
+	I64 n = 0;
+	I64 v;
+	I64 digits;
+	I64 i = 0;
+
+	while (n < 4)
+	{
+		v      = 0;
+		digits = 0;
+
+		while (s[i] >= '0' && s[i] <= '9')
+		{
+			v = v * 10 + (s[i] - '0');
+			digits++;
+			i++;
+
+			if (v > 255)
+				return 0;
+		}
+
+		if (!digits)
+			return 0;
+
+		part[n] = v;
+		n++;
+
+		if (n < 4)
+		{
+			if (s[i] != '.')
+				return 0;
+			i++;
+		}
+	}
+
+	if (s[i] == ':')
+	{
+		i++;
+		while (s[i] >= '0' && s[i] <= '9')
+			i++;
+	}
+
+	if (s[i] && s[i] != ' ')
+		return 0;
+
+	return part[0] | (part[1] << 8) | (part[2] << 16) | (part[3] << 24);
+}
+
+U0 HLConConnectIP(U32 ip)
+{
+	U8	msg[96];
+	U32	me;
+
+	if (!HLNetUdpAvailable())
+	{
+		HLConPrint("no net stack - run RunNet.ZC, not Run.ZC");
+		return;
+	}
+
+	if (!ip)
+	{
+		HLConPrint("no address to connect to");
+		return;
+	}
+
+	StrPrint(msg, "connecting to %d.%d.%d.%d...",
+		ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
+	HLConPrint(msg);
+
+	HLNetAutoIP(ip);
+
+	if (!HLNetUdpOpen(HLNET_PORT_DEFAULT))
+	{
+		HLConPrint(hl_udp_status);
+		return;
+	}
+
+	hl_udp_server = FALSE;
+	HLNetDgrmInit;
+	HLNetUdpSetPeer(ip);
+
+	if (!HLNetUdpResolvePeer)
+	{
+		HLConPrint("no arp reply - is the other vm up and on this link?");
+		return;
+	}
+
+	HLNetClientSendConnect(hl_setup_name, hl_setup_top, hl_setup_bottom);
+
+	me = HLNetLocalIP();
+
+	StrPrint(msg, "me %d.%d.%d.%d -> server %d.%d.%d.%d",
+		me & 255, (me >> 8) & 255, (me >> 16) & 255, (me >> 24) & 255,
+		ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
+	HLConPrint(msg);
+}
+
+U0 HLConConnect(U8 *args)
+{
+	U32 ip = HLConParseIPV4(args);
+
+	if (!ip)
+	{
+		HLConPrint("usage: connect 10.0.0.1");
+		return;
+	}
+
+	hl_net_want48 = FALSE;
+	HLConConnectIP(ip);
+}
+
+U0 HLConConnect48(U8 *args)
+{
+	U32 ip = HLConParseIPV4(args);
+
+	if (!ip)
+	{
+		HLConPrint("usage: connect48 10.0.0.1");
+		return;
+	}
+
+	hl_net_want48 = TRUE;
+	HLConConnectIP(ip);
+}
+
+U0 HLConSlist()
+{
+	U8	line[80];
+	I64	i;
+
+	if (!HLNetUdpAvailable())
+	{
+		HLConPrint("no net stack - run RunNet.ZC, not Run.ZC");
+		return;
+	}
+
+	if (!HLNetLocalIP())
+	{
+		HLConPrint("set ip first: qip 10.0.0.2");
+		return;
+	}
+
+	if (!HLNetUdpOpen(HLNET_PORT_DEFAULT))
+	{
+		HLConPrint(hl_udp_status);
+		return;
+	}
+
+	if (hl_udp_server)
+	{
+		HLConPrint("hosting - slist is for clients");
+		return;
+	}
+
+	if (!HLNetSlistBroadcast)
+		HLConPrint("broadcast failed - no link?");
+	else
+		HLConPrint("searching for lan servers...");
+
+	if (!hl_slist_count)
+	{
+		HLConPrint("no servers yet - run slist again");
+		return;
+	}
+
+	HLConPrint("address        host    map     players");
+
+	for (i = 0; i < hl_slist_count; i++)
+	{
+		StrPrint(line, "%s %s %s %d/%d",
+			hl_slist[i].addr,
+			hl_slist[i].name,
+			hl_slist[i].map,
+			hl_slist[i].players,
+			hl_slist[i].max_players);
+		HLConPrint(line);
+	}
+}
+
+U0 HLCvarValueStr(U8 *out, F64 v)
+{
+	if (v == ToF64(ToI64(v)))
+		StrPrint(out, "%d", ToI64(v));
+	else
+		StrPrint(out, "%g", v);
+}
+
+Bool HLConCvarCommand(U8 *line)
+{
+	U8	name[24];
+	U8	out[64];
+	U8	vbuf[32];
+	I64	i = 0;
+	I64	j;
+
+	while (line[i] && line[i] != ' ' && i < 23)
+	{
+		name[i] = line[i];
+		i++;
+	}
+	name[i] = 0;
+
+	if (HLCvarIndex(name) < 0)
+		return FALSE;
+
+	j = i;
+	while (line[j] == ' ')
+		j++;
+
+	if (!line[j])
+	{
+		HLCvarValueStr(vbuf, HLCvarGet(name));
+		StrPrint(out, "\"%s\" is \"%s\"", name, vbuf);
+		HLConPrint(out);
+		return TRUE;
+	}
+
+	HLCvarSet(name, HLAtoF(line + j));
+
+	HLCvarValueStr(vbuf, HLCvarGet(name));
+	StrPrint(out, "%s set to %s", name, vbuf);
+	HLConPrint(out);
+
+	return TRUE;
+}
+
+U0 HLConCvar(U8 *args)
+{
+	U8	 name[24];
+	U8	 line[64];
+	U8	 vbuf[32];
+	I64	 i = 0;
+	I64	 j;
+
+	while (args[i] && args[i] != ' ' && i < 23)
+	{
+		name[i] = args[i];
+		i++;
+	}
+	name[i] = 0;
+
+	if (!name[0])
+		return;
+
+	j = i;
+	while (args[j] == ' ')
+		j++;
+
+	if (!args[j])
+	{
+		HLCvarValueStr(vbuf, HLCvarGet(name));
+		StrPrint(line, "\"%s\" is \"%s\"", name, vbuf);
+		HLConPrint(line);
+		return;
+	}
+
+	HLCvarSet(name, HLAtoF(args + j));
+	HLCvarValueStr(vbuf, HLCvarGet(name));
+	StrPrint(line, "%s set to %s", name, vbuf);
+	HLConPrint(line);
+}
+
+Bool HLConCheatAllowed()
+{
+	if (HLCvarGet("sv_cheats") == 0.0)
+	{
+		HLConPrint("sv_cheats is 0");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+U0 HLConReportFlag(U8 *name, Bool on)
+{
+	U8 msg[64];
+
+	if (on)
+		StrPrint(msg, "%s ON", name);
+	else
+		StrPrint(msg, "%s OFF", name);
+
+	HLConPrint(msg);
+}
+
+Bool HLConAimBasis(F64 *eye, F64 *fwd)
+{
+	if (!hl_world_active || !hl_map || !hl_entities)
+		return FALSE;
+
+	if (hl_view_basis)
+	{
+		HLVecCopy(hl_view_org, eye);
+		HLVecCopy(hl_view_fwd, fwd);
+	}
+	else
+	{
+		HLVecCopy(hl_snd_listener, eye);
+		HLVecSet(fwd, -hl_snd_right[1], hl_snd_right[0], 0.0);
+	}
+
+	if (HLVecNormalize(fwd) <= 0.0)
+		return FALSE;
+
+	return TRUE;
+}
+
+I64 HLConEntityForward()
+{
+	CHLEntity	*e;
+	F64			 eye[3];
+	F64			 fwd[3];
+	F64			 probe[3];
+	F64			 pmins[3];
+	F64			 pmaxs[3];
+	F64			 d;
+	I64			 i;
+	I64			 j;
+
+	if (!HLConAimBasis(eye, fwd))
+		return -1;
+
+	d = 16.0;
+
+	while (d <= 2048.0)
+	{
+		HLVecMA(eye, d, fwd, probe);
+
+		for (j = 0; j < 3; j++)
+		{
+			pmins[j] = probe[j] - 16.0;
+			pmaxs[j] = probe[j] + 16.0;
+		}
+
+		for (i = 0; i < hl_num_entities; i++)
+		{
+			e = &hl_entities[i];
+
+			if (!e->in_use || e->solid == HLSOLID_NOT || i == hl_ent_player)
+				goto qcef_next;
+
+			if (HLEntBoxOverlap(e, pmins, pmaxs))
+				return i;
+
+qcef_next:
+		}
+
+		d += 16.0;
+	}
+
+	return -1;
+}
+
+U8 *HLConMonStateName(I64 s)
+{
+	if (s == HLMSTATE_IDLE)		return "Idle";
+	if (s == HLMSTATE_ALERT)		return "Alert";
+	if (s == HLMSTATE_COMBAT)	return "Combat";
+	if (s == HLMSTATE_SCRIPT)	return "Scripted";
+	if (s == HLMSTATE_DEAD)		return "Dead";
+
+	return "None";
+}
+
+U8 *HLConMonSchedName(I64 s)
+{
+	if (s == HLSCHED_IDLE_STAND)		return "IdleStand";
+	if (s == HLSCHED_ALERT_STAND)	return "AlertStand";
+	if (s == HLSCHED_ALERT_FACE)		return "AlertFace";
+	if (s == HLSCHED_WAKE_ANGRY)		return "WakeAngry";
+	if (s == HLSCHED_CHASE_ENEMY)	return "ChaseEnemy";
+	if (s == HLSCHED_MELEE_ATTACK1)	return "MeleeAttack1";
+	if (s == HLSCHED_RANGE_ATTACK1)	return "RangeAttack1";
+	if (s == HLSCHED_TAKE_COVER)		return "TakeCover";
+	if (s == HLSCHED_SMALL_FLINCH)	return "SmallFlinch";
+	if (s == HLSCHED_DIE)			return "Die";
+
+	return "None";
+}
+
+U8 *HLConGlobalStateName(I64 s)
+{
+	if (s == HLGLOBAL_ON)	return "On";
+	if (s == HLGLOBAL_DEAD)	return "Dead";
+
+	return "Off";
+}
+
+U0 HLConReportAIState(I64 ent)
+{
+	CHLEntity	*e = HLEntGet(ent);
+	U8			 msg[128];
+	I64			 s;
+
+	if (!e)
+		return;
+
+	s = hl_ai_mon_of[ent];
+
+	if (s < 0)
+	{
+		StrPrint(msg, "%s: not a monster", e->classname);
+		HLConPrint(msg);
+		return;
+	}
+
+	StrPrint(msg, "%s: State: %s, Schedule %s, Task %d (status %d),",
+		e->classname,
+		HLConMonStateName(hl_ai_mon[s].state),
+		HLConMonSchedName(hl_ai_mon[s].sched),
+		hl_ai_mon[s].task, hl_ai_mon[s].task_status);
+	HLConPrint(msg);
+
+	if (!hl_ai_mon[s].have_enemy)
+		HLConPrint("No enemy");
+	else if (hl_ai_mon[s].enemy < 0)
+		HLConPrint("Enemy is player");
+	else
+	{
+		e = HLEntGet(hl_ai_mon[s].enemy);
+
+		if (e)
+			StrPrint(msg, "Enemy is %s", e->classname);
+		else
+			StrPrint(msg, "Enemy is entity %d", hl_ai_mon[s].enemy);
+
+		HLConPrint(msg);
+	}
+}
+
+U0 HLConFlashlightToggle()
+{
+	if (!hl_world_active)
+		return;
+
+	if (hl_flash_on)
+	{
+		hl_flash_on   = FALSE;
+		hl_flash_next = tS + HLFLASH_CHARGE;
+		HLMenuSound("items/flashlight1.wav");
+		return;
+	}
+
+	if (!hl_ent_player_suit)
+	{
+		HLConPrint("impulse 100: no HEV suit");
+		return;
+	}
+
+	if (hl_flash_battery <= 0)
+	{
+		HLConPrint("impulse 100: flashlight battery is flat");
+		return;
+	}
+
+	hl_flash_on   = TRUE;
+	hl_flash_next = tS + HLFLASH_DRAIN;
+	HLMenuSound("items/flashlight1.wav");
+}
+
+U0 HLConFlashlightFrame()
+{
+	CHLTrace	tr;
+	F64			eye[3];
+	F64			fwd[3];
+	F64			end[3];
+	F64			pos[3];
+	F64			zero[3];
+	F64			dist;
+	F64			t;
+	F64			rad;
+	F64			scale;
+	I64			j;
+
+	if (!hl_world_active)
+		return;
+
+	if (!hl_flash_on)
+	{
+		HLDlightKill(HLFLASH_DLIGHT_KEY);
+
+		if (hl_flash_battery < 100 && tS >= hl_flash_next)
+		{
+			hl_flash_battery++;
+			hl_flash_next = tS + HLFLASH_CHARGE;
+		}
+		return;
+	}
+
+	if (tS >= hl_flash_next)
+	{
+		hl_flash_battery--;
+		hl_flash_next = tS + HLFLASH_DRAIN;
+
+		if (hl_flash_battery <= 0)
+		{
+			hl_flash_battery = 0;
+			hl_flash_on      = FALSE;
+			HLMenuSound("items/flashlight1.wav");
+			return;
+		}
+	}
+
+	if (!HLConAimBasis(eye, fwd))
+		return;
+
+	HLVecMA(eye, HLFLASH_RANGE, fwd, end);
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	HLTraceEntity(hl_map, eye, end, zero, zero, 0, TRUE, &tr);
+
+	HLVecCopy(tr.end_pos, pos);
+	dist = HLFLASH_RANGE * tr.fraction;
+
+	if (tr.hit)
+	{
+		for (j = 0; j < 3; j++)
+			pos[j] += tr.plane_normal[j] * HLFLASH_BACKOFF;
+	}
+
+	t = dist / HLFLASH_RANGE;
+	if (t < 0.0)
+		t = 0.0;
+	if (t > 1.0)
+		t = 1.0;
+
+	rad   = HLFLASH_RAD_NEAR + (HLFLASH_RAD_FAR - HLFLASH_RAD_NEAR) * t;
+	scale = 1.0 + (HLFLASH_DIM_FAR - 1.0) * t;
+
+	HLDlightAdd(pos, rad, 0.25, 0.0, tS,
+		ToI64(255.0 * scale), ToI64(250.0 * scale), ToI64(220.0 * scale),
+		HLFLASH_DLIGHT_KEY);
+}
+
+U0 HLConTrackLastItem()
+{
+	if (hl_wpn_active == hl_con_wpn_seen)
+		return;
+
+	hl_con_wpn_prev = hl_con_wpn_seen;
+	hl_con_wpn_seen = hl_wpn_active;
+}
+
+I64 hl_con_impulse_want = 0;
+
+U0 HLConImpulse(I64 n)
+{
+	CHLEntity	*e;
+	U8			 msg[128];
+	I64			 ent;
+	I64			 i;
+
+	if (n >= 1 && n <= 10)
+	{
+		hl_con_impulse_want = n;
+		StrPrint(msg, "impulse %d", n);
+		HLConPrint(msg);
+		return;
+	}
+
+
+	//case 99: the Logo user message toggles the client's valve logo sprite.
+	if (n == 99)
+	{
+		HLConPrint("impulse 99: no client Logo user message or logo sprite");
+		return;
+	}
+
+	//case 100: the level designer's flashlight.
+	if (n == 100)
+	{
+		HLConFlashlightToggle;
+		return;
+	}
+
+	//case 201: CSprayCan paints a decal where the eye ray lands.
+	if (n == 201)
+	{
+		HLConPrint("impulse 201: no decal layer - infodecal is unsupported, so a spraycan has nothing to mark");
+		return;
+	}
+
+
+	if (!HLConCheatAllowed)
+		return;
+
+	//case 76: Create("monster_human_grunt", ...) after the map is running.
+	if (n == 76)
+	{
+		HLConPrint("impulse 76: no runtime entity creation - monsters exist only from the map's entity lump");
+		return;
+	}
+
+	//case 101: gEvilImpulse101, the give-all block.
+	if (n == 101)
+	{
+		HLWeaponGiveAll;
+		HLConPrint("impulse 101");
+		return;
+	}
+
+	//case 102: CGib::SpawnRandomGibs.
+	if (n == 102)
+	{
+		HLConPrint("impulse 102: no gib models and no runtime entity creation for SpawnRandomGibs");
+		return;
+	}
+
+	//case 103: ReportAIState for the monster in front of the player.
+	if (n == 103)
+	{
+		ent = HLConEntityForward;
+
+		if (ent < 0)
+			HLConPrint("nothing in front");
+		else
+			HLConReportAIState(ent);
+		return;
+	}
+
+	if (n == 104)
+	{
+		HLConPrint("-- Globals --");
+
+		for (i = 0; i < hl_ent_global_count; i++)
+		{
+			if (!hl_ent_globals[i].name[0])
+				goto qci_glob;
+
+			StrPrint(msg, "%s: (%s)", hl_ent_globals[i].name,
+				HLConGlobalStateName(hl_ent_globals[i].state));
+			HLConPrint(msg);
+
+qci_glob:
+		}
+
+		StrPrint(msg, "%d entities in use", HLEntCountInUse);
+		HLConPrint(msg);
+		return;
+	}
+
+	if (n == 105)
+	{
+		HLConPrint("impulse 105: HLAILook senses by sight alone - there is no CSoundEnt list to leave. notarget is the nearest equivalent");
+		return;
+	}
+
+	//case 106: name the entity in front of the player.
+	if (n == 106)
+	{
+		ent = HLConEntityForward;
+		e   = HLEntGet(ent);
+
+		if (!e)
+		{
+			HLConPrint("nothing in front");
+			return;
+		}
+
+		if (e->targetname[0])
+			StrPrint(msg, "Classname: %s - Targetname: %s", e->classname,
+				e->targetname);
+		else
+			StrPrint(msg, "Classname: %s - TargetName: No Targetname",
+				e->classname);
+		HLConPrint(msg);
+
+		StrPrint(msg, "Model: %s", e->model_name);
+		HLConPrint(msg);
+
+		if (e->global_state[0])
+		{
+			StrPrint(msg, "Globalname: %s", e->global_state);
+			HLConPrint(msg);
+		}
+		return;
+	}
+
+	if (n == 107)
+	{
+		HLConPrint("impulse 107: the trace reports a plane, not the face, so there is no texture name");
+		return;
+	}
+
+	//cases 195..197 and 199: the node_viewer entities and WorldGraph.
+	if ((n >= 195 && n <= 197) || n == 199)
+	{
+		HLConPrint("impulse: no node graph - WorldGraph and the node_viewer entities are absent");
+		return;
+	}
+
+	//case 202: CBloodSplat, another decal.
+	if (n == 202)
+	{
+		HLConPrint("impulse 202: no decal layer for a blood splat");
+		return;
+	}
+
+	if (n == 203)
+	{
+		ent = HLConEntityForward;
+		e   = HLEntGet(ent);
+
+		if (!e)
+		{
+			HLConPrint("nothing in front");
+			return;
+		}
+
+		if (!e->takedamage)
+		{
+			StrPrint(msg, "%s does not take damage", e->classname);
+			HLConPrint(msg);
+			return;
+		}
+
+		StrPrint(msg, "removed %s", e->classname);
+		HLConPrint(msg);
+
+		e->in_use     = FALSE;
+		e->solid      = HLSOLID_NOT;
+		e->think_fn   = HLM_NONE;
+		e->next_think = 0.0;
+		return;
+	}
+
+	StrPrint(msg, "impulse %d: not an impulse the game DLL handles", n);
+	HLConPrint(msg);
+}
+
+U0 HLConGive(U8 *args)
+{
+	U8	msg[96];
+	U8	name[64];
+	I64	count = 0;
+	I64	id;
+	I64	ammo;
+	I64	i = 0;
+
+	//One token. Trailing text is ignored, as Cmd_Argv(1) does.
+	while (args[i] && args[i] != ' ' && args[i] != '\t' && i < 63)
+	{
+		name[i] = args[i];
+		i++;
+	}
+	name[i] = 0;
+
+	if (!name[0])
+	{
+		HLConPrint("give <classname>, e.g. give weapon_shotgun");
+		return;
+	}
+
+	id = HLWeaponFindByClass(name);
+
+	if (id >= 0)
+	{
+		if (HLWeaponGive(id))
+			StrPrint(msg, "gave %s", name);
+		else
+			StrPrint(msg, "%s: already carried and full", name);
+
+		HLConPrint(msg);
+		return;
+	}
+
+	ammo = HLWeaponAmmoForClass(name, &count);
+
+	if (ammo >= 0)
+	{
+		if (HLWeaponGiveAmmo(ammo, count))
+			StrPrint(msg, "gave %s (%d)", name, count);
+		else
+			StrPrint(msg, "%s: pool full", name);
+
+		HLConPrint(msg);
+		return;
+	}
+
+	if (!StrICompare(name, "item_suit"))
+	{
+		hl_ent_player_suit = TRUE;
+		HLConPrint("gave item_suit");
+		return;
+	}
+
+	if (!StrICompare(name, "item_battery"))
+	{
+		hl_ent_player_armor = HLENT_MAX_ARMOR;
+		HLConPrint("gave item_battery");
+		return;
+	}
+
+	if (!StrICompare(name, "item_healthkit"))
+	{
+		hl_ent_player_health = HLENT_MAX_HEALTH;
+		HLConPrint("gave item_healthkit");
+		return;
+	}
+
+	StrPrint(msg, "give: no such item \"%s\"", name);
+	HLConPrint(msg);
+}
+
+U0 HLConSelectItem(U8 *args)
+{
+	U8	msg[96];
+	U8	name[64];
+	I64	id;
+	I64	i = 0;
+
+	while (args[i] && args[i] != ' ' && args[i] != '\t' && i < 63)
+	{
+		name[i] = args[i];
+		i++;
+	}
+	name[i] = 0;
+
+	if (!name[0])
+	{
+		HLConPrint("use <classname>, e.g. use weapon_shotgun");
+		return;
+	}
+
+	id = HLWeaponFindByClass(name);
+
+	if (id < 0 || !hl_wpn_have[id])
+		return;
+
+	if (id == hl_wpn_active)
+		return;
+
+	hl_con_wpn_prev = hl_wpn_active;
+	hl_con_wpn_seen = id;
+	HLWeaponSetActive(id);
+
+	StrPrint(msg, "selected %s", name);
+	HLConPrint(msg);
+}
+
+U0 HLConLastInv()
+{
+	if (hl_con_wpn_prev < 0 || !hl_wpn_have[hl_con_wpn_prev])
+		return;
+
+	if (hl_con_wpn_prev == hl_wpn_active)
+		return;
+
+	hl_con_wpn_seen = hl_con_wpn_prev;
+	hl_con_wpn_prev = hl_wpn_active;
+	HLWeaponSetActive(hl_con_wpn_seen);
+}
+
+U0 HLConDrop(U8 *args)
+{
+	U8	name[64];
+	F64	drop_org[3];
+	F64	drop_ang[3];
+	I64	id;
+	I64	i = 0;
+
+	if (HLCvarGet("deathmatch") == 0.0 && HLCvarGet("coop") == 0.0)
+	{
+		HLConPrint("no dropping in single player");
+		return;
+	}
+
+	while (args[i] && args[i] != ' ' && args[i] != '\t' && i < 63)
+	{
+		name[i] = args[i];
+		i++;
+	}
+	name[i] = 0;
+
+	if (!name[0])
+		id = hl_wpn_active;
+	else
+		id = HLWeaponFindByClass(name);
+
+	if (id < 0 || !hl_wpn_have[id])
+		return;
+
+	HLVecCopy(hl_ent_player_org, drop_org);
+	drop_org[2] += 16.0;
+
+	HLVecSet(drop_ang, 0.0, 0.0, 0.0);
+
+	if (HLEntCreateNamed(hl_wpn_info[id].classname, drop_org, drop_ang, -1)
+		>= 0)
+	{
+		hl_wpn_have[id] = FALSE;
+		hl_wpn_clip[id] = 0;
+
+		if (hl_wpn_active == id)
+			HLWeaponSetActive(HLWPN_NONE);
+	}
+}
+
+U0 HLConStatus()
+{
+	U8 msg[96];
+
+	StrPrint(msg, "map %s", hl_map_name);
+	HLConPrint(msg);
+
+	StrPrint(msg, "entities %d  time %4.1f", HLEntCountInUse, hl_game_time);
+	HLConPrint(msg);
+
+	StrPrint(msg, "health %d  armor %d  suit %d",
+		ToI64(hl_ent_player_health), ToI64(hl_ent_player_armor),
+		HLStairFlag(hl_ent_player_suit));
+	HLConPrint(msg);
+
+	StrPrint(msg, "godmode %d  notarget %d",
+		HLStairFlag(hl_ent_godmode), HLStairFlag(hl_ent_notarget));
+	HLConPrint(msg);
+}
+
+
+I64 HLConToken(U8 *out, U8 *src, I64 i, I64 max)
+{
+	I64 n = 0;
+
+	while (src[i] == ' ' || src[i] == '\t')
+		i++;
+
+	while (src[i] && src[i] != ' ' && src[i] != '\t' && n < max - 1)
+	{
+		out[n] = src[i];
+		n++;
+		i++;
+	}
+	out[n] = 0;
+
+	while (src[i] && src[i] != ' ' && src[i] != '\t')
+		i++;
+
+	return i;
+}
+
+I64 HLConSkipSpace(U8 *src, I64 i)
+{
+	while (src[i] == ' ' || src[i] == '\t')
+		i++;
+	return i;
+}
+
+U0 HLCmdBindList()
+{
+	U8	msg[96];
+	U8	keyname[32];
+	I64	k;
+	I64	n = 0;
+
+	for (k = 1; k < HLKEY_MAX; k++)
+	{
+		if (!hl_key_bind[k * HLKEY_CMD_MAX])
+			goto qbl_next;
+
+		HLKeyName(keyname, k);
+		StrPrint(msg, "\"%s\" = \"%s\"", keyname,
+			hl_key_bind + k * HLKEY_CMD_MAX);
+		HLConPrint(msg);
+		n++;
+
+qbl_next:
+	}
+
+	StrPrint(msg, "%d keys bound", n);
+	HLConPrint(msg);
+}
+
+U0 HLCmdBind(U8 *args)
+{
+	U8	key[32];
+	U8	cmd[HLKEY_CMD_MAX];
+	U8	msg[96];
+	I64	i;
+	I64	k;
+
+	i = HLConSkipSpace(args, 0);
+	if (!args[i])
+	{
+		HLCmdBindList;
+		return;
+	}
+
+	i = HLBindArg(key, args, i, 32);
+	k = HLKeyFromName(key);
+	if (k <= 0)
+	{
+		StrPrint(msg, "\"%s\" isn't a valid key", key);
+		HLConPrint(msg);
+		return;
+	}
+
+	i = HLConSkipSpace(args, i);
+	if (!args[i])
+	{
+		if (hl_key_bind[k * HLKEY_CMD_MAX])
+			StrPrint(msg, "\"%s\" = \"%s\"", key,
+				hl_key_bind + k * HLKEY_CMD_MAX);
+		else
+			StrPrint(msg, "\"%s\" is not bound", key);
+
+		HLConPrint(msg);
+		return;
+	}
+
+	HLBindArg(cmd, args, i, HLKEY_CMD_MAX);
+	HLBindSet(k, cmd);
+	HLCfgSave;
+
+	StrPrint(msg, "bound %s to %s", key, cmd);
+	HLConPrint(msg);
+}
+
+U0 HLCmdUnbind(U8 *args)
+{
+	U8	key[32];
+	U8	msg[96];
+	I64	k;
+
+	HLBindArg(key, args, 0, 32);
+	k = HLKeyFromName(key);
+	if (k <= 0)
+	{
+		HLConPrint("unbind <key>");
+		return;
+	}
+
+	if (!hl_key_bind[k * HLKEY_CMD_MAX])
+	{
+		StrPrint(msg, "\"%s\" is not bound", key);
+		HLConPrint(msg);
+		return;
+	}
+
+	HLBindClear(k);
+	HLCfgSave;
+
+	StrPrint(msg, "unbound %s", key);
+	HLConPrint(msg);
+}
+
+U0 HLCmdUnbindAll()
+{
+	HLBindClearAll;
+	HLInClearAll;
+	HLCfgSave;
+	HLConPrint("all keys unbound");
+}
+
+U0 HLCmdCvarList()
+{
+	U8	msg[80];
+	U8	vbuf[32];
+	I64	i;
+
+	for (i = 0; i < hl_cvar_count; i++)
+	{
+		HLCvarValueStr(vbuf, hl_cvars[i].value);
+		StrPrint(msg, "%s \"%s\"", hl_cvars[i].name, vbuf);
+		HLConPrint(msg);
+	}
+
+	StrPrint(msg, "%d cvars", hl_cvar_count);
+	HLConPrint(msg);
+}
+
+U0 HLCmdAliasList()
+{
+	U8	msg[80];
+	I64	i;
+
+	if (!hl_alias_count)
+	{
+		HLConPrint("no alias commands");
+		return;
+	}
+
+	for (i = 0; i < hl_alias_count; i++)
+	{
+		StrPrint(msg, "%s : %s", hl_alias_name + i * HLALIAS_NAME,
+			hl_alias_text + i * HLALIAS_TEXT);
+		HLConPrint(msg);
+	}
+}
+
+U0 HLCmdAlias(U8 *args)
+{
+	U8	name[HLALIAS_NAME];
+	U8	msg[80];
+	I64	i;
+	I64	slot;
+
+	i = HLConSkipSpace(args, 0);
+	if (!args[i])
+	{
+		HLCmdAliasList;
+		return;
+	}
+
+	i = HLConToken(name, args, i, HLALIAS_NAME);
+	i = HLConSkipSpace(args, i);
+
+	slot = HLAliasFind(name);
+
+	if (!args[i])
+	{
+		if (slot < 0)
+			StrPrint(msg, "no alias named %s", name);
+		else
+			StrPrint(msg, "%s : %s", name, hl_alias_text + slot * HLALIAS_TEXT);
+		HLConPrint(msg);
+		return;
+	}
+
+	if (slot < 0)
+	{
+		if (hl_alias_count >= HLALIAS_MAX)
+		{
+			HLConPrint("alias table full");
+			return;
+		}
+		slot = hl_alias_count;
+		hl_alias_count++;
+	}
+
+	HLStrCopy(hl_alias_name + slot * HLALIAS_NAME, name, HLALIAS_NAME);
+	HLStrCopy(hl_alias_text + slot * HLALIAS_TEXT, args + i, HLALIAS_TEXT);
+
+	StrPrint(msg, "%s : %s", hl_alias_name + slot * HLALIAS_NAME,
+		hl_alias_text + slot * HLALIAS_TEXT);
+	HLConPrint(msg);
+}
+
+U0 HLCmdUnalias(U8 *args)
+{
+	U8	name[HLALIAS_NAME];
+	U8	msg[80];
+	I64	slot;
+	I64	i;
+
+	HLConToken(name, args, 0, HLALIAS_NAME);
+	if (!name[0])
+	{
+		HLConPrint("unalias <name>");
+		return;
+	}
+
+	slot = HLAliasFind(name);
+	if (slot < 0)
+	{
+		StrPrint(msg, "no alias named %s", name);
+		HLConPrint(msg);
+		return;
+	}
+
+	for (i = slot; i < hl_alias_count - 1; i++)
+	{
+		HLStrCopy(hl_alias_name + i * HLALIAS_NAME,
+			hl_alias_name + (i + 1) * HLALIAS_NAME, HLALIAS_NAME);
+		HLStrCopy(hl_alias_text + i * HLALIAS_TEXT,
+			hl_alias_text + (i + 1) * HLALIAS_TEXT, HLALIAS_TEXT);
+	}
+
+	hl_alias_count--;
+	hl_alias_name[hl_alias_count * HLALIAS_NAME] = 0;
+	hl_alias_text[hl_alias_count * HLALIAS_TEXT] = 0;
+
+	StrPrint(msg, "removed alias %s", name);
+	HLConPrint(msg);
+}
+
+Bool hl_con_want_bf = FALSE;
+
+U0 HLConExec(U8 *line, Bool echo = TRUE)
+{
+	U8  msg[80];
+	U8 *role;
+	U32 myip;
+	I64 si;
+	I64 e;
+	CHLNetSock *sock;
+
+	U8 *p;
+	I64 ctop;
+	I64 cbot;
+
+	U8  *raw;
+	U8   fline[128];
+	U8   acmd[HLALIAS_TEXT];
+	U8   aname[HLALIAS_NAME];
+	I64  fsize;
+	I64  fi;
+	I64  fn;
+	I64  ai;
+	I64  an;
+	I64  aslot;
+
+	if (!line[0])
+		return;
+
+	if (echo)
+	{
+		StrPrint(msg, "]%s", line);
+		HLConPrint(msg);
+	}
+
+	if (!StrNICompare(line, "heapcheck", 9))
+	{
+		if (line[9] == ' ')
+			hl_heap_check_on = ToBool(HLAtoF(line + 10) != 0.0);
+		else
+			hl_heap_check_on = !hl_heap_check_on;
+
+		if (hl_heap_check_on)
+			HLConPrint("heapcheck on");
+		else
+			HLConPrint("heapcheck off");
+		return;
+	}
+
+	if (!StrNICompare(line, "game ", 5) || !StrICompare(line, "game"))
+	{
+		if (line[4])
+			HLStrCopy(hl_gamedir_next, line + 5, 32);
+		else
+			hl_gamedir_next[0] = 0;
+
+		hl_gamedir_pending = TRUE;
+		HLConPrint("switching gamedir");
+		return;
+	}
+
+	if (!StrNICompare(line, "playdemo ", 9))
+	{
+		if (HLDemoStart(line + 9))
+			HLConPrint("playing demo");
+		else
+			HLConPrint("couldn't open demo");
+		return;
+	}
+
+	if (!StrNICompare(line, "record ", 7))
+	{
+		if (HLDemoRecordStart(line + 7))
+			HLConPrint("recording");
+		else
+			HLConPrint("couldn't start recording");
+		return;
+	}
+
+	if (!StrICompare(line, "stop"))
+	{
+		if (hl_demo_recording)
+		{
+			if (HLDemoRecordStop)
+				HLConPrint("stopped recording");
+			else
+				HLConPrint("recording failed to write");
+		}
+		else if (hl_demo_playing)
+		{
+			HLDemoStop;
+			hl_demo_loop = FALSE;
+			HLConPrint("demo stopped");
+		}
+		else
+			HLConPrint("not recording or playing a demo");
+		return;
+	}
+
+	//Host_Demos_f: the attract loop cycles demo1..3 behind the main menu
+	if (!StrICompare(line, "demos"))
+	{
+		hl_demo_loop_index = 0;
+		if (HLDemoNextInLoop)
+			HLConPrint("demo loop started");
+		else
+			HLConPrint("no demos found");
+		return;
+	}
+
+	if (!StrNICompare(line, "color ", 6))
+	{
+		p = line + 6;
+		while (*p == ' ')
+			p++;
+
+		ctop = ClampI64(ToI64(HLAtoF(p)), 0, 13);
+
+		while (*p && *p != ' ')
+			p++;
+		while (*p == ' ')
+			p++;
+
+		if (*p)
+			cbot = ClampI64(ToI64(HLAtoF(p)), 0, 13);
+		else
+			cbot = ctop;
+
+		hl_setup_top    = ctop;
+		hl_setup_bottom = cbot;
+
+		if (hl_player_active && hl_player_edict > 0)
+			HLSvApplyClientColors(hl_player_edict, ctop, cbot);
+
+		si = HLSvFindLocalSlot;
+		if (si >= 0)
+			hl_sv_clients[si].sent_ident = FALSE;
+
+		HLCfgSave;
+		StrPrint(msg, "color %d %d", ctop, cbot);
+		HLConPrint(msg);
+		return;
+	}
+
+	if (!StrNICompare(line, "hostname ", 9))
+	{
+		HLStrCopy(hl_host_name, line + 9, 32);
+		HLCfgSave;
+		HLConPrint("hostname set");
+		return;
+	}
+
+	if (!StrICompare(line, "hostname"))
+	{
+		StrPrint(msg, "hostname is %s", hl_host_name);
+		HLConPrint(msg);
+		return;
+	}
+
+	if (!StrICompare(line, "stopdemo"))
+	{
+		HLDemoStop;
+		hl_demo_loop = FALSE;
+		HLConPrint("demo stopped");
+		return;
+	}
+
+	if (!StrNICompare(line, "map ", 4))
+	{
+		HLEntNewGame;
+
+		HLStrCopy(hl_change_map, line + 4, 64);
+		hl_change_pending = TRUE;
+		return;
+	}
+
+	if (!StrNICompare(line, "changelevel ", 12))
+	{
+		HLStrCopy(hl_change_map, line + 12, 64);
+		hl_change_pending = TRUE;
+		return;
+	}
+
+	if (!StrICompare(line, "slist"))
+	{
+		HLConSlist;
+		return;
+	}
+
+	if (!StrICompare(line, "netstat"))
+	{
+		StrPrint(hl_con_net_line, "net: %d ents, %d bytes, %d parsed",
+			hl_net_num_ents, hl_net_datagram.len, hl_net_parsed);
+		HLConPrint(hl_con_net_line);
+
+		StrPrint(hl_con_net_line, "net: MISMATCHED %d, dropped %d",
+			hl_net_mismatch_report, hl_net_dropped);
+		HLConPrint(hl_con_net_line);
+
+		StrPrint(hl_con_net_line, "net: hp %d ar %d am %d wp %d",
+			hl_cl.health, hl_cl.armorvalue, hl_cl.currentammo, hl_cl.weapon);
+		HLConPrint(hl_con_net_line);
+
+		StrPrint(hl_con_net_line, "net: %d clients connected",
+			hl_sv_client_count);
+		HLConPrint(hl_con_net_line);
+
+		if (hl_udp_ready && hl_udp_server)
+		{
+			for (si = 0; si < HLSV_MAX_CLIENTS; si++)
+			{
+				if (!hl_sv_clients[si].active || hl_sv_clients[si].local)
+					goto ns_next;
+
+				e = hl_sv_clients[si].edict;
+				if (e > 0)
+					StrPrint(hl_con_net_line,
+						"net: remote[%d] edict %d at %.0f %.0f %.0f",
+						si, e,
+						hl_sv_clients[si].origin[0],
+						hl_sv_clients[si].origin[1],
+						hl_sv_clients[si].origin[2]);
+				else
+					StrPrint(hl_con_net_line,
+						"net: remote[%d] edict 0 (not spawned)", si);
+				HLConPrint(hl_con_net_line);
+
+				sock = HLNetDgrmSock(si);
+				if (sock && sock->active)
+				{
+					StrPrint(hl_con_net_line,
+						"net: remote[%d] udp %d.%d.%d.%d:%d signon %d",
+						si,
+						sock->ip & 255, (sock->ip >> 8) & 255,
+						(sock->ip >> 16) & 255, (sock->ip >> 24) & 255,
+						sock->port, hl_sv_clients[si].signon);
+					HLConPrint(hl_con_net_line);
+				}
+
+ns_next:
+			}
+		}
+
+		StrPrint(hl_con_net_line, "net: moves %d/%d ping %4.1fms",
+			hl_net_moves_sent, hl_net_moves_read, hl_net_move_ping * 1000.0);
+		HLConPrint(hl_con_net_line);
+
+		HLConPrint(hl_udp_status);
+
+		myip = HLNetLocalIP();
+		StrPrint(hl_con_net_line, "udp: local ip %d.%d.%d.%d",
+			myip & 255, (myip >> 8) & 255,
+			(myip >> 16) & 255, (myip >> 24) & 255);
+		HLConPrint(hl_con_net_line);
+
+		if (hl_udp_ready)
+		{
+			if (hl_udp_server)
+				role = "hosting";
+			else
+				role = "joined";
+
+			StrPrint(hl_con_net_line, "udp: %s peer %d.%d.%d.%d",
+				role,
+				hl_udp_peer_ip & 255, (hl_udp_peer_ip >> 8) & 255,
+				(hl_udp_peer_ip >> 16) & 255, (hl_udp_peer_ip >> 24) & 255);
+			HLConPrint(hl_con_net_line);
+
+			StrPrint(hl_con_net_line, "udp: %d sent %d recvd %d err %d unresolved",
+				hl_udp_sent, hl_udp_recvd, hl_udp_errors, hl_udp_unresolved);
+			HLConPrint(hl_con_net_line);
+
+			if (hl_udp_peer_ip)
+			{
+				if (HLNetUdpPeerResolved)
+					HLConPrint("udp: peer mac RESOLVED");
+				else
+				{
+					StrPrint(hl_con_net_line,
+						"udp: peer mac UNRESOLVED, %d sends skipped",
+						hl_udp_unresolved);
+					HLConPrint(hl_con_net_line);
+				}
+			}
+		}
+		return;
+	}
+
+	//qip <a.b.c.d> - static address for a link with no DHCP
+	if (!StrNICompare(line, "qip ", 4))
+	{
+		if (!HLNetUdpAvailable())
+		{
+			HLConPrint("no net stack - run RunNet.ZC, not Run.ZC");
+			return;
+		}
+
+		HLNetUdpSetLocalIP(HLConParseIPV4(line + 4));
+		HLConPrint(hl_udp_status);
+		return;
+	}
+
+	if (!StrICompare(line, "netdhcp"))
+	{
+		if (!HLNetUdpAvailable())
+		{
+			HLConPrint("no net stack - run RunNet.ZC");
+			return;
+		}
+
+		HLConPrint("dhcp: asking, this may take a few seconds...");
+		HLNetDhcp;
+		HLConPrint(hl_udp_status);
+		return;
+	}
+
+	//stairlog 1 - every step-up attempt and whether it was kept
+	if (!StrNICompare(line, "stairlog ", 9))
+	{
+		hl_stair_log     = ToBool(Str2I64(line + 9) != 0);
+		hl_stair_reports = 0;
+
+		if (hl_stair_log)
+			HLConPrint("stair logging ON - see HL1LOG.TXT");
+		else
+			HLConPrint("stair logging off");
+		return;
+	}
+
+	if (!StrICompare(line, "bf"))
+	{
+		hl_con_want_bf = TRUE;
+		return;
+	}
+
+	if (!StrNICompare(line, "music ", 6))
+	{
+		if (!StrICompare(line + 6, "stop"))
+		{
+			HLMusicFree;
+			AudioSFXStopAll;
+			HLConPrint("music stopped");
+		}
+		else
+		{
+			HLMusicPlay(Str2I64(line + 6), tS);
+			HLConPrint(hl_music_status);
+		}
+		return;
+	}
+
+	if (!StrNICompare(line, "connect48 ", 10))
+	{
+		HLConConnect48(line + 10);
+		return;
+	}
+
+	if (!StrNICompare(line, "connect ", 8))
+	{
+		HLConConnect(line + 8);
+		return;
+	}
+
+	if (!StrICompare(line, "connect"))
+	{
+		HLConPrint("usage: connect 10.0.0.1");
+		return;
+	}
+
+	if (!StrICompare(line, "disconnect"))
+	{
+		HLNetUdpClose;
+		hl_cl_viewent = 0;
+		HLConPrint("disconnected");
+		return;
+	}
+
+	if (!StrNICompare(line, "say_team ", 9))
+	{
+		if (hl_udp_ready && !hl_udp_server)
+			HLNetClientSendStringCmd(line);
+		else
+			HLConPrint("Can't \"say_team\", not connected");
+		return;
+	}
+	if (!StrICompare(line, "say_team"))
+	{
+		HLConPrint("usage: say_team <text>");
+		return;
+	}
+	if (!StrNICompare(line, "say ", 4))
+	{
+		if (hl_udp_ready && !hl_udp_server)
+			HLNetClientSendStringCmd(line);
+		else
+			HLConPrint("Can't \"say\", not connected");
+		return;
+	}
+	if (!StrICompare(line, "say"))
+	{
+		HLConPrint("usage: say <text>");
+		return;
+	}
+	if (!StrNICompare(line, "tell ", 5))
+	{
+		if (hl_udp_ready && !hl_udp_server)
+			HLNetClientSendStringCmd(line);
+		else
+			HLConPrint("Can't \"tell\", not connected");
+		return;
+	}
+	if (!StrICompare(line, "tell"))
+	{
+		HLConPrint("usage: tell <name> <text>");
+		return;
+	}
+
+	if (!StrICompare(line, "host"))
+	{
+		if (!HLNetLocalIP)
+			HLNetDhcp;
+		if (!HLNetLocalIP)
+			HLNetAutoIP(0);
+
+		if (HLNetUdpOpen(HLNET_PORT_DEFAULT))
+		{
+			hl_udp_server = TRUE;
+			HLNetDgrmInit;
+
+			HLSvHostTickInit;
+			HLSvHostClaimLocal(NULL, NULL, hl_setup_name,
+				hl_setup_top, hl_setup_bottom);
+
+			HLConPrint(hl_udp_status);
+			HLConPrint("hosting - clients may connect to this ip");
+		}
+		else
+			HLConPrint(hl_udp_status);
+		return;
+	}
+
+	if (!StrNICompare(line, "diskwrite ", 10))
+	{
+		hl_disk_writes = ToBool(Str2I64(line + 10) != 0);
+		if (hl_disk_writes)
+			HLConPrint("disk writes enabled");
+		else
+			HLConPrint("disk writes DISABLED");
+		return;
+	}
+
+	if (!StrNICompare(line, "set ", 4))
+	{
+		HLConCvar(line + 4);
+		return;
+	}
+
+	if (!StrICompare(line, "restart"))
+	{
+		hl_restart_pending = TRUE;
+		return;
+	}
+
+	if (!StrICompare(line, "noclip"))
+	{
+		if (!HLConCheatAllowed)
+			return;
+
+		hl_con_want_noclip = TRUE;
+		HLConPrint("noclip toggled");
+		return;
+	}
+
+	if (!StrICompare(line, "fly"))
+	{
+		if (!HLConCheatAllowed)
+			return;
+
+		hl_con_want_noclip = TRUE;
+		HLConPrint("fly mode toggled");
+		return;
+	}
+
+	if (!StrICompare(line, "god"))
+	{
+		if (!HLConCheatAllowed)
+			return;
+
+		hl_ent_godmode = !hl_ent_godmode;
+		HLConReportFlag("godmode", hl_ent_godmode);
+		return;
+	}
+
+	if (!StrICompare(line, "notarget"))
+	{
+		if (!HLConCheatAllowed)
+			return;
+
+		hl_ent_notarget = !hl_ent_notarget;
+		HLConReportFlag("notarget", hl_ent_notarget);
+		return;
+	}
+
+	if (!StrICompare(line, "kill"))
+	{
+		HLEntKillPlayer;
+		HLConPrint("killed");
+		return;
+	}
+
+	if (!StrNICompare(line, "impulse ", 8))
+	{
+		HLConImpulse(Str2I64(line + 8));
+		return;
+	}
+
+	if (!StrNICompare(line, "give ", 5))
+	{
+		if (!HLConCheatAllowed)
+			return;
+		HLConGive(line + 5);
+		return;
+	}
+
+	if (!StrNICompare(line, "fov ", 4))
+	{
+		if (!HLConCheatAllowed)
+			return;
+
+		hl_con_fov_want = ToF64(Str2I64(line + 4));
+		if (hl_con_fov_want < 30.0)	hl_con_fov_want = 30.0;
+		if (hl_con_fov_want > 130.0)	hl_con_fov_want = 130.0;
+		hl_con_fov_last = hl_con_fov_want;
+		StrPrint(msg, "fov %d", ToI64(hl_con_fov_want));
+		HLConPrint(msg);
+		return;
+	}
+
+	if (!StrICompare(line, "fov"))
+	{
+		StrPrint(msg, "\"fov\" is \"%d\"", ToI64(hl_con_fov_last));
+		HLConPrint(msg);
+		return;
+	}
+
+	if (!StrNICompare(line, "drop ", 5))
+	{
+		HLConDrop(line + 5);
+		return;
+	}
+
+	if (!StrICompare(line, "drop"))
+	{
+		HLConDrop("");
+		return;
+	}
+
+	if (!StrNICompare(line, "use ", 4))
+	{
+		HLConSelectItem(line + 4);
+		return;
+	}
+
+	if (!StrICompare(line, "use"))
+	{
+		HLConPrint("use <classname>, e.g. use weapon_shotgun");
+		return;
+	}
+
+	if (!StrNICompare(line, "weapon_", 7))
+	{
+		HLConSelectItem(line);
+		return;
+	}
+
+	if (!StrICompare(line, "lastinv"))
+	{
+		HLConLastInv;
+		return;
+	}
+
+	if (!StrICompare(line, "fullupdate"))
+	{
+		if (hl_udp_ready && !hl_udp_server)
+			HLNetClientSendStringCmd(line);
+		else
+			HLConPrint("fullupdate: the hud reads live state, nothing to resend");
+		return;
+	}
+
+	if (!StrICompare(line, "closemenus"))
+		return;
+
+	if (!StrICompare(line, "save"))
+	{
+		if (hl_con_save_ok)
+			HLConPrint("saved");
+		else
+			HLConPrint("save failed");
+		hl_con_want_save = TRUE;
+		return;
+	}
+
+	if (!StrICompare(line, "load"))
+	{
+		hl_con_want_load = TRUE;
+		return;
+	}
+
+	if (!StrICompare(line, "snapshot") || !StrICompare(line, "screenshot"))
+	{
+		HLConPrint("snapshot: no image writer, nothing is captured");
+		return;
+	}
+
+	if (!StrICompare(line, "pause"))
+	{
+		if (hl_net_active)
+		{
+			HLConPrint("pause: not pausable with the network up");
+			return;
+		}
+
+		hl_paused = !hl_paused;
+
+		if (hl_paused)
+			HLConPrint("paused");
+		else
+			HLConPrint("unpaused");
+		return;
+	}
+
+	if (!StrICompare(line, "status"))
+	{
+		HLConStatus;
+		return;
+	}
+
+	if (!StrICompare(line, "version"))
+	{
+		HLConPrint("HL1 shareware data, engine written for ZealOS");
+		return;
+	}
+
+	if (!StrICompare(line, "quit"))
+	{
+		hl_con_want_quit = TRUE;
+		return;
+	}
+
+	if (!StrNICompare(line, "bind ", 5))
+	{
+		HLCmdBind(line + 5);
+		return;
+	}
+
+	if (!StrICompare(line, "bind"))
+	{
+		HLCmdBindList;
+		return;
+	}
+
+	if (!StrNICompare(line, "unbindall", 9))
+	{
+		HLCmdUnbindAll;
+		return;
+	}
+
+	if (!StrNICompare(line, "unbind ", 7))
+	{
+		HLCmdUnbind(line + 7);
+		return;
+	}
+
+	if (!StrNICompare(line, "echo ", 5))
+	{
+		HLConPrint(line + 5);
+		return;
+	}
+
+	if (!StrICompare(line, "echo"))
+	{
+		HLConPrint("");
+		return;
+	}
+
+	if (!StrICompare(line, "cvarlist"))
+	{
+		HLCmdCvarList;
+		return;
+	}
+
+	if (!StrNICompare(line, "alias ", 6))
+	{
+		HLCmdAlias(line + 6);
+		return;
+	}
+
+	if (!StrICompare(line, "alias"))
+	{
+		HLCmdAliasList;
+		return;
+	}
+
+	if (!StrNICompare(line, "unalias ", 8))
+	{
+		HLCmdUnalias(line + 8);
+		return;
+	}
+
+	if (!StrICompare(line, "wait"))
+		return;
+
+	if (!StrNICompare(line, "exec ", 5))
+	{
+		fi = HLConSkipSpace(line, 5);
+		HLConToken(fline, line, fi, 128);
+
+		fsize = 0;
+		raw   = HLFileLoad(fline, &fsize);
+
+		if (!raw && FileFind(fline))
+			raw = FileRead(fline, &fsize);
+
+		if (!raw || fsize <= 0)
+		{
+			if (raw)
+				Free(raw);
+			StrPrint(msg, "couldn't exec %s", fline);
+			HLConPrint(msg);
+			return;
+		}
+
+		StrPrint(msg, "execing %s", fline);
+		HLConPrint(msg);
+
+		fi = 0;
+		while (fi < fsize)
+		{
+			fn = 0;
+			while (fi < fsize && raw[fi] != '\n' && raw[fi] != '\r' && fn < 127)
+			{
+				fline[fn] = raw[fi];
+				fn++;
+				fi++;
+			}
+			fline[fn] = 0;
+
+			while (fi < fsize && raw[fi] != '\n' && raw[fi] != '\r')
+				fi++;
+			while (fi < fsize && (raw[fi] == '\n' || raw[fi] == '\r'))
+				fi++;
+
+			for (an = 0; an < fn - 1; an++)
+			{
+				if (fline[an] == '/' && fline[an + 1] == '/')
+				{
+					fline[an] = 0;
+					fn = an;
+					break;
+				}
+			}
+			while (fn > 0 && (fline[fn - 1] == ' ' || fline[fn - 1] == '\t'))
+			{
+				fn--;
+				fline[fn] = 0;
+			}
+
+			an = 0;
+			while (fline[an] == ' ' || fline[an] == '\t')
+				an++;
+
+			if (fline[an])
+				HLConExec(fline + an, FALSE);
+		}
+
+		Free(raw);
+		return;
+	}
+
+	if (!StrICompare(line, "help"))
+	{
+		HLConPrint("map <n>  changelevel <n>  restart  save  load");
+		HLConPrint("god  notarget  noclip  fly  kill");
+		HLConPrint("give <classname>  drop [classname]  use <classname>");
+		HLConPrint("weapon_<name>  lastinv  fov [n]  fullupdate");
+		HLConPrint("impulse <n>: 100 light, 101 all, 103 ai, 104 globals, 106 name, 203 remove");
+		HLConPrint("say <text>  say_team <text>  tell <name> <text>");
+		HLConPrint("bind <key> <action>  unbind <key>  unbindall");
+		HLConPrint("alias <n> <text>  unalias <n>  exec <file>");
+		HLConPrint("echo <text>  cvarlist  set <name> <v>  wait");
+		HLConPrint("connect <ip>  disconnect  host  slist  netstat  qip <ip>");
+		HLConPrint("playdemo <n>  record <n>  stop  demos  stopdemo  music <n|stop>");
+		HLConPrint("hostname [name]  color <t> <b>  status  version  quit");
+		return;
+	}
+
+	HLConToken(aname, line, 0, HLALIAS_NAME);
+	aslot = HLAliasFind(aname);
+	if (aslot >= 0)
+	{
+		if (hl_alias_depth >= HLALIAS_DEPTH)
+		{
+			HLConPrint("alias recursion too deep");
+			return;
+		}
+
+		HLStrCopy(acmd, hl_alias_text + aslot * HLALIAS_TEXT, HLALIAS_TEXT);
+		hl_alias_depth++;
+
+		ai = 0;
+		while (acmd[ai])
+		{
+			an = 0;
+			while (acmd[ai] && acmd[ai] != ';' && an < HLALIAS_TEXT - 1)
+			{
+				fline[an] = acmd[ai];
+				an++;
+				ai++;
+			}
+			fline[an] = 0;
+
+			while (acmd[ai] == ';')
+				ai++;
+
+			while (an > 0 && (fline[an - 1] == ' ' || fline[an - 1] == '\t'))
+			{
+				an--;
+				fline[an] = 0;
+			}
+
+			fn = 0;
+			while (fline[fn] == ' ' || fline[fn] == '\t')
+				fn++;
+
+			if (fline[fn])
+				HLConExec(fline + fn, FALSE);
+		}
+
+		hl_alias_depth--;
+		return;
+	}
+
+	if (HLConCvarCommand(line))
+		return;
+
+	HLConPrint("unknown command");
+}
+
+U0 HLMsgModeBegin(Bool team)
+{
+	hl_msg_mode  = TRUE;
+	hl_msg_team  = team;
+	hl_chat_buf[0] = 0;
+	hl_chat_len    = 0;
+}
+
+U0 HLMsgModeCancel()
+{
+	hl_msg_mode  = FALSE;
+	hl_msg_team  = FALSE;
+	hl_chat_buf[0] = 0;
+	hl_chat_len    = 0;
+}
+
+
+Bool HLBindWpnKey(I64 k)
+{
+	if (!hl_in_wpn_direct)
+		return FALSE;
+
+	if (k == (Char2ScanCode('1') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('2') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('3') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('4') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('5') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('q') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('z') & 0x7F))	return TRUE;
+	if (k == (Char2ScanCode('r') & 0x7F))	return TRUE;
+
+	return FALSE;
+}
+
+U0 HLBindRunOne(U8 *cmd, I64 k)
+{
+	if (!cmd[0])
+		return;
+
+	if (!StrNICompare(cmd, "slot", 4) && cmd[4] >= '1' && cmd[4] <= '5' &&
+		!cmd[5])
+	{
+		hl_in_slot_want = cmd[4] - '0';
+		return;
+	}
+
+	if (!StrICompare(cmd, "invnext"))
+	{
+		hl_in_cycle_want = 1;
+		return;
+	}
+
+	if (!StrICompare(cmd, "invprev"))
+	{
+		hl_in_cycle_want = -1;
+		return;
+	}
+
+	if (!StrICompare(cmd, "lastinv"))
+	{
+		if (!HLBindWpnKey(k))
+			hl_in_lastinv_want = TRUE;
+		return;
+	}
+
+	if (!StrICompare(cmd, "centerview") ||
+		!StrICompare(cmd, "force_centerview"))
+	{
+		hl_in_centerview_want = TRUE;
+		return;
+	}
+
+	if (!StrICompare(cmd, "messagemode"))
+	{
+		hl_in_msg_want = 1;
+		return;
+	}
+
+	if (!StrICompare(cmd, "messagemode2"))
+	{
+		hl_in_msg_want = 2;
+		return;
+	}
+
+	if (!StrICompare(cmd, "toggleconsole"))
+		return;
+
+	if (!StrICompare(cmd, "escape") || !StrICompare(cmd, "cancelselect") ||
+		!StrICompare(cmd, "closemenus"))
+		return;
+
+	if (!StrNICompare(cmd, "save ", 5))
+	{
+		hl_con_want_save = TRUE;
+		return;
+	}
+
+	if (!StrNICompare(cmd, "load ", 5))
+	{
+		hl_con_want_load = TRUE;
+		return;
+	}
+
+	if (!StrNICompare(cmd, "quit", 4) && (!cmd[4] || cmd[4] == ' '))
+	{
+		hl_con_want_quit = TRUE;
+		return;
+	}
+
+	if (!StrICompare(cmd, "impulse 201"))
+	{
+		if (!hl_in_spray_said)
+		{
+			hl_in_spray_said = TRUE;
+			HLConPrint("impulse 201: no decal layer, spray does nothing");
+		}
+		return;
+	}
+
+	HLConExec(cmd, FALSE);
+}
+
+U0 HLBindExecPress(U8 *bind, I64 k)
+{
+	U8	piece[HLKEY_CMD_MAX];
+	I64	i = 0;
+	I64	n;
+	I64	s;
+
+	while (bind[i])
+	{
+		n = 0;
+		while (bind[i] && bind[i] != ';' && n < HLKEY_CMD_MAX - 1)
+		{
+			piece[n] = bind[i];
+			n++;
+			i++;
+		}
+		piece[n] = 0;
+
+		while (bind[i] && bind[i] != ';')
+			i++;
+		if (bind[i] == ';')
+			i++;
+
+		while (n > 0 && (piece[n - 1] == ' ' || piece[n - 1] == '\t'))
+		{
+			n--;
+			piece[n] = 0;
+		}
+
+		s = 0;
+		while (piece[s] == ' ' || piece[s] == '\t')
+			s++;
+
+		HLBindRunOne(piece + s, k);
+	}
+}
+
+U0 HLBindKeyEvent(I64 k, Bool down)
+{
+	U8	*bind;
+	I64	 bit;
+
+	bind = HLBindGet(k);
+	if (!bind[0])
+		return;
+
+	if (bind[0] == '+')
+	{
+		bit = HLInBitOf(bind + 1);
+		if (bit < 0)
+			return;
+
+		if (down)
+		{
+			hl_in_count[bit]++;
+
+			if (bit == HLIN_VOICE && !hl_in_voice_said)
+			{
+				hl_in_voice_said = TRUE;
+				HLConPrint("+voicerecord: no voice capture in this port");
+			}
+		}
+		else
+		{
+			hl_in_count[bit]--;
+			if (hl_in_count[bit] < 0)
+				hl_in_count[bit] = 0;
+		}
+
+		HLInPublish;
+		return;
+	}
+
+	if (down)
+		HLBindExecPress(bind, k);
+}
+
+U0 HLBindReleaseAll()
+{
+	I64 k;
+
+	for (k = 1; k < HLKEY_MAX; k++)
+		hl_key_held[k] = FALSE;
+
+	HLInClearAll;
+}
+
+U0 HLBindFrame(Bool m1, Bool m2, Bool m3, I64 wheel, Bool live)
+{
+	I64	 k;
+	Bool now;
+
+	if (!live)
+	{
+		HLBindReleaseAll;
+		return;
+	}
+
+	for (k = 1; k < HLKEY_MAX; k++)
+	{
+		if (!hl_key_bind[k * HLKEY_CMD_MAX])
+			goto qbf_next;
+
+		if (k < 0x100)
+			now = ToBool(Bt(kbd.down_bitmap, k));
+		else if (k == HLKEY_MOUSE1)
+			now = m1;
+		else if (k == HLKEY_MOUSE2)
+			now = m2;
+		else if (k == HLKEY_MOUSE3)
+			now = m3;
+		else if (k == HLKEY_MWHEELUP)
+			now = ToBool(wheel > 0);
+		else if (k == HLKEY_MWHEELDOWN)
+			now = ToBool(wheel < 0);
+		else
+			now = FALSE;
+
+		if (now && !hl_key_held[k])
+		{
+			hl_key_held[k] = TRUE;
+			HLBindKeyEvent(k, TRUE);
+		}
+		else if (!now && hl_key_held[k])
+		{
+			hl_key_held[k] = FALSE;
+			HLBindKeyEvent(k, FALSE);
+		}
+
+		if (now && (k == HLKEY_MWHEELUP || k == HLKEY_MWHEELDOWN))
+		{
+			hl_key_held[k] = FALSE;
+			HLBindKeyEvent(k, FALSE);
+		}
+
+qbf_next:
+	}
+}
+
+U0 HLMsgModeInput()
+{
+	I64	 i;
+	I64	 sc;
+	U8	 ch;
+	U8	 cmd[48];
+
+	if (!hl_msg_mode)
+		return;
+
+	if (HLConKeyEdge(SC_ESC))
+	{
+		HLMsgModeCancel;
+		return;
+	}
+
+	if (HLConKeyEdge(SC_ENTER))
+	{
+		if (hl_chat_len > 0)
+		{
+			if (hl_msg_team)
+				StrPrint(cmd, "say_team %s", hl_chat_buf);
+			else
+				StrPrint(cmd, "say %s", hl_chat_buf);
+
+			HLConExec(cmd, FALSE);
+		}
+		HLMsgModeCancel;
+		return;
+	}
+
+	if (HLConKeyEdge(SC_BACKSPACE) && hl_chat_len > 0)
+	{
+		hl_chat_len--;
+		hl_chat_buf[hl_chat_len] = 0;
+		return;
+	}
+
+	i = 0;
+	while (hl_con_charset[i])
+	{
+		ch = hl_con_charset[i];
+		sc = Char2ScanCode(ch);
+		if (HLConKeyEdge(sc) && hl_chat_len < 31)
+		{
+			hl_chat_buf[hl_chat_len] = ch;
+			hl_chat_len++;
+			hl_chat_buf[hl_chat_len] = 0;
+		}
+		i++;
+	}
+
+	if (HLConKeyEdge(Char2ScanCode('-')) && hl_chat_len < 31)
+	{
+		if (Bt(kbd.down_bitmap, SC_SHIFT))
+			hl_chat_buf[hl_chat_len] = '_';
+		else
+			hl_chat_buf[hl_chat_len] = '-';
+		hl_chat_len++;
+		hl_chat_buf[hl_chat_len] = 0;
+	}
+}
+
+Bool HLConStuffAllowed(U8 *cmd)
+{
+	if (!StrNICompare(cmd, "quit", 4))
+		return FALSE;
+	if (!StrNICompare(cmd, "game", 4))
+		return FALSE;
+	if (!StrNICompare(cmd, "exec", 4))
+		return FALSE;
+	if (!StrNICompare(cmd, "diskwrite", 9))
+		return FALSE;
+
+	return TRUE;
+}
+
+U0 HLConDrainStuff()
+{
+	U8	cmd[128];
+	I64	n = 0;
+	I64	i;
+	U8	c;
+
+	if (hl_bi_stuff_len < 1)
+		return;
+
+	for (i = 0; i < hl_bi_stuff_len; i++)
+	{
+		c = hl_bi_stuff_buf[i];
+
+		if (c == '\n' || c == ';' || n >= 126)
+		{
+			cmd[n] = 0;
+			if (n > 0)
+			{
+				if (HLConStuffAllowed(cmd))
+					HLConExec(cmd, FALSE);
+				else
+					HLConPrint("refused a stuffed command");
+			}
+			n = 0;
+		}
+
+		if (c != '\n' && c != ';')
+		{
+			cmd[n] = c;
+			n++;
+		}
+	}
+
+	if (n > 0)
+	{
+		cmd[n] = 0;
+		if (HLConStuffAllowed(cmd))
+			HLConExec(cmd, FALSE);
+		else
+			HLConPrint("refused a stuffed command");
+	}
+
+	hl_bi_stuff_len    = 0;
+	hl_bi_stuff_buf[0] = 0;
+}
+
+U0 HLConInput()
+{
+	I64 i;
+	I64 sc;
+	I64 ch;
+
+	i = 0;
+	while (hl_con_charset[i])
+	{
+		ch = hl_con_charset[i];
+		sc = Char2ScanCode(ch);
+
+		if (HLConKeyEdge(sc) && hl_con_input_len < HLCON_INPUT_MAX)
+		{
+			hl_con_input[hl_con_input_len] = ch;
+			hl_con_input_len++;
+			hl_con_input[hl_con_input_len] = 0;
+		}
+
+		i++;
+	}
+
+	if (HLConKeyEdge(Char2ScanCode('-')) && hl_con_input_len < HLCON_INPUT_MAX)
+	{
+		if (Bt(kbd.down_bitmap, SC_SHIFT))
+			hl_con_input[hl_con_input_len] = '_';
+		else
+			hl_con_input[hl_con_input_len] = '-';
+
+		hl_con_input_len++;
+		hl_con_input[hl_con_input_len] = 0;
+	}
+
+	if (HLConKeyEdge(SC_BACKSPACE) && hl_con_input_len > 0)
+	{
+		hl_con_input_len--;
+		hl_con_input[hl_con_input_len] = 0;
+	}
+
+	if (HLConKeyEdge(SC_CURSOR_UP))
+	{
+		I64 probe = hl_con_hist_line;
+		I64 tries;
+
+		for (tries = 0; tries < HLCON_HISTORY; tries++)
+		{
+			probe--;
+			if (probe < 0)
+				probe = HLCON_HISTORY - 1;
+
+			if (probe == hl_con_edit_line)
+				break;
+
+			if (hl_con_hist[probe * (HLCON_INPUT_MAX + 2)])
+			{
+				hl_con_hist_line = probe;
+				HLConHistoryRecall(probe);
+				break;
+			}
+		}
+	}
+
+	if (HLConKeyEdge(SC_CURSOR_DOWN))
+	{
+		if (hl_con_hist_line == hl_con_edit_line)
+		{
+			hl_con_input[0]  = 0;
+			hl_con_input_len = 0;
+		}
+		else
+		{
+			hl_con_hist_line++;
+			if (hl_con_hist_line >= HLCON_HISTORY)
+				hl_con_hist_line = 0;
+
+			if (hl_con_hist_line == hl_con_edit_line)
+			{
+				hl_con_input[0]  = 0;
+				hl_con_input_len = 0;
+			}
+			else
+				HLConHistoryRecall(hl_con_hist_line);
+		}
+	}
+
+	if (HLConKeyEdge(SC_ENTER))
+	{
+		if (hl_con_input_len > 0)
+		{
+			HLStrCopy(&hl_con_hist[hl_con_edit_line * (HLCON_INPUT_MAX + 2)],
+				hl_con_input, HLCON_INPUT_MAX + 1);
+
+			hl_con_edit_line++;
+			if (hl_con_edit_line >= HLCON_HISTORY)
+				hl_con_edit_line = 0;
+
+			hl_con_hist[hl_con_edit_line * (HLCON_INPUT_MAX + 2)] = 0;
+			hl_con_hist_line = hl_con_edit_line;
+		}
+
+		HLConExec(hl_con_input);
+		hl_con_input[0]  = 0;
+		hl_con_input_len = 0;
+	}
+}
+
+U0 HLConDrawNotify(CHLCanvas *c)
+{
+	I64	 i;
+	I64	 line;
+	I64	 y = 0;
+	I64	 x;
+	U8	*row;
+	U8	 prompt[16];
+
+	HLConFlashlightFrame;
+	HLConTrackLastItem;
+
+	hl_hud_flash_on  = hl_flash_on;
+	hl_hud_flash_bat = ToF64(hl_flash_battery) / 100.0;
+
+	if (!hl_con_ready)
+		return;
+
+	for (i = HLCON_NOTIFY_LINES; i > 0; i--)
+	{
+		line = hl_con_line - i;
+		if (line < 0)
+			goto qcn_next;
+
+		if (tS - hl_con_time[line % HLCON_LINES] > HLCON_NOTIFY_TIME)
+			goto qcn_next;
+
+		row = hl_con_text + (line % HLCON_LINES) * HLCON_WIDTH;
+		if (row[0])
+		{
+			HLStrDraw(c, 8, y, row);
+			y += HLCHAR_H;
+		}
+
+qcn_next:
+	}
+
+	if (hl_msg_mode)
+	{
+		if (hl_msg_team)
+			StrPrint(prompt, "say_team:");
+		else
+			StrPrint(prompt, "say:");
+		HLStrDraw(c, 8, y, prompt);
+		x = 8 + StrLen(prompt) * HLCHAR_W;
+		HLStrDraw(c, x, y, hl_chat_buf);
+		if ((ToI64(tS * 4.0) & 1) == 0)
+			HLStrDraw(c, x + hl_chat_len * HLCHAR_W, y, "_");
+	}
+}
+
+U0 HLConDraw(CHLCanvas *c)
+{
+	I64	 i;
+	I64	 line;
+	I64	 y;
+	I64	 con_h;
+	U8	*row;
+
+	HLConFlashlightFrame;
+	HLConTrackLastItem;
+
+	hl_hud_flash_on  = hl_flash_on;
+	hl_hud_flash_bat = ToF64(hl_flash_battery) / 100.0;
+
+	con_h = c->height / 2;
+	if (con_h < HLCON_HEIGHT)
+		con_h = HLCON_HEIGHT;
+
+	if (hl_pic_conback.pixels)
+		HLPicDrawFillPart(c, &hl_pic_conback, con_h);
+
+	y = 4;
+	for (i = HLCON_LINES; i > 0; i--)
+	{
+		line = hl_con_line - i;
+		if (line < 0)
+			goto qc_next;
+
+		row = hl_con_text + (line % HLCON_LINES) * HLCON_WIDTH;
+		if (row[0] && y + HLCHAR_H < con_h)
+		{
+			HLStrDraw(c, 8, y, row);
+			y += HLCHAR_H;
+		}
+
+qc_next:
+	}
+
+	HLStrDraw(c, 8, con_h - HLCHAR_H - 2, "]");
+	HLStrDraw(c, 8 + HLCHAR_W, con_h - HLCHAR_H - 2, hl_con_input);
+
+	if (ToI64(tS * 3.0) & 1)
+		HLStrDraw(c, 8 + HLCHAR_W * (hl_con_input_len + 1),
+			con_h - HLCHAR_H - 2, "_");
+}
+
+U0 HLMenuPlaque(CHLCanvas *c, CHLPic *title)
+{
+	I64 mx = HLMenuXOfs(c);
+
+	HLMenuBackdrop(c);
+
+	if (hl_pic_qplaque.pixels)
+		HLPicDraw(c, &hl_pic_qplaque, mx + 16, 4);
+
+	if (title && title->pixels)
+		HLPicDraw(c, title, mx + (HLMENU_VW - title->width) / 2, 4);
+}
+
+U0 HLMenuRowsText(CHLCanvas *c, I64 mx, I64 sel, I64 count, U8 *labels)
+{
+	I64 i;
+	I64 y;
+
+	for (i = 0; i < count; i++)
+	{
+		y = HLMENU_Y + i * HLMENU_ROW_H;
+
+		if (i == sel)
+			HLStrDraw(c, mx + 72, y, &labels[i * 24]);
+		else
+			HLStrDrawAlt(c, mx + 72, y, &labels[i * 24]);
+	}
+}
+
+U8 *HLMenuItemLabel(I64 item)
+{
+	if (item == HLITEM_RESUME)	return "Resume game";
+	if (item == HLITEM_PLAYERS)	return "Player list";
+	if (item == HLITEM_NEWGAME)	return "New game";
+	if (item == HLITEM_SAVE)		return "Save game";
+	if (item == HLITEM_LOAD)		return "Load game";
+	if (item == HLITEM_FIND)		return "Find servers";
+	if (item == HLITEM_CREATE)	return "Create server";
+	if (item == HLITEM_OPTIONS)	return "Options";
+	if (item == HLITEM_DISCONNECT) return "Disconnect";
+	if (item == HLITEM_LEAVE)	return "Leave game";
+	if (item == HLITEM_QUIT)		return "Quit";
+
+	return NULL;
+}
+
+U8 *HLMenuItemHint(I64 item)
+{
+	if (item == HLITEM_NEWGAME)	return "Start a new single player game.";
+	if (item == HLITEM_LOAD)		return "Load a previously saved game.";
+	if (item == HLITEM_FIND)		return "Search for online multiplayer servers.";
+	if (item == HLITEM_CREATE)
+		return "Host an online multiplayer server for others to join.";
+	if (item == HLITEM_OPTIONS)
+		return "Change game settings, configure controls.";
+	if (item == HLITEM_QUIT)		return "Quit playing Half-Life.";
+
+	return NULL;
+}
+
+Bool HLMenuInMulti()
+{
+	if (!hl_menu_ingame)
+		return FALSE;
+
+	if (hl_sv_maxclients > 1)
+		return TRUE;
+
+	return ToBool(hl_udp_peer_ip != 0);
+}
+
+I64 HLMenuItems(I64 *out)
+{
+	Bool multi  = HLMenuInMulti();
+	Bool single = FALSE;
+	I64  n      = 0;
+
+	if (hl_menu_ingame && !multi)
+		single = TRUE;
+
+	//key 1: OnlyInGame
+	if (hl_menu_ingame)
+	{
+		out[n] = HLITEM_RESUME;
+		n++;
+	}
+
+	//key 5: OnlyInGame, notsingle
+	if (hl_menu_ingame && !single)
+	{
+		out[n] = HLITEM_PLAYERS;
+		n++;
+	}
+
+	//key 7: notmulti, notsingle - offered only outside a game
+	if (!hl_menu_ingame)
+	{
+		out[n] = HLITEM_NEWGAME;
+		n++;
+	}
+
+	//key 8: OnlyInGame, notmulti
+	if (hl_menu_ingame && !multi)
+	{
+		out[n] = HLITEM_SAVE;
+		n++;
+	}
+
+	//key 9: notmulti
+	if (!multi)
+	{
+		out[n] = HLITEM_LOAD;
+		n++;
+	}
+
+	//keys 14 and 15: notsingle
+	if (!single)
+	{
+		out[n] = HLITEM_FIND;
+		n++;
+		out[n] = HLITEM_CREATE;
+		n++;
+	}
+
+	//key 18: always
+	out[n] = HLITEM_OPTIONS;
+	n++;
+
+	//key 19: OnlyInGame, notsingle
+	if (hl_menu_ingame && !single)
+	{
+		out[n] = HLITEM_DISCONNECT;
+		n++;
+	}
+
+	if (hl_menu_ingame && !multi)
+	{
+		out[n] = HLITEM_LEAVE;
+		n++;
+	}
+
+	//key 21: always
+	out[n] = HLITEM_QUIT;
+	n++;
+
+	return n;
+}
+
+U0 HLMenuCursor(CHLCanvas *c, I64 x, I64 y)
+{//the main menu's six-frame 10Hz cursor
+	I64 frame = ToI64(tS * 10.0) % 6;
+
+	if (hl_pic_cursor[frame].pixels)
+		HLPicDraw(c, &hl_pic_cursor[frame], x, y);
+}
+
+U0 HLMenuBar(CHLCanvas *c, I64 x, I64 y, I64 w, I64 h, F64 frac)
+{
+	I64 px;
+	I64 py;
+	I64 fill;
+
+	if (w < 2 || h < 2)
+		return;
+
+	if (frac < 0.0)	frac = 0.0;
+	if (frac > 1.0)	frac = 1.0;
+
+	fill = ToI64(ToF64(w - 2) * frac);
+
+	for (py = y; py < y + h; py++)
+	{
+		if (py < 0 || py >= c->height)
+			goto qmb_next_row;
+
+		for (px = x; px < x + w; px++)
+		{
+			if (px < 0 || px >= c->width)
+				goto qmb_next_col;
+
+			if (py == y || py == y + h - 1 || px == x || px == x + w - 1)
+				c->pixels[py * c->width + px] = HLMENU_C_HINT;
+			else if (px - x - 1 < fill)
+				c->pixels[py * c->width + px] = HLMENU_C_ITEM;
+
+qmb_next_col:
+		}
+
+qmb_next_row:
+	}
+}
+
+
+I64 HLScanFind(U8 *table, I64 count, I64 stride, U8 *name)
+{
+	I64 i;
+
+	for (i = 0; i < count; i++)
+	{
+		if (!StrICompare(&table[i * stride], name))
+			return i;
+	}
+
+	return -1;
+}
+
+U0 HLScanAdd(U8 *table, I64 *_count, I64 max, I64 stride, U8 *name)
+{
+	I64 n = *_count;
+
+	if (!name || !name[0])
+		return;
+	if (n >= max)
+		return;
+	if (HLScanFind(table, n, stride, name) >= 0)
+		return;
+
+	HLStrCopy(&table[n * stride], name, stride);
+	*_count = n + 1;
+}
+
+U0 HLScanStripExt(U8 *name)
+{//Truncate at the last dot. "gordon.mdl" is listed as "gordon".
+	I64 i = StrLen(name) - 1;
+
+	while (i > 0)
+	{
+		if (name[i] == '.')
+		{
+			name[i] = 0;
+			return;
+		}
+
+		i--;
+	}
+}
+
+U0 HLScanFoldLower(U8 *s)
+{
+	I64 i = 0;
+
+	while (s[i])
+	{
+		if ('A' <= s[i] <= 'Z')
+			s[i] += 'a' - 'A';
+
+		i++;
+	}
+}
+
+U0 HLScanSort(U8 *table, I64 count, I64 stride)
+{
+	U8	key[HLMAP_NAME_MAX];
+	I64	i;
+	I64	j;
+
+	for (i = 1; i < count; i++)
+	{
+		HLStrCopy(key, &table[i * stride], stride);
+
+		j = i - 1;
+		while (j >= 0 && StrICompare(&table[j * stride], key) > 0)
+		{
+			HLStrCopy(&table[(j + 1) * stride], &table[j * stride], stride);
+			j--;
+		}
+
+		HLStrCopy(&table[(j + 1) * stride], key, stride);
+	}
+}
+
+U0 HLScanDir(U8 *table, I64 *_count, I64 max, I64 stride, U8 *sub, U8 *mask,
+	I64 flags)
+{
+	CDirEntry	*de;
+	CDirEntry	*de1;
+	U8			 path[192];
+	U8			 folded[80];
+	U8			 name[HLMAP_NAME_MAX];
+	I64			 dir;
+	I64			 variant;
+
+	for (dir = 0; dir < 2; dir++)
+	{
+		if (!dir && !hl_pak_game_dir[0])
+			goto qsd_next_dir;
+
+		for (variant = 0; variant < 2; variant++)
+		{
+			if (!variant)
+				HLFileCaseFold(sub, folded, FALSE);
+			else
+				HLFileCaseFold(sub, folded, TRUE);
+
+			if (!dir)
+				StrPrint(path, "%s/%s/%s/%s", hl_game_root, hl_pak_game_dir,
+					folded, mask);
+			else
+				StrPrint(path, "%s/valve/%s/%s", hl_game_root, folded, mask);
+
+			de1 = NULL;
+
+			try
+			{
+				de1 = FilesFind(path, flags);
+			}
+			catch
+				Fs->catch_except = TRUE;
+
+			if (!de1)
+				goto qsd_next_variant;
+
+			de = de1;
+			while (de)
+			{
+				HLRdName(de->name, name, HLMAP_NAME_MAX);
+				HLScanStripExt(name);
+				HLScanFoldLower(name);
+				HLScanAdd(table, _count, max, stride, name);
+				de = de->next;
+			}
+
+			DirEntryDel(de1);
+
+qsd_next_variant:
+		}
+
+qsd_next_dir:
+	}
+}
+
+U0 HLScanPakMaps()
+{
+	CHLPak		*pak;
+	CHLPakEntry	*e;
+	U8			 name[HLMAP_NAME_MAX];
+	I64			 p;
+	I64			 i;
+	I64			 n;
+
+	for (p = 0; p < hl_pak_count; p++)
+	{
+		pak = hl_paks[p];
+
+		if (!pak)
+			goto qspm_next_pak;
+
+		for (i = 0; i < pak->num_files; i++)
+		{
+			e = &pak->files[i];
+
+			if (StrNICompare(e->name, "maps/", 5))
+				goto qspm_next_file;
+
+			n = StrLen(e->name);
+
+			//"maps/x.bsp" is the shortest name that can match
+			if (n < 10 || StrICompare(e->name + n - 4, ".bsp"))
+				goto qspm_next_file;
+
+			HLRdName(e->name + 5, name, HLMAP_NAME_MAX);
+			HLScanStripExt(name);
+			HLScanFoldLower(name);
+			HLScanAdd(hl_menu_maps, &hl_map_count, HLMAP_MAX, HLMAP_NAME_MAX,
+				name);
+
+qspm_next_file:
+		}
+
+qspm_next_pak:
+	}
+}
+
+U0 HLMapScan(Bool force = FALSE)
+{
+	if (hl_map_scanned && !force)
+		return;
+
+	hl_map_count   = 0;
+	hl_map_scanned = TRUE;
+
+	HLScanDir(hl_menu_maps, &hl_map_count, HLMAP_MAX, HLMAP_NAME_MAX,
+		"maps", "*.bsp", FUF_JUST_FILES);
+	HLScanPakMaps;
+	HLScanSort(hl_menu_maps, hl_map_count, HLMAP_NAME_MAX);
+
+	if (hl_cs_map >= hl_map_count)
+		hl_cs_map = 0;
+}
+
+U0 HLModelScan(Bool force = FALSE)
+{
+	U8	probe[96];
+	I64	i;
+	I64	kept;
+
+	if (hl_pm_scanned && !force)
+		return;
+
+	hl_pm_count   = 0;
+	hl_pm_scanned = TRUE;
+
+	HLScanDir(hl_pm_name, &hl_pm_count, HLPM_MAX, HLPM_NAME_MAX,
+		"models/player", "*", FUF_JUST_DIRS);
+
+	kept = 0;
+
+	for (i = 0; i < hl_pm_count; i++)
+	{
+		StrPrint(probe, "models/player/%s/%s.mdl", &hl_pm_name[i * HLPM_NAME_MAX],
+			&hl_pm_name[i * HLPM_NAME_MAX]);
+
+		if (!HLFileExists(probe))
+			goto qms_next;
+
+		if (kept != i)
+			HLStrCopy(&hl_pm_name[kept * HLPM_NAME_MAX],
+				&hl_pm_name[i * HLPM_NAME_MAX], HLPM_NAME_MAX);
+
+		kept++;
+
+qms_next:
+	}
+
+	hl_pm_count = kept;
+	HLScanSort(hl_pm_name, hl_pm_count, HLPM_NAME_MAX);
+}
+
+U0 HLLogoScan(Bool force = FALSE)
+{
+	if (hl_logo_scanned && !force)
+		return;
+
+	hl_logo_count   = 0;
+	hl_logo_scanned = TRUE;
+
+	HLScanDir(hl_logo_name, &hl_logo_count, HLLOGO_MAX, HLLOGO_NAME_MAX,
+		"logos", "*.bmp", FUF_JUST_FILES);
+	HLScanSort(hl_logo_name, hl_logo_count, HLLOGO_NAME_MAX);
+
+	hl_logo_sel = HLScanFind(hl_logo_name, hl_logo_count, HLLOGO_NAME_MAX,
+		hl_setup_logo);
+}
+
+I64 HLModelIndex()
+{
+	return HLScanFind(hl_pm_name, hl_pm_count, HLPM_NAME_MAX, hl_setup_model);
+}
+
+U8 *HLOptTabLabel(I64 tab)
+{
+	if (tab == HLTAB_MULTI)		return "Multiplayer";
+	if (tab == HLTAB_KEYBOARD)	return "Keyboard";
+	if (tab == HLTAB_AIM)		return "Aim";
+	if (tab == HLTAB_AUDIO)		return "Audio";
+	if (tab == HLTAB_VIDEO)		return "Video";
+
+	return NULL;
+}
+
+I64 HLOptRows(I64 tab)
+{//Including the strip at row 0 and Close at the last row.
+	if (tab == HLTAB_MULTI)		return HLMUL_CLOSE + 1;
+	if (tab == HLTAB_KEYBOARD)	return HLKB_CLOSE + 1;
+	if (tab == HLTAB_AIM)		return HLAIM_CLOSE + 1;
+	if (tab == HLTAB_AUDIO)		return HLAUD_CLOSE + 1;
+
+	return HLVID_CLOSE + 1;
+}
+
+U0 HLOptRowLabel(CHLCanvas *c, I64 x, I64 y, I64 row, U8 *label)
+{
+	if (row == hl_opt_row)
+		HLMenuStrColor(c, x, y, label, HLMENU_C_SEL);
+	else
+		HLMenuStrColor(c, x, y, label, HLMENU_C_ITEM);
+}
+
+U0 HLOptDraw(CHLCanvas *c)
+{
+	U8	 line[80];
+	U8	*label;
+	I64	 x;
+	I64	 y;
+	I64	 w;
+	I64	 h;
+	I64	 col;
+	I64	 val;
+	I64	 pitch;
+	I64	 tx;
+	I64	 bw;
+	I64	 bh;
+	I64	 i;
+	I64	 rows;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Options");
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+	val   = x + HLDlgX(c, 260);
+	bw    = HLDlgX(c, 180);
+	bh    = pitch - 2;
+
+	if (bh < 4)
+		bh = 4;
+
+	rows = HLOptRows(hl_opt_tab);
+
+	if (hl_opt_row < 0)			hl_opt_row = 0;
+	if (hl_opt_row >= rows)		hl_opt_row = rows - 1;
+
+	tx = col;
+
+	for (i = 0; i < HLTAB_COUNT; i++)
+	{
+		label = HLOptTabLabel(i);
+
+		if (!label)
+			goto qod_next_tab;
+
+		if (i == hl_opt_tab && hl_opt_row == HLOPT_STRIP)
+			StrPrint(line, "[%s]", label);
+		else
+			StrPrint(line, " %s ", label);
+
+		if (i == hl_opt_tab)
+			HLMenuStrColor(c, tx, y + HLDlgY(c, 34), line, HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, tx, y + HLDlgY(c, 34), line, HLMENU_C_ITEM);
+
+		tx += HLFontStrWidth(line) + 6;
+
+qod_next_tab:
+	}
+
+	y = y + HLDlgY(c, 64);
+
+	if (hl_opt_tab == HLTAB_MULTI)
+	{
+		HLOptRowLabel(c, col, y + HLMUL_SETUP * pitch, HLMUL_SETUP,
+			"Player setup");
+		HLOptRowLabel(c, col, y + HLMUL_ADVANCED * pitch, HLMUL_ADVANCED,
+			"Advanced...");
+		HLOptRowLabel(c, col, y + HLMUL_CLOSE * pitch, HLMUL_CLOSE, "Close");
+
+		StrPrint(line, "%s / %s", hl_setup_name, hl_setup_model);
+		HLMenuStrColor(c, val, y + HLMUL_SETUP * pitch, line, HLMENU_C_HINT);
+	}
+	else if (hl_opt_tab == HLTAB_KEYBOARD)
+	{
+		HLOptRowLabel(c, col, y + HLKB_BINDINGS * pitch, HLKB_BINDINGS,
+			"Edit key bindings");
+		HLOptRowLabel(c, col, y + HLKB_DEFAULTS * pitch, HLKB_DEFAULTS,
+			"Use defaults");
+
+		if (HLCvarGet("cl_forwardspeed") > 200.0)
+			StrPrint(line, "Always run");
+		else
+			StrPrint(line, "Always walk");
+
+		HLOptRowLabel(c, col, y + HLKB_ALWAYSRUN * pitch, HLKB_ALWAYSRUN, line);
+		HLOptRowLabel(c, col, y + HLKB_CLOSE * pitch, HLKB_CLOSE, "Close");
+	}
+	else if (hl_opt_tab == HLTAB_AIM)
+	{
+		HLOptRowLabel(c, col, y + HLAIM_SENS * pitch, HLAIM_SENS,
+			"Aim sensitivity");
+		HLMenuBar(c, val, y + HLAIM_SENS * pitch, bw, bh,
+			(hl_opt_sensitivity - 0.02) / (0.60 - 0.02));
+
+		if (HLCvarGet("m_pitch") < 0.0)
+			StrPrint(line, "Invert mouse   on");
+		else
+			StrPrint(line, "Invert mouse   off");
+
+		HLOptRowLabel(c, col, y + HLAIM_INVERT * pitch, HLAIM_INVERT, line);
+		HLOptRowLabel(c, col, y + HLAIM_CLOSE * pitch, HLAIM_CLOSE, "Close");
+	}
+	else if (hl_opt_tab == HLTAB_AUDIO)
+	{
+		HLOptRowLabel(c, col, y + HLAUD_SFX * pitch, HLAUD_SFX,
+			"Sound effects volume");
+		HLMenuBar(c, val, y + HLAUD_SFX * pitch, bw, bh,
+			ToF64(hl_opt_volume) / 100.0);
+
+		HLOptRowLabel(c, col, y + HLAUD_MP3 * pitch, HLAUD_MP3, "MP3 volume");
+		HLMenuBar(c, val, y + HLAUD_MP3 * pitch, bw, bh, hl_music_volume);
+
+		HLOptRowLabel(c, col, y + HLAUD_CLOSE * pitch, HLAUD_CLOSE, "Close");
+	}
+	else
+	{
+		StrPrint(line, "Resolution     %dx%d",
+			hl_res_w[hl_opt_res], hl_res_h[hl_opt_res]);
+		HLOptRowLabel(c, col, y + HLVID_RES * pitch, HLVID_RES, line);
+
+		if (hl_opt_fullscreen)
+			StrPrint(line, "Windowed       off");
+		else
+			StrPrint(line, "Windowed       on");
+
+		HLOptRowLabel(c, col, y + HLVID_WINDOWED * pitch, HLVID_WINDOWED, line);
+
+		HLOptRowLabel(c, col, y + HLVID_GAMMA * pitch, HLVID_GAMMA, "Gamma");
+		HLMenuBar(c, val, y + HLVID_GAMMA * pitch, bw, bh,
+			(HLGAMMA_MAX - hl_opt_gamma) / (HLGAMMA_MAX - HLGAMMA_MIN));
+
+		if (hl_r_mtblit)
+			StrPrint(line, "Threaded blit  on");
+		else
+			StrPrint(line, "Threaded blit  off");
+
+		HLOptRowLabel(c, col, y + HLVID_MTBLIT * pitch, HLVID_MTBLIT, line);
+
+		if (!hl_hud_size)
+			StrPrint(line, "HUD size       auto");
+		else
+			StrPrint(line, "HUD size       %d", hl_hud_size);
+
+		HLOptRowLabel(c, col, y + HLVID_HUDSIZE * pitch, HLVID_HUDSIZE, line);
+
+		HLOptRowLabel(c, col, y + HLVID_CLOSE * pitch, HLVID_CLOSE, "Close");
+	}
+
+	HLMenuStrColor(c, col, y + (rows + 1) * pitch,
+		"Arrows move and adjust, Enter selects, Esc closes", HLMENU_C_HINT);
+}
+
+U0 HLOptResetDefaults()
+{
+	HLCvarSet("viewsize",		100.0);
+
+	HLCvarSet("cl_forwardspeed",	400.0);
+	HLCvarSet("cl_backspeed",	400.0);
+	HLCvarSet("m_pitch",			0.022);
+	HLCvarSet("lookspring",		0.0);
+	HLCvarSet("lookstrafe",		0.0);
+	HLCvarSet("crosshair",		1.0);
+	hl_opt_crosshair = 1;
+
+	hl_opt_sensitivity = 0.15;
+	hl_opt_volume      = 70;
+	hl_snd_master      = ToF64(hl_opt_volume) / 100.0;
+	hl_music_volume    = 0.7;
+	hl_opt_gamma       = 1.0;
+	hl_opt_gunclip     = TRUE;
+
+	HLMusicApplyVolume;
+
+	HLBindDefaults;
+	HLInClearAll;
+	HLCfgSave;
+
+	HLMenuSound(HLMSND_VALUE);
+}
+
+#define HLKEYS_TOP		34
+#define HLKEYS_PITCH		10
+#define HLKEYS_FOOT		26
+#define HLKEYS_KEY1		0.56
+#define HLKEYS_KEY2		0.79
+
+I64 hl_keys_vis = 16;
+
+I64 HLKeysRows()
+{
+	return hl_act_count + 2;
+}
+
+I64 HLKeysVisible(CHLCanvas *c)
+{
+	I64 n = (c->height - HLKEYS_TOP - HLKEYS_FOOT) / HLKEYS_PITCH;
+
+	if (n < 1)
+		n = 1;
+
+	return n;
+}
+
+U0 HLKeysFit(U8 *out, U8 *src, I64 max, I64 width)
+{
+	I64 n;
+
+	HLStrCopy(out, src, max);
+
+	n = StrLen(out);
+	while (n > 1 && HLFontStrWidth(out) > width)
+	{
+		n--;
+		out[n] = 0;
+	}
+}
+
+U0 HLKeysScroll(CHLCanvas *c)
+{
+	I64 vis = HLKeysVisible(c);
+
+	if (hl_keys_row < hl_keys_top)
+		hl_keys_top = hl_keys_row;
+
+	if (hl_keys_row > hl_keys_top + vis - 1)
+		hl_keys_top = hl_keys_row - vis + 1;
+
+	if (hl_keys_top > HLKeysRows() - vis)
+		hl_keys_top = HLKeysRows() - vis;
+
+	if (hl_keys_top < 0)
+		hl_keys_top = 0;
+}
+
+U0 HLKeysDraw(CHLCanvas *c)
+{
+	U8	label[HLACT_LBL_MAX];
+	U8	keyname[32];
+	U8	fit[HLACT_LBL_MAX];
+	I64	mx  = HLMenuXOfs(c);
+	I64	k1x;
+	I64	k2x;
+	I64	vis;
+	I64	row;
+	I64	y;
+	I64	k;
+
+	k1x = mx + ToI64(HLMENU_VW * HLKEYS_KEY1);
+	k2x = mx + ToI64(HLMENU_VW * HLKEYS_KEY2);
+
+	HLMenuPlaque(c, &hl_pic_p_option);
+	HLKeysScroll(c);
+
+	vis          = HLKeysVisible(c);
+	hl_keys_vis  = vis;
+
+	for (row = hl_keys_top; row < hl_keys_top + vis; row++)
+	{
+		if (row >= HLKeysRows())
+			goto qkd_done;
+
+		y = HLKEYS_TOP + (row - hl_keys_top) * HLKEYS_PITCH;
+
+		if (row == hl_keys_row)
+		{
+			if (hl_keys_capture)
+				HLStrDrawAlt(c, mx + 4, y, "=");
+			else
+				HLStrDrawAlt(c, mx + 4, y, ">");
+		}
+
+		if (row == hl_act_count)
+		{
+			HLStrDrawAlt(c, mx + 14, y, "USE DEFAULTS");
+			goto qkd_next;
+		}
+
+		if (row == hl_act_count + 1)
+		{
+			HLStrDrawAlt(c, mx + 14, y, "DONE");
+			goto qkd_next;
+		}
+
+		HLStrCopy(label, hl_act_lbl + row * HLACT_LBL_MAX, HLACT_LBL_MAX);
+
+		if (hl_act_kind[row] != HLACT_ACTION)
+		{
+			HLStrDrawAlt(c, mx + 14, y, label);
+			goto qkd_next;
+		}
+
+		HLKeysFit(fit, label, HLACT_LBL_MAX, k1x - (mx + 14) - 4);
+		HLStrDrawAlt(c, mx + 14, y, fit);
+
+		k = HLBindKeyOfAction(hl_act_cmd + row * HLACT_CMD_MAX, 0);
+		if (k)
+		{
+			HLKeyName(keyname, k);
+			HLStrDrawAlt(c, k1x, y, keyname);
+		}
+
+		k = HLBindKeyOfAction(hl_act_cmd + row * HLACT_CMD_MAX, 1);
+		if (k)
+		{
+			HLKeyName(keyname, k);
+			HLStrDrawAlt(c, k2x, y, keyname);
+		}
+
+qkd_next:
+	}
+
+qkd_done:
+	if (hl_keys_capture)
+		HLStrDrawCenterAlt(c, c->height - 12,
+			"press a key, or escape to cancel");
+	else
+		HLStrDrawCenterAlt(c, c->height - 12,
+			"enter binds, del clears, escape exits");
+}
+
+Bool HLKeysKey(I64 sc)
+{
+	I64 k;
+	I64 vis;
+
+	if (hl_keys_capture)
+	{
+		hl_keys_capture = FALSE;
+		HLMenuSound(HLMSND_VALUE);
+
+		if (sc == SC_ESC)
+			return TRUE;
+
+		if (hl_keys_row < 0 || hl_keys_row >= hl_act_count)
+			return TRUE;
+
+		if (hl_act_kind[hl_keys_row] != HLACT_ACTION)
+			return TRUE;
+
+		HLBindSet(sc, hl_act_cmd + hl_keys_row * HLACT_CMD_MAX);
+		HLCfgSave;
+		return TRUE;
+	}
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_OPTIONS;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP || sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+
+		if (sc == SC_CURSOR_UP)
+			hl_keys_row--;
+		else
+			hl_keys_row++;
+
+		while (hl_keys_row >= 0 && hl_keys_row < hl_act_count &&
+			hl_act_kind[hl_keys_row] != HLACT_ACTION)
+		{
+			if (sc == SC_CURSOR_UP)
+				hl_keys_row--;
+			else
+				hl_keys_row++;
+		}
+
+		if (hl_keys_row < 0)
+			hl_keys_row = HLKeysRows() - 1;
+		if (hl_keys_row >= HLKeysRows())
+			hl_keys_row = 0;
+
+		while (hl_keys_row < hl_act_count &&
+			hl_act_kind[hl_keys_row] != HLACT_ACTION)
+			hl_keys_row++;
+
+		return TRUE;
+	}
+
+	if (sc == SC_PAGE_UP || sc == SC_PAGE_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		vis = hl_keys_vis;
+
+		if (sc == SC_PAGE_UP)
+			hl_keys_row -= vis;
+		else
+			hl_keys_row += vis;
+
+		if (hl_keys_row < 0)
+			hl_keys_row = 0;
+		if (hl_keys_row >= HLKeysRows())
+			hl_keys_row = HLKeysRows() - 1;
+
+		while (hl_keys_row < hl_act_count &&
+			hl_act_kind[hl_keys_row] != HLACT_ACTION)
+			hl_keys_row++;
+
+		return TRUE;
+	}
+
+	if (sc == SC_DELETE || sc == SC_BACKSPACE)
+	{
+		if (hl_keys_row < 0 || hl_keys_row >= hl_act_count)
+			return TRUE;
+
+		if (hl_act_kind[hl_keys_row] != HLACT_ACTION)
+			return TRUE;
+
+		k = HLBindKeyOfAction(hl_act_cmd + hl_keys_row * HLACT_CMD_MAX, 0);
+		while (k)
+		{
+			HLBindClear(k);
+			k = HLBindKeyOfAction(hl_act_cmd + hl_keys_row * HLACT_CMD_MAX, 0);
+		}
+
+		HLCfgSave;
+		HLMenuSound(HLMSND_VALUE);
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		if (hl_keys_row == hl_act_count)
+		{
+			HLBindDefaults;
+			HLInClearAll;
+			HLCfgSave;
+			HLMenuSound(HLMSND_VALUE);
+			return TRUE;
+		}
+
+		if (hl_keys_row == hl_act_count + 1)
+		{
+			HLMenuSound(HLMSND_MOVE);
+			hl_menu_page = HLPAGE_OPTIONS;
+			return TRUE;
+		}
+
+		if (hl_keys_row < 0 || hl_keys_row >= hl_act_count)
+			return TRUE;
+
+		if (hl_act_kind[hl_keys_row] != HLACT_ACTION)
+			return TRUE;
+
+		HLMenuSound(HLMSND_ENTER);
+		hl_keys_capture = TRUE;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLNoticeDraw(CHLCanvas *c)
+{
+	HLMenuBackdrop(c);
+
+	HLStrDrawCenterAlt(c, 90, hl_notice);
+	HLStrDrawCenterAlt(c, c->height - 20, "press enter or escape");
+}
+
+U0 HLHelpDraw(CHLCanvas *c)
+{
+	CHLPic *p = &hl_pic_help[hl_help_page];
+
+	HLMenuBackdrop(c);
+
+	//authored at 320x200, centred in the virtual box rather than stretched
+	if (p->pixels)
+		HLPicDraw(c, p, HLMenuXOfs(c) + (HLMENU_VW - p->width) / 2, 4);
+	else
+		HLStrDrawCenterAlt(c, 90, "help pages not found in pak");
+
+	HLStrDrawCenterAlt(c, c->height - 20, "left/right pages, escape exits");
+}
+
+Bool HLHelpKey(I64 sc)
+{
+	if (sc == SC_CURSOR_LEFT)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_help_page--;
+		if (hl_help_page < 0)
+			hl_help_page = HLHELP_PAGES - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_RIGHT || sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_help_page++;
+		if (hl_help_page >= HLHELP_PAGES)
+			hl_help_page = 0;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLEditBegin(U8 *buf, I64 max, Bool digits)
+{
+	hl_edit_buf    = buf;
+	hl_edit_max    = max;
+	hl_edit_len    = StrLen(buf);
+	hl_edit_digits = digits;
+
+	hl_setup_editing = TRUE;
+	hl_setup_len     = hl_edit_len;
+}
+
+U0 HLEditEnd()
+{
+	hl_edit_buf        = NULL;
+	hl_setup_editing   = FALSE;
+	hl_setup_ate_enter = TRUE;
+	HLCfgSave;
+	HLMenuSound(HLMSND_ENTER);
+}
+
+U0 HLSetupInput()
+{
+	I64 i;
+	I64 sc;
+	I64 ch;
+
+	if (!hl_setup_editing || !hl_edit_buf)
+		return;
+
+	if (hl_menu_page != HLPAGE_MPSETUP && hl_menu_page != HLPAGE_CREATE &&
+		hl_menu_page != HLPAGE_RULES)
+	{
+		hl_edit_buf      = NULL;
+		hl_setup_editing = FALSE;
+		return;
+	}
+
+	i = 0;
+	while (hl_con_charset[i])
+	{
+		ch = hl_con_charset[i];
+
+		if (hl_edit_digits && (ch < '0' || ch > '9'))
+			goto qsi_next;
+
+		sc = Char2ScanCode(ch);
+
+		if (HLConKeyEdge(sc) && hl_edit_len < hl_edit_max - 1)
+		{
+			hl_edit_buf[hl_edit_len] = ch;
+			hl_edit_len++;
+			hl_edit_buf[hl_edit_len] = 0;
+		}
+
+qsi_next:
+		i++;
+	}
+
+	if (HLConKeyEdge(SC_BACKSPACE) && hl_edit_len > 0)
+	{
+		hl_edit_len--;
+		hl_edit_buf[hl_edit_len] = 0;
+	}
+
+	hl_setup_len = hl_edit_len;
+
+	if (HLConKeyEdge(SC_ENTER))
+		HLEditEnd;
+}
+
+U0 HLLanInput()
+{
+	I64 i;
+	I64 sc;
+	I64 ch;
+
+	if (!hl_lan_editing)
+		return;
+
+	if (hl_menu_page != HLPAGE_BROWSER)
+	{
+		hl_lan_editing = FALSE;
+		return;
+	}
+
+	i = 0;
+	while (hl_con_charset[i])
+	{
+		ch = hl_con_charset[i];
+
+		if ((ch >= '0' && ch <= '9') || ch == '.')
+		{
+			sc = Char2ScanCode(ch);
+
+			if (HLConKeyEdge(sc) && hl_lan_len < 23)
+			{
+				hl_lan_addr[hl_lan_len] = ch;
+				hl_lan_len++;
+				hl_lan_addr[hl_lan_len] = 0;
+			}
+		}
+
+		i++;
+	}
+
+	if (HLConKeyEdge(SC_BACKSPACE) && hl_lan_len > 0)
+	{
+		hl_lan_len--;
+		hl_lan_addr[hl_lan_len] = 0;
+	}
+
+	if (HLConKeyEdge(SC_ENTER))
+	{
+		hl_lan_editing   = FALSE;
+		hl_lan_ate_enter = TRUE;
+		HLMenuSound(HLMSND_ENTER);
+	}
+}
+
+
+U8 *HLBrTabLabel(I64 tab)
+{
+	if (tab == HLBR_TAB_INTERNET)	return "Internet";
+	if (tab == HLBR_TAB_LAN)		return "LAN";
+
+	return NULL;
+}
+
+U8 *HLBrSortLabel(I64 key)
+{
+	if (key == HLBR_SORT_NAME)		return "Server";
+	if (key == HLBR_SORT_MAP)		return "Map";
+	if (key == HLBR_SORT_PLAYERS)	return "Players";
+	if (key == HLBR_SORT_PING)		return "Ping";
+
+	return NULL;
+}
+
+I64 HLBrCompare(I64 a, I64 b)
+{
+	I64 d = 0;
+
+	if (hl_br_sort == HLBR_SORT_MAP)
+		d = StrICompare(hl_slist[a].map, hl_slist[b].map);
+	else if (hl_br_sort == HLBR_SORT_PLAYERS)
+	{
+		if (hl_slist[a].players < hl_slist[b].players)		d = -1;
+		else if (hl_slist[a].players > hl_slist[b].players)	d = 1;
+	}
+	else
+		d = StrICompare(hl_slist[a].name, hl_slist[b].name);
+
+	if (!d)
+		d = StrICompare(hl_slist[a].addr, hl_slist[b].addr);
+
+	if (d < 0)	return -1;
+	if (d > 0)	return 1;
+
+	return 0;
+}
+
+U0 HLBrSort()
+{
+	I64 n = hl_slist_count;
+	I64 i;
+	I64 j;
+	I64 pick;
+	I64 tmp;
+	I64 d;
+
+	if (n > HLNET_SLIST_MAX)
+		n = HLNET_SLIST_MAX;
+
+	for (i = 0; i < n; i++)
+		hl_br_order[i] = i;
+
+	for (i = 0; i < n; i++)
+	{
+		pick = i;
+
+		for (j = i + 1; j < n; j++)
+		{
+			d = HLBrCompare(hl_br_order[j], hl_br_order[pick]);
+
+			if (hl_br_sort_desc)
+				d = -d;
+
+			if (d < 0)
+				pick = j;
+		}
+
+		tmp                = hl_br_order[i];
+		hl_br_order[i]     = hl_br_order[pick];
+		hl_br_order[pick]  = tmp;
+	}
+}
+
+I64 HLBrCount()
+{
+	if (hl_br_tab != HLBR_TAB_LAN)
+		return 0;
+
+	if (hl_slist_count > HLNET_SLIST_MAX)
+		return HLNET_SLIST_MAX;
+
+	return hl_slist_count;
+}
+
+U0 HLBrDraw(CHLCanvas *c)
+{
+	U8	*label;
+	U8	 line[96];
+	I64	 x;
+	I64	 y;
+	I64	 w;
+	I64	 h;
+	I64	 bot;
+	I64	 pitch;
+	I64	 col;
+	I64	 tx;
+	I64	 top;
+	I64	 cur;
+	I64	 count;
+	I64	 vis;
+	I64	 i;
+	I64	 s;
+	I64	 cx_map;
+	I64	 cx_players;
+	I64	 cx_ping;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Find servers");
+
+	bot = y + h - HLDlgY(c, 44);
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+
+	cx_map     = x + w * 44 / 100;
+	cx_players = x + w * 66 / 100;
+	cx_ping    = x + w * 84 / 100;
+
+	HLBrSort;
+
+	count = HLBrCount();
+
+	tx = col;
+
+	for (i = 0; i < HLBR_TAB_COUNT; i++)
+	{
+		label = HLBrTabLabel(i);
+
+		if (!label)
+			goto qbd_next_tab;
+
+		if (i == hl_br_tab && hl_br_row == HLBR_STRIP)
+			StrPrint(line, "[%s]", label);
+		else
+			StrPrint(line, " %s ", label);
+
+		if (i == hl_br_tab)
+			HLMenuStrColor(c, tx, y + HLDlgY(c, 34), line, HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, tx, y + HLDlgY(c, 34), line, HLMENU_C_ITEM);
+
+		tx += HLFontStrWidth(line) + 6;
+
+qbd_next_tab:
+	}
+
+	top = y + HLDlgY(c, 60);
+
+	if (hl_br_tab == HLBR_TAB_LAN)
+	{
+		if (HLNetSlistSearching)
+			StrPrint(line, "Refresh   searching...");
+		else if (!HLNetUdpAvailable())
+			StrPrint(line, "Refresh   no network stack; run RunNet.ZC");
+		else
+			StrPrint(line, "Refresh   %d servers", count);
+	}
+	else
+		StrPrint(line, "Refresh   no master server; use the address below");
+
+	if (hl_br_row == HLBR_REFRESH)
+		HLMenuStrColor(c, col, top, line, HLMENU_C_SEL);
+	else
+		HLMenuStrColor(c, col, top, line, HLMENU_C_ITEM);
+
+	if (hl_lan_editing)
+		StrPrint(line, "Address   %s_", hl_lan_addr);
+	else
+		StrPrint(line, "Address   %s", hl_lan_addr);
+
+	if (hl_br_row == HLBR_ADDRESS)
+		HLMenuStrColor(c, col, top + pitch, line, HLMENU_C_SEL);
+	else
+		HLMenuStrColor(c, col, top + pitch, line, HLMENU_C_ITEM);
+
+	y = top + pitch * 3;
+
+	for (i = 0; i < HLBR_SORT_COUNT; i++)
+	{
+		label = HLBrSortLabel(i);
+
+		if (!label)
+			goto qbd_next_col;
+
+		if (i != hl_br_sort)
+			StrPrint(line, "%s", label);
+		else if (hl_br_sort_desc)
+			StrPrint(line, "%s v", label);
+		else
+			StrPrint(line, "%s ^", label);
+
+		tx = col;
+		if (i == HLBR_SORT_MAP)			tx = cx_map;
+		else if (i == HLBR_SORT_PLAYERS)	tx = cx_players;
+		else if (i == HLBR_SORT_PING)	tx = cx_ping;
+
+		if (hl_br_row == HLBR_HEAD && i == hl_br_sort)
+			HLMenuStrColor(c, tx, y, line, HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, tx, y, line, HLMENU_C_HINT);
+
+qbd_next_col:
+	}
+
+	y += pitch;
+
+	vis = (bot - y) / pitch;
+
+	if (vis < 1)
+		vis = 1;
+	if (vis > HLNET_SLIST_MAX)
+		vis = HLNET_SLIST_MAX;
+
+	hl_br_vis = vis;
+
+	cur = hl_br_row - HLBR_LIST;
+
+	if (cur < 0)
+		cur = 0;
+	if (cur < hl_br_top)
+		hl_br_top = cur;
+	if (cur >= hl_br_top + vis)
+		hl_br_top = cur - vis + 1;
+	if (hl_br_top > count - vis)
+		hl_br_top = count - vis;
+	if (hl_br_top < 0)
+		hl_br_top = 0;
+
+	if (!count)
+	{
+		if (hl_br_tab != HLBR_TAB_LAN)
+			HLMenuStrColor(c, col, y,
+				"The Internet tab has no server list.", HLMENU_C_HINT);
+		else if (HLNetSlistSearching)
+			HLMenuStrColor(c, col, y, "Searching...", HLMENU_C_HINT);
+		else if (hl_slist_asked)
+			HLMenuStrColor(c, col, y, "No servers found.", HLMENU_C_HINT);
+		else
+			HLMenuStrColor(c, col, y, "Select Refresh to search the subnet.",
+				HLMENU_C_HINT);
+	}
+
+	for (i = 0; i < vis; i++)
+	{
+		if (hl_br_top + i >= count)
+			goto qbd_next_row;
+
+		s = hl_br_order[hl_br_top + i];
+
+		if (hl_br_row == HLBR_LIST + hl_br_top + i)
+		{
+			HLMenuStrColor(c, col, y + i * pitch, hl_slist[s].name,
+				HLMENU_C_SEL);
+			HLMenuStrColor(c, cx_map, y + i * pitch, hl_slist[s].map,
+				HLMENU_C_SEL);
+
+			StrPrint(line, "%d/%d", hl_slist[s].players,
+				hl_slist[s].max_players);
+			HLMenuStrColor(c, cx_players, y + i * pitch, line, HLMENU_C_SEL);
+
+			HLMenuStrColor(c, cx_ping, y + i * pitch, "--", HLMENU_C_SEL);
+		}
+		else
+		{
+			HLMenuStrColor(c, col, y + i * pitch, hl_slist[s].name,
+				HLMENU_C_ITEM);
+			HLMenuStrColor(c, cx_map, y + i * pitch, hl_slist[s].map,
+				HLMENU_C_ITEM);
+
+			StrPrint(line, "%d/%d", hl_slist[s].players,
+				hl_slist[s].max_players);
+			HLMenuStrColor(c, cx_players, y + i * pitch, line, HLMENU_C_ITEM);
+
+			HLMenuStrColor(c, cx_ping, y + i * pitch, "--", HLMENU_C_ITEM);
+		}
+
+qbd_next_row:
+	}
+
+	if (hl_lan_editing)
+		HLMenuStrColor(c, col, y + vis * pitch + pitch,
+			"Type an address, Enter when done", HLMENU_C_HINT);
+	else
+		HLMenuStrColor(c, col, y + vis * pitch + pitch,
+			"Enter joins, Left/Right sorts, Esc closes", HLMENU_C_HINT);
+}
+
+Bool HLBrKey(I64 sc)
+{
+	I64 count = HLBrCount();
+	I64 rows  = HLBR_LIST + count;
+	I64 s;
+
+	if (hl_lan_editing)
+		return TRUE;
+
+	if (hl_lan_ate_enter)
+	{
+		hl_lan_ate_enter = FALSE;
+
+		if (sc == SC_ENTER)
+			return TRUE;
+	}
+
+	if (hl_br_row >= rows)
+		hl_br_row = rows - 1;
+	if (hl_br_row < 0)
+		hl_br_row = 0;
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_br_row--;
+		if (hl_br_row < 0)
+			hl_br_row = rows - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_br_row++;
+		if (hl_br_row >= rows)
+			hl_br_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_PAGE_UP)
+	{
+		hl_br_row -= hl_br_vis;
+		if (hl_br_row < HLBR_LIST)
+			hl_br_row = HLBR_LIST;
+		return TRUE;
+	}
+
+	if (sc == SC_PAGE_DOWN)
+	{
+		hl_br_row += hl_br_vis;
+		if (hl_br_row >= rows)
+			hl_br_row = rows - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		HLMenuSound(HLMSND_VALUE);
+
+		if (hl_br_row == HLBR_STRIP)
+		{
+			if (sc == SC_CURSOR_LEFT)
+				hl_br_tab--;
+			else
+				hl_br_tab++;
+
+			if (hl_br_tab < 0)
+				hl_br_tab = HLBR_TAB_COUNT - 1;
+			if (hl_br_tab >= HLBR_TAB_COUNT)
+				hl_br_tab = 0;
+
+			hl_br_top = 0;
+			return TRUE;
+		}
+
+		if (hl_br_row >= HLBR_HEAD)
+		{
+			if (sc == SC_CURSOR_LEFT)
+				hl_br_sort--;
+			else
+				hl_br_sort++;
+
+			if (hl_br_sort < 0)
+				hl_br_sort = HLBR_SORT_COUNT - 1;
+			if (hl_br_sort >= HLBR_SORT_COUNT)
+				hl_br_sort = 0;
+		}
+
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_br_row == HLBR_STRIP)
+			return TRUE;
+
+		if (hl_br_row == HLBR_REFRESH)
+		{
+			if (hl_br_tab == HLBR_TAB_LAN)
+				HLNetSlistBroadcast;
+
+			return TRUE;
+		}
+
+		if (hl_br_row == HLBR_ADDRESS)
+		{
+			hl_lan_editing = TRUE;
+			hl_lan_len     = StrLen(hl_lan_addr);
+			return TRUE;
+		}
+
+		if (hl_br_row == HLBR_HEAD)
+		{
+			hl_br_sort_desc = !hl_br_sort_desc;
+			return TRUE;
+		}
+
+		if (!count)
+			return TRUE;
+
+		s = hl_br_order[hl_br_row - HLBR_LIST];
+		HLStrCopy(hl_lan_addr, hl_slist[s].addr, 24);
+		hl_lan_len = StrLen(hl_lan_addr);
+		HLConConnectIP(hl_slist[s].ip);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLSingleDraw(CHLCanvas *c)
+{
+	I64 mx = HLMenuXOfs(c);
+
+	U8 labels[HLSP_ROWS * 24];
+
+	HLMenuPlaque(c, &hl_pic_p_single);
+
+	if (hl_pic_sp_menu.pixels)
+		HLPicDraw(c, &hl_pic_sp_menu, mx + 72, HLMENU_Y);
+	else
+	{
+		HLStrCopy(&labels[HLSP_NEWGAME * 24], "NEW GAME", 24);
+		HLStrCopy(&labels[HLSP_LOAD * 24], "LOAD GAME", 24);
+		HLStrCopy(&labels[HLSP_SAVE * 24], "SAVE GAME", 24);
+
+		HLMenuRowsText(c, mx, hl_sp_row, HLSP_ROWS, labels);
+	}
+
+	HLMenuCursor(c, mx + 72 - 18, HLMENU_Y + hl_sp_row * HLMENU_ROW_H - 4);
+}
+
+Bool HLSingleKey(I64 sc, Bool *_start_game)
+{
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_sp_row--;
+		if (hl_sp_row < 0)
+			hl_sp_row = HLSP_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_sp_row++;
+		if (hl_sp_row >= HLSP_ROWS)
+			hl_sp_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_sp_row == HLSP_NEWGAME)
+		{
+			HLCvarSet("deathmatch", 0.0);
+			HLCvarSet("coop", 0.0);
+
+			//svs.maxclients 1 - solo reserves one edict, as the original does
+			HLSvMaxClientsSet(1);
+
+			HLEntNewGame;
+
+			HLStrCopy(hl_change_map, "c0a0", 64);
+			hl_change_pending = TRUE;
+
+			if (_start_game)
+				*_start_game = TRUE;
+
+			hl_menu_page = HLPAGE_MAIN;
+		}
+		else if (hl_sp_row == HLSP_LOAD)
+		{
+			hl_menu_load_req = TRUE;
+			hl_menu_page     = HLPAGE_MAIN;
+
+			if (_start_game)
+				*_start_game = TRUE;
+		}
+		else
+		{
+			if (hl_world_active)
+			{
+				hl_menu_save_req = TRUE;
+				hl_menu_page     = HLPAGE_MAIN;
+
+				if (_start_game)
+					*_start_game = TRUE;
+			}
+		}
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLRowLabel(CHLCanvas *c, I64 x, I64 y, I64 row, I64 sel, U8 *label)
+{
+	if (row == sel)
+		HLMenuStrColor(c, x, y, label, HLMENU_C_SEL);
+	else
+		HLMenuStrColor(c, x, y, label, HLMENU_C_ITEM);
+}
+
+
+U8 *HLCsMapName()
+{
+	if (hl_cs_map < 0 || hl_cs_map >= hl_map_count)
+		return "none found";
+
+	return &hl_menu_maps[hl_cs_map * HLMAP_NAME_MAX];
+}
+
+U0 HLCsDraw(CHLCanvas *c)
+{
+	U8	line[96];
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	pitch;
+	I64	col;
+	I64	val;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Create Server");
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+	val   = x + HLDlgX(c, 220);
+
+	y = y + HLDlgY(c, 60);
+
+	HLRowLabel(c, col, y + HLCS_MAP * pitch, HLCS_MAP, hl_cs_row, "Map");
+	HLMenuStrColor(c, val, y + HLCS_MAP * pitch, HLCsMapName(), HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLCS_HOSTNAME * pitch, HLCS_HOSTNAME, hl_cs_row, "Hostname");
+
+	if (hl_setup_editing && hl_edit_buf == hl_host_name)
+		StrPrint(line, "%s_", hl_host_name);
+	else
+		StrPrint(line, "%s", hl_host_name);
+
+	HLMenuStrColor(c, val, y + HLCS_HOSTNAME * pitch, line, HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLCS_MAXPLAYERS * pitch, HLCS_MAXPLAYERS, hl_cs_row,
+		"Max. players");
+	StrPrint(line, "%d", hl_cs_maxplayers);
+	HLMenuStrColor(c, val, y + HLCS_MAXPLAYERS * pitch, line, HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLCS_PASSWORD * pitch, HLCS_PASSWORD, hl_cs_row,
+		"Server password");
+
+	if (hl_setup_editing && hl_edit_buf == hl_cs_password)
+		StrPrint(line, "%s_", hl_cs_password);
+	else if (hl_cs_password[0])
+		StrPrint(line, "%s", hl_cs_password);
+	else
+		StrPrint(line, "none");
+
+	HLMenuStrColor(c, val, y + HLCS_PASSWORD * pitch, line, HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLCS_RULES * pitch, HLCS_RULES, hl_cs_row, "Game rules...");
+	HLRowLabel(c, col, y + HLCS_START * pitch, HLCS_START, hl_cs_row, "Start");
+
+	HLMenuStrColor(c, col, y + (HLCS_ROWS + 1) * pitch,
+		"Left/Right change, Enter selects, Esc closes", HLMENU_C_HINT);
+}
+
+Bool HLCsKey(I64 sc)
+{
+	I64 dir;
+
+	if (hl_setup_editing)
+		return TRUE;
+
+	if (hl_setup_ate_enter)
+	{
+		hl_setup_ate_enter = FALSE;
+
+		if (sc == SC_ENTER)
+			return TRUE;
+	}
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_cs_row--;
+		if (hl_cs_row < 0)
+			hl_cs_row = HLCS_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_cs_row++;
+		if (hl_cs_row >= HLCS_ROWS)
+			hl_cs_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		dir = 1;
+		if (sc == SC_CURSOR_LEFT)
+			dir = -1;
+
+		if (hl_cs_row == HLCS_MAP && hl_map_count > 0)
+		{
+			HLMenuSound(HLMSND_VALUE);
+			hl_cs_map += dir;
+			if (hl_cs_map < 0)
+				hl_cs_map = hl_map_count - 1;
+			if (hl_cs_map >= hl_map_count)
+				hl_cs_map = 0;
+		}
+		else if (hl_cs_row == HLCS_MAXPLAYERS)
+		{
+			HLMenuSound(HLMSND_VALUE);
+			hl_cs_maxplayers += dir;
+			hl_cs_maxplayers = ClampI64(hl_cs_maxplayers, 2, HLSV_MAX_CLIENTS);
+		}
+
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_cs_row == HLCS_HOSTNAME)
+			HLEditBegin(hl_host_name, 32, FALSE);
+		else if (hl_cs_row == HLCS_PASSWORD)
+			HLEditBegin(hl_cs_password, 24, FALSE);
+		else if (hl_cs_row == HLCS_RULES)
+		{
+			hl_rule_row  = 0;
+			hl_menu_page = HLPAGE_RULES;
+		}
+		else if (hl_cs_row == HLCS_START)
+		{
+			if (hl_map_count < 1)
+				return TRUE;
+
+			if (HLNetUdpAvailable())
+			{
+				if (!HLNetLocalIP)
+					HLNetDhcp;
+				if (!HLNetLocalIP)
+					HLNetAutoIP(0);
+
+				if (HLNetUdpOpen(HLNET_PORT_DEFAULT))
+				{
+					hl_udp_server = TRUE;
+					HLNetDgrmInit;
+				}
+			}
+
+			HLCvarSet("deathmatch", 1.0);
+			HLCvarSet("coop", 0.0);
+
+			HLCvarSet("fraglimit", ToF64(hl_rule_fraglimit));
+			HLCvarSet("timelimit", ToF64(hl_rule_timelimit));
+
+			if (hl_rule_teamplay)
+				HLCvarSet("teamplay", 1.0);
+			else
+				HLCvarSet("teamplay", 0.0);
+
+			HLSvMaxClientsSet(hl_cs_maxplayers);
+
+			HLStrCopy(hl_change_map, HLCsMapName(), 64);
+			hl_change_pending = TRUE;
+			hl_mp_start_dm    = TRUE;
+			HLCfgSave;
+		}
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLRuleRow(CHLCanvas *c, I64 col, I64 val, I64 y, I64 row, U8 *label,
+	U8 *value)
+{
+	HLRowLabel(c, col, y, row, hl_rule_row, label);
+	HLMenuStrColor(c, val, y, value, HLMENU_C_HINT);
+}
+
+U8 *HLRuleOnOff(Bool v)
+{
+	if (v)
+		return "On";
+
+	return "Off";
+}
+
+U0 HLRuleDraw(CHLCanvas *c)
+{
+	U8	line[64];
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	pitch;
+	I64	col;
+	I64	val;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Game rules");
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+	val   = x + HLDlgX(c, 260);
+
+	y = y + HLDlgY(c, 44);
+
+	HLRuleRow(c, col, val, y + HLR_TEAMLIST * pitch, HLR_TEAMLIST,
+		"Valid teams (blank for all)", hl_rule_teamlist);
+
+	if (hl_rule_fraglimit > 0)
+		StrPrint(line, "%d", hl_rule_fraglimit);
+	else
+		StrPrint(line, "none");
+
+	HLRuleRow(c, col, val, y + HLR_FRAGLIMIT * pitch, HLR_FRAGLIMIT,
+		"Frag Limit", line);
+
+	if (hl_rule_timelimit > 0)
+		StrPrint(line, "%d", hl_rule_timelimit);
+	else
+		StrPrint(line, "none");
+
+	HLRuleRow(c, col, val, y + HLR_TIMELIMIT * pitch, HLR_TIMELIMIT,
+		"Time Limit (Min.)", line);
+
+	if (hl_rule_falldamage)
+		StrPrint(line, "Realistic");
+	else
+		StrPrint(line, "Normal");
+
+	HLRuleRow(c, col, val, y + HLR_FALLDAMAGE * pitch, HLR_FALLDAMAGE,
+		"Falling Damage", line);
+
+	HLRuleRow(c, col, val, y + HLR_TEAMPLAY * pitch, HLR_TEAMPLAY,
+		"Teamplay", HLRuleOnOff(hl_rule_teamplay));
+	HLRuleRow(c, col, val, y + HLR_FRIENDLYFIRE * pitch, HLR_FRIENDLYFIRE,
+		"Friendly Fire", HLRuleOnOff(hl_rule_friendlyfire));
+	HLRuleRow(c, col, val, y + HLR_WEAPONSTAY * pitch, HLR_WEAPONSTAY,
+		"Weapons Stay", HLRuleOnOff(hl_rule_weaponstay));
+	HLRuleRow(c, col, val, y + HLR_FORCERESPAWN * pitch, HLR_FORCERESPAWN,
+		"Force Respawn", HLRuleOnOff(hl_rule_forcerespawn));
+	HLRuleRow(c, col, val, y + HLR_FOOTSTEPS * pitch, HLR_FOOTSTEPS,
+		"Footsteps", HLRuleOnOff(hl_rule_footsteps));
+	HLRuleRow(c, col, val, y + HLR_FLASHLIGHT * pitch, HLR_FLASHLIGHT,
+		"Flashlight", HLRuleOnOff(hl_rule_flashlight));
+	HLRuleRow(c, col, val, y + HLR_AUTOCROSSHAIR * pitch, HLR_AUTOCROSSHAIR,
+		"Autocrosshair", HLRuleOnOff(hl_rule_autocrosshair));
+
+	HLRowLabel(c, col, y + HLR_CLOSE * pitch, HLR_CLOSE, hl_rule_row, "Close");
+
+	HLMenuStrColor(c, col, y + (HLR_ROWS + 1) * pitch,
+		"Frag limit, time limit and teamplay are live; the rest are not read yet",
+		HLMENU_C_HINT);
+}
+
+Bool HLRuleKey(I64 sc)
+{
+	I64 dir;
+
+	if (hl_setup_editing)
+		return TRUE;
+
+	if (hl_setup_ate_enter)
+	{
+		hl_setup_ate_enter = FALSE;
+
+		if (sc == SC_ENTER)
+			return TRUE;
+	}
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_CREATE;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_rule_row--;
+		if (hl_rule_row < 0)
+			hl_rule_row = HLR_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_rule_row++;
+		if (hl_rule_row >= HLR_ROWS)
+			hl_rule_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		HLMenuSound(HLMSND_VALUE);
+
+		dir = 1;
+		if (sc == SC_CURSOR_LEFT)
+			dir = -1;
+
+		switch (hl_rule_row)
+		{
+			case HLR_FRAGLIMIT:
+				hl_rule_fraglimit += dir * 10;
+				if (hl_rule_fraglimit > 100)	hl_rule_fraglimit = 0;
+				if (hl_rule_fraglimit < 0)	hl_rule_fraglimit = 100;
+				break;
+
+			case HLR_TIMELIMIT:
+				hl_rule_timelimit += dir * 5;
+				if (hl_rule_timelimit > 60)	hl_rule_timelimit = 0;
+				if (hl_rule_timelimit < 0)	hl_rule_timelimit = 60;
+				break;
+
+			case HLR_FALLDAMAGE:
+				hl_rule_falldamage = 1 - hl_rule_falldamage;
+				break;
+
+			case HLR_TEAMPLAY:
+				hl_rule_teamplay = !hl_rule_teamplay;
+				break;
+
+			case HLR_FRIENDLYFIRE:
+				hl_rule_friendlyfire = !hl_rule_friendlyfire;
+				break;
+
+			case HLR_WEAPONSTAY:
+				hl_rule_weaponstay = !hl_rule_weaponstay;
+				break;
+
+			case HLR_FORCERESPAWN:
+				hl_rule_forcerespawn = !hl_rule_forcerespawn;
+				break;
+
+			case HLR_FOOTSTEPS:
+				hl_rule_footsteps = !hl_rule_footsteps;
+				break;
+
+			case HLR_FLASHLIGHT:
+				hl_rule_flashlight = !hl_rule_flashlight;
+				break;
+
+			case HLR_AUTOCROSSHAIR:
+				hl_rule_autocrosshair = !hl_rule_autocrosshair;
+				break;
+
+			default:
+				break;
+		}
+
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_rule_row == HLR_TEAMLIST)
+			HLEditBegin(hl_rule_teamlist, 32, FALSE);
+		else if (hl_rule_row == HLR_CLOSE)
+			hl_menu_page = HLPAGE_CREATE;
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U8 *HLPsModelName()
+{
+	if (!hl_setup_model[0])
+		return "none";
+
+	return hl_setup_model;
+}
+
+U0 HLPsPreview(CHLCanvas *c)
+{
+	CHLStudio	*m;
+	U8			 path[96];
+	F64			 porg[3];
+	F64			 pang[3];
+	F64			 veye[3];
+	F64			 vang[3];
+
+	if (!hl_setup_model[0])
+		return;
+
+	StrPrint(path, "models/player/%s/%s.mdl", hl_setup_model, hl_setup_model);
+
+	m = HLStudioCacheGet(path);
+
+	if (!m)
+		return;
+
+	HLVecSet(veye, 0.0, 0.0, 0.0);
+	HLVecSet(vang, 0.0, 0.0, 0.0);
+
+	HLDrawSetView(c, veye, vang, 90.0, FALSE);
+
+	MemSet(c->depth, 0, c->width * c->height * sizeof(F64));
+
+	HLVecSet(porg, 90.0, 30.0, -34.0);
+	HLVecSet(pang, 0.0, HLAngleNorm(tS * 60.0), 0.0);
+
+	//Sequence 0 is idle on every shipped player model.
+	HLStudioDraw(c, m, porg, pang, 0, tS - ToI64(tS), 0.0, 0, 0, 176);
+}
+
+U0 HLPsDraw(CHLCanvas *c)
+{
+	U8	line[96];
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	pitch;
+	I64	col;
+	I64	val;
+	I64	bw;
+	I64	bh;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Multiplayer");
+
+	HLPsPreview(c);
+
+	pitch = HLMenuLineH();
+
+	col = x + HLDlgX(c, 230);
+	val = x + HLDlgX(c, 380);
+	bw  = HLDlgX(c, 110);
+	bh  = pitch - 2;
+
+	if (bh < 4)
+		bh = 4;
+
+	y = y + HLDlgY(c, 44);
+
+	HLRowLabel(c, col, y + HLPS_NAME * pitch, HLPS_NAME, hl_ps_row, "Player name");
+
+	if (hl_setup_editing && hl_edit_buf == hl_setup_name)
+		StrPrint(line, "%s_", hl_setup_name);
+	else
+		StrPrint(line, "%s", hl_setup_name);
+
+	HLMenuStrColor(c, val, y + HLPS_NAME * pitch, line, HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLPS_MODEL * pitch, HLPS_MODEL, hl_ps_row, "Player model");
+	HLMenuStrColor(c, val, y + HLPS_MODEL * pitch, HLPsModelName(),
+		HLMENU_C_HINT);
+
+	//CCvarSlider over topcolor / bottomcolor, 0..255.
+	HLRowLabel(c, col, y + HLPS_PRIMARY * pitch, HLPS_PRIMARY, hl_ps_row, "Primary");
+	HLMenuBar(c, val, y + HLPS_PRIMARY * pitch, bw, bh,
+		ToF64(hl_setup_topcolor) / 255.0);
+
+	HLRowLabel(c, col, y + HLPS_SECONDARY * pitch, HLPS_SECONDARY, hl_ps_row,
+		"Secondary");
+	HLMenuBar(c, val, y + HLPS_SECONDARY * pitch, bw, bh,
+		ToF64(hl_setup_bottomcolor) / 255.0);
+
+	HLRowLabel(c, col, y + HLPS_SPRAY * pitch, HLPS_SPRAY, hl_ps_row,
+		"Spraypaint image");
+	HLMenuStrColor(c, val, y + HLPS_SPRAY * pitch, hl_setup_logo,
+		HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLPS_SPRAYCOLOR * pitch, HLPS_SPRAYCOLOR, hl_ps_row,
+		"Spraypaint color");
+	HLMenuStrColor(c, val, y + HLPS_SPRAYCOLOR * pitch,
+		&hl_logo_color_name[hl_logo_color * HLLOGOC_NAME_MAX], HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLPS_HIMODELS * pitch, HLPS_HIMODELS, hl_ps_row,
+		"High quality models");
+	HLMenuStrColor(c, val, y + HLPS_HIMODELS * pitch,
+		HLRuleOnOff(hl_setup_himodels), HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLPS_ADVANCED * pitch, HLPS_ADVANCED, hl_ps_row,
+		"Advanced...");
+	HLRowLabel(c, col, y + HLPS_CLOSE * pitch, HLPS_CLOSE, hl_ps_row, "Close");
+
+	HLMenuStrColor(c, x + HLDlgX(c, 20), y + (HLPS_ROWS + 1) * pitch,
+		"Changes to your spraypaint image take effect when you join a server.",
+		HLMENU_C_HINT);
+}
+
+Bool HLSetupKey(I64 sc)
+{
+	I64 dir;
+	I64 i;
+
+	if (hl_setup_editing)
+		return TRUE;
+
+	if (hl_setup_ate_enter)
+	{
+		hl_setup_ate_enter = FALSE;
+
+		if (sc == SC_ENTER)
+			return TRUE;
+	}
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		HLCfgSave;
+		hl_menu_page = HLPAGE_OPTIONS;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_ps_row--;
+		if (hl_ps_row < 0)
+			hl_ps_row = HLPS_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_ps_row++;
+		if (hl_ps_row >= HLPS_ROWS)
+			hl_ps_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		HLMenuSound(HLMSND_VALUE);
+
+		dir = 1;
+		if (sc == SC_CURSOR_LEFT)
+			dir = -1;
+
+		if (hl_ps_row == HLPS_MODEL && hl_pm_count > 0)
+		{
+			i = HLModelIndex();
+
+			if (i < 0)
+				i = 0;
+			else
+				i += dir;
+
+			if (i < 0)
+				i = hl_pm_count - 1;
+			if (i >= hl_pm_count)
+				i = 0;
+
+			HLStrCopy(hl_setup_model, &hl_pm_name[i * HLPM_NAME_MAX],
+				HLPM_NAME_MAX);
+		}
+		else if (hl_ps_row == HLPS_PRIMARY)
+		{
+			hl_setup_topcolor += dir * 16;
+			hl_setup_topcolor = ClampI64(hl_setup_topcolor, 0, 255);
+			HLSetupColorApply;
+		}
+		else if (hl_ps_row == HLPS_SECONDARY)
+		{
+			hl_setup_bottomcolor += dir * 16;
+			hl_setup_bottomcolor = ClampI64(hl_setup_bottomcolor, 0, 255);
+			HLSetupColorApply;
+		}
+		else if (hl_ps_row == HLPS_SPRAYCOLOR)
+		{
+			hl_logo_color += dir;
+			if (hl_logo_color < 0)
+				hl_logo_color = HLLOGOC_COUNT - 1;
+			if (hl_logo_color >= HLLOGOC_COUNT)
+				hl_logo_color = 0;
+		}
+		else if (hl_ps_row == HLPS_HIMODELS)
+			hl_setup_himodels = !hl_setup_himodels;
+
+		HLCfgSave;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_ps_row == HLPS_NAME)
+			HLEditBegin(hl_setup_name, 16, FALSE);
+		else if (hl_ps_row == HLPS_SPRAY)
+		{
+			HLLogoScan;
+			hl_logo_top  = 0;
+			hl_menu_page = HLPAGE_SPRAY;
+		}
+		else if (hl_ps_row == HLPS_ADVANCED)
+		{
+			hl_adv_row   = HLADV_DECALS;
+			hl_menu_page = HLPAGE_MPADV;
+		}
+		else if (hl_ps_row == HLPS_CLOSE)
+		{
+			HLCfgSave;
+			hl_menu_page = HLPAGE_OPTIONS;
+		}
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLAdvDraw(CHLCanvas *c)
+{
+	U8	line[64];
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	pitch;
+	I64	col;
+	I64	val;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 60);
+	y = HLDlgY(c, 108);
+	w = HLDlgX(c, 472);
+	h = HLDlgY(c, 376);
+
+	HLMenuPanel(c, x, y, w, h, "Multiplayer Advanced");
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 16);
+	val   = x + HLDlgX(c, 300);
+
+	y = y + HLDlgY(c, 56);
+
+	HLRowLabel(c, col, y + HLADV_DECALS * pitch, HLADV_DECALS, hl_adv_row,
+		"Multiplayer decal limit");
+	StrPrint(line, "%d", hl_adv_decals);
+	HLMenuStrColor(c, val, y + HLADV_DECALS * pitch, line, HLMENU_C_HINT);
+
+	HLRowLabel(c, col, y + HLADV_CLOSE * pitch, HLADV_CLOSE, hl_adv_row, "OK");
+
+	HLMenuStrColor(c, col, y + (HLADV_ROWS + 1) * pitch,
+		"Left/Right change, Esc closes", HLMENU_C_HINT);
+}
+
+Bool HLAdvKey(I64 sc)
+{
+	I64 dir;
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MPSETUP;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_adv_row--;
+		if (hl_adv_row < 0)
+			hl_adv_row = HLADV_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_adv_row++;
+		if (hl_adv_row >= HLADV_ROWS)
+			hl_adv_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		if (hl_adv_row != HLADV_DECALS)
+			return TRUE;
+
+		HLMenuSound(HLMSND_VALUE);
+
+		dir = 1;
+		if (sc == SC_CURSOR_LEFT)
+			dir = -1;
+
+		hl_adv_decals += dir * 50;
+		hl_adv_decals = ClampI64(hl_adv_decals, 0, 4096);
+		HLCfgSave;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_adv_row == HLADV_CLOSE)
+		{
+			HLCfgSave;
+			hl_menu_page = HLPAGE_MPSETUP;
+		}
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLSprayDraw(CHLCanvas *c)
+{
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	bot;
+	I64	pitch;
+	I64	col;
+	I64	vis;
+	I64	i;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, "Spraypaint image");
+
+	bot   = y + h - HLDlgY(c, 44);
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+
+	y = y + HLDlgY(c, 44);
+
+	vis = (bot - y) / pitch;
+
+	if (vis < 1)
+		vis = 1;
+
+	if (hl_logo_sel < 0)
+		hl_logo_sel = 0;
+	if (hl_logo_sel >= hl_logo_count)
+		hl_logo_sel = hl_logo_count - 1;
+	if (hl_logo_sel < 0)
+		hl_logo_sel = 0;
+
+	if (hl_logo_sel < hl_logo_top)
+		hl_logo_top = hl_logo_sel;
+	if (hl_logo_sel >= hl_logo_top + vis)
+		hl_logo_top = hl_logo_sel - vis + 1;
+	if (hl_logo_top > hl_logo_count - vis)
+		hl_logo_top = hl_logo_count - vis;
+	if (hl_logo_top < 0)
+		hl_logo_top = 0;
+
+	if (hl_logo_count < 1)
+		HLMenuStrColor(c, col, y, "No logos installed.", HLMENU_C_HINT);
+
+	for (i = 0; i < vis; i++)
+	{
+		if (hl_logo_top + i >= hl_logo_count)
+			goto qsp_next;
+
+		if (hl_logo_top + i == hl_logo_sel)
+			HLMenuStrColor(c, col, y + i * pitch,
+				&hl_logo_name[(hl_logo_top + i) * HLLOGO_NAME_MAX],
+				HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, col, y + i * pitch,
+				&hl_logo_name[(hl_logo_top + i) * HLLOGO_NAME_MAX],
+				HLMENU_C_ITEM);
+
+qsp_next:
+	}
+
+	HLMenuStrColor(c, col, bot, "Enter picks, Esc cancels", HLMENU_C_HINT);
+}
+
+Bool HLSprayKey(I64 sc)
+{
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MPSETUP;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_logo_sel--;
+		if (hl_logo_sel < 0)
+			hl_logo_sel = hl_logo_count - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_logo_sel++;
+		if (hl_logo_sel >= hl_logo_count)
+			hl_logo_sel = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_PAGE_UP)
+	{
+		hl_logo_sel -= 8;
+		if (hl_logo_sel < 0)
+			hl_logo_sel = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_PAGE_DOWN)
+	{
+		hl_logo_sel += 8;
+		if (hl_logo_sel >= hl_logo_count)
+			hl_logo_sel = hl_logo_count - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_logo_sel >= 0 && hl_logo_sel < hl_logo_count)
+		{
+			HLStrCopy(hl_setup_logo,
+				&hl_logo_name[hl_logo_sel * HLLOGO_NAME_MAX],
+				HLLOGO_NAME_MAX);
+			HLCfgSave;
+		}
+
+		hl_menu_page = HLPAGE_MPSETUP;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLPlayersDraw(CHLCanvas *c)
+{
+	U8	line[96];
+	I64	x;
+	I64	y;
+	I64	w;
+	I64	h;
+	I64	pitch;
+	I64	col;
+	I64	row;
+	I64	i;
+
+	HLMenuBgDraw(c);
+
+	//PlayerListDialog is 467x388 at 168,55.
+	x = HLDlgX(c, 168);
+	y = HLDlgY(c, 55);
+	w = HLDlgX(c, 467);
+	h = HLDlgY(c, 388);
+
+	StrPrint(line, "Current players - %s", hl_host_name);
+	HLMenuPanel(c, x, y, w, h, line);
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 28);
+
+	y = y + HLDlgY(c, 38);
+
+	row = 0;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_scores[i].active)
+			goto qpl_next;
+
+		StrPrint(line, "%-24s %4d", hl_scores[i].name, hl_scores[i].frags);
+		HLMenuStrColor(c, col, y + row * pitch, line, HLMENU_C_ITEM);
+		row++;
+
+qpl_next:
+	}
+
+	if (!row)
+		HLMenuStrColor(c, col, y, "No players.", HLMENU_C_HINT);
+
+	HLMenuStrColor(c, col, y + HLDlgY(c, 300), "Esc closes", HLMENU_C_HINT);
+}
+
+U0 HLMenuSlotPath(I64 slot, U8 *out)
+{
+	StrPrint(out, "HLSAVE%d.SAV", slot + 1);
+}
+
+U0 HLMenuSlotScan()
+{
+	U8	path[32];
+	U8	map[96];
+	I64	i;
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		hl_slot_used[i]                     = FALSE;
+		hl_slot_map[i * HLSAVE_NAME_MAX]    = 0;
+
+		HLMenuSlotPath(i, path);
+
+		if (HLSaveReadHeader(path, map))
+		{
+			hl_slot_used[i] = TRUE;
+			HLStrCopy(&hl_slot_map[i * HLSAVE_NAME_MAX], map, HLSAVE_NAME_MAX);
+		}
+	}
+
+	HLSaveDiscard;
+}
+
+U8 *HLMenuSkillLabel(I64 row)
+{
+	if (row == HLSKILL_EASY)		return "Easy";
+	if (row == HLSKILL_MEDIUM)	return "Medium";
+	if (row == HLSKILL_HARD)		return "Hard";
+
+	return NULL;
+}
+
+U0 HLNewGameDraw(CHLCanvas *c)
+{
+ //40,68, Play at 40,180, Cancel below it.
+	I64	 x;
+	I64	 y;
+	I64	 w;
+	I64	 h;
+	I64	 pitch;
+	I64	 i;
+	U8	*label;
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 390);
+	y = HLDlgY(c, 254);
+	w = HLDlgX(c, 280);
+	h = HLDlgY(c, 302);
+
+	HLMenuPanel(c, x, y, w, h, "New Game");
+
+	pitch = HLMenuLineH();
+
+	HLMenuStrColor(c, x + HLDlgX(c, 40), y + HLDlgY(c, 40),
+		"Select Difficulty", HLMENU_C_HINT);
+
+	for (i = 0; i < HLSKILL_ROWS; i++)
+	{
+		label = HLMenuSkillLabel(i);
+
+		if (!label)
+			goto qng_next;
+
+		if (i == hl_skill_row)
+			HLMenuStrColor(c, x + HLDlgX(c, 52),
+				y + HLDlgY(c, 68) + i * pitch, label, HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, x + HLDlgX(c, 52),
+				y + HLDlgY(c, 68) + i * pitch, label, HLMENU_C_ITEM);
+
+qng_next:
+	}
+
+	HLMenuStrColor(c, x + HLDlgX(c, 40), y + HLDlgY(c, 180),
+		"Enter - Play Half-Life", HLMENU_C_ITEM);
+	HLMenuStrColor(c, x + HLDlgX(c, 40), y + HLDlgY(c, 180) + pitch,
+		"Esc   - Cancel", HLMENU_C_ITEM);
+}
+
+Bool HLNewGameKey(I64 sc, Bool *_start_game)
+{
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_skill_row--;
+		if (hl_skill_row < 0)
+			hl_skill_row = HLSKILL_ROWS - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_skill_row++;
+		if (hl_skill_row >= HLSKILL_ROWS)
+			hl_skill_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		//gSkillData reads skill 1..3; the combo is 0-based.
+		HLCvarSet("skill", ToF64(hl_skill_row + 1));
+		HLCvarSet("deathmatch", 0.0);
+		HLCvarSet("coop", 0.0);
+		HLSvMaxClientsSet(1);
+
+		HLEntNewGame;
+
+		HLStrCopy(hl_change_map, "c0a0", 64);
+		hl_change_pending = TRUE;
+
+		if (_start_game)
+			*_start_game = TRUE;
+
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLSlotListDraw(CHLCanvas *c, U8 *title, U8 *help, U8 *action, Bool new_row)
+{
+	I64	 x;
+	I64	 y;
+	I64	 w;
+	I64	 h;
+	I64	 pitch;
+	I64	 row;
+	I64	 i;
+	I64	 col;
+	U8	 line[96];
+
+	HLMenuBgDraw(c);
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+
+	HLMenuPanel(c, x, y, w, h, title);
+
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+
+	HLMenuStrColor(c, col, y + HLDlgY(c, 30), help, HLMENU_C_HINT);
+
+	row = 0;
+
+	if (new_row)
+	{
+		if (hl_slot_row == 0)
+			HLMenuStrColor(c, col, y + HLDlgY(c, 80), "New Saved Game",
+				HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, col, y + HLDlgY(c, 80), "New Saved Game",
+				HLMENU_C_ITEM);
+
+		row = 1;
+	}
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		if (!hl_slot_used[i])
+			goto qsl_next;
+
+		StrPrint(line, "Slot %d - %s", i + 1,
+			&hl_slot_map[i * HLSAVE_NAME_MAX]);
+
+		if (row == hl_slot_row)
+			HLMenuStrColor(c, col, y + HLDlgY(c, 80) + row * pitch, line,
+				HLMENU_C_SEL);
+		else
+			HLMenuStrColor(c, col, y + HLDlgY(c, 80) + row * pitch, line,
+				HLMENU_C_ITEM);
+
+		row++;
+
+qsl_next:
+	}
+
+	if (!row)
+		HLMenuStrColor(c, col, y + HLDlgY(c, 80), "No saved games.",
+			HLMENU_C_HINT);
+
+	HLMenuStrColor(c, col, y + HLDlgY(c, 378), action, HLMENU_C_ITEM);
+	HLMenuStrColor(c, col, y + HLDlgY(c, 378) + pitch, "Esc   - Cancel",
+		HLMENU_C_ITEM);
+}
+
+I64 HLSlotRowCount(Bool new_row)
+{
+	I64 n = 0;
+	I64 i;
+
+	if (new_row)
+		n = 1;
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		if (hl_slot_used[i])
+			n++;
+	}
+
+	return n;
+}
+
+I64 HLSlotAtRow(I64 want, Bool new_row)
+{
+	I64 row = 0;
+	I64 i;
+
+	if (new_row)
+	{
+		if (!want)
+			return -1;
+
+		row = 1;
+	}
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		if (!hl_slot_used[i])
+			goto qsa_next;
+
+		if (row == want)
+			return i;
+
+		row++;
+
+qsa_next:
+	}
+
+	return -1;
+}
+
+I64 HLSlotFirstFree()
+{
+	I64 i;
+
+	for (i = 0; i < HLSAVE_SLOTS; i++)
+	{
+		if (!hl_slot_used[i])
+			return i;
+	}
+
+	return -1;
+}
+
+Bool HLSlotKey(I64 sc, Bool *_start_game, Bool saving)
+{
+	I64 count = HLSlotRowCount(saving);
+	I64 slot;
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_slot_row--;
+		if (hl_slot_row < 0)
+			hl_slot_row = count - 1;
+		if (hl_slot_row < 0)
+			hl_slot_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_slot_row++;
+		if (hl_slot_row >= count)
+			hl_slot_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		if (!count)
+			return TRUE;
+
+		slot = HLSlotAtRow(hl_slot_row, saving);
+
+		if (saving)
+		{
+			if (slot < 0)
+				slot = HLSlotFirstFree();
+
+			if (slot < 0)
+				return TRUE;
+			if (!hl_world_active)
+				return TRUE;
+
+			HLMenuSound(HLMSND_ENTER);
+			hl_menu_slot     = slot;
+			hl_menu_save_req = TRUE;
+		}
+		else
+		{
+			if (slot < 0)
+				return TRUE;
+
+			HLMenuSound(HLMSND_ENTER);
+			hl_menu_slot     = slot;
+			hl_menu_load_req = TRUE;
+		}
+
+		hl_menu_page = HLPAGE_MAIN;
+
+		if (_start_game)
+			*_start_game = TRUE;
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLLoadGameDraw(CHLCanvas *c)
+{
+	HLSlotListDraw(c, "Load Game",
+		"Select a saved game in the list below, then press Enter.",
+		"Enter - Load", FALSE);
+}
+
+U0 HLSaveGameDraw(CHLCanvas *c)
+{
+	HLSlotListDraw(c, "Save Game",
+		"Select 'New Saved Game' to create a file, or a saved game to overwrite it.",
+		"Enter - Save", TRUE);
+}
+
+U0 HLMenuDraw(CHLCanvas *c)
+{
+	I64	 items[HLITEM_MAX];
+	I64	 count;
+	I64	 i;
+	I64	 gh;
+	I64	 pitch;
+	I64	 col_x;
+	I64	 hint_x;
+	I64	 top;
+	I64	 y;
+	U8	*label;
+	U8	*hint;
+
+	if (hl_menu_page == HLPAGE_OPTIONS)
+	{
+		HLOptDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_KEYS)
+	{
+		HLKeysDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_NOTICE)
+	{
+		HLNoticeDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_HELP)
+	{
+		HLHelpDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_BROWSER)
+	{
+		HLBrDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_SINGLE)
+	{
+		HLSingleDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_CREATE)
+	{
+		HLCsDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_RULES)
+	{
+		HLRuleDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_MPSETUP)
+	{
+		HLPsDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_MPADV)
+	{
+		HLAdvDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_SPRAY)
+	{
+		HLSprayDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_PLAYERS)
+	{
+		HLPlayersDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_NEWGAME)
+	{
+		HLNewGameDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_LOADGAME)
+	{
+		HLLoadGameDraw(c);
+		return;
+	}
+
+	if (hl_menu_page == HLPAGE_SAVEGAME)
+	{
+		HLSaveGameDraw(c);
+		return;
+	}
+
+	if (hl_menu_ingame)
+		HLDrawFadeScreen(c);
+	else
+	{
+		HLMenuBgDraw(c);
+		HLMenuLogoLoad(c->width);
+
+		if (hl_menu_logo)
+			HLMenuLogoDraw(c);
+		else
+			HLMenuStrColor(c, ToI64(c->width * HLMENU_COL_X),
+				ToI64(c->height * HLMENU_LOGO_Y), "HALF-LIFE", HLMENU_C_SEL);
+	}
+
+	count = HLMenuItems(items);
+
+	if (hl_menu_row < 0)			hl_menu_row = 0;
+	if (hl_menu_row >= count)	hl_menu_row = count - 1;
+
+	gh = HLCHAR_H;
+	if (hl_font.ready)
+		gh = hl_font.row_height;
+
+	pitch  = ToI64(gh * HLMENU_PITCH);
+	col_x  = ToI64(c->width * HLMENU_COL_X);
+	hint_x = ToI64(c->width * HLMENU_HINT_X);
+	top    = ToI64(c->height * HLMENU_COL_Y);
+
+	if (top + count * pitch + pitch > c->height)
+		top = c->height - count * pitch - pitch;
+
+	for (i = 0; i < count; i++)
+	{
+		label = HLMenuItemLabel(items[i]);
+
+		if (!label)
+			goto qmd_next;
+
+		y = top + i * pitch;
+
+		if (i == hl_menu_row)
+		{
+			HLMenuStrColor(c, col_x, y, label, HLMENU_C_SEL);
+
+			hint = HLMenuItemHint(items[i]);
+
+			if (hint)
+				HLMenuStrColor(c, hint_x, y, hint, HLMENU_C_HINT);
+		}
+		else
+			HLMenuStrColor(c, col_x, y, label, HLMENU_C_ITEM);
+
+qmd_next:
+	}
+}
+
+Bool HLOptKey(I64 sc)
+{
+	I64 rows = HLOptRows(hl_opt_tab);
+
+	if (hl_opt_row >= rows)
+		hl_opt_row = rows - 1;
+
+	if (sc == SC_ESC)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_page = HLPAGE_MAIN;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_opt_row--;
+		if (hl_opt_row < 0)
+			hl_opt_row = rows - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_opt_row++;
+		if (hl_opt_row >= rows)
+			hl_opt_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_LEFT || sc == SC_CURSOR_RIGHT)
+	{
+		HLMenuSound(HLMSND_VALUE);
+
+		if (hl_opt_row == HLOPT_STRIP)
+		{
+			if (sc == SC_CURSOR_LEFT)
+				hl_opt_tab--;
+			else
+				hl_opt_tab++;
+
+			if (hl_opt_tab < 0)
+				hl_opt_tab = HLTAB_COUNT - 1;
+			if (hl_opt_tab >= HLTAB_COUNT)
+				hl_opt_tab = 0;
+
+			return TRUE;
+		}
+
+		if (hl_opt_tab == HLTAB_MULTI)
+		{
+			return TRUE;
+		}
+		else if (hl_opt_tab == HLTAB_KEYBOARD)
+		{
+			if (hl_opt_row == HLKB_ALWAYSRUN)
+			{
+				if (HLCvarGet("cl_forwardspeed") > 200.0)
+				{
+					HLCvarSet("cl_forwardspeed", 200.0);
+					HLCvarSet("cl_backspeed", 200.0);
+				}
+				else
+				{
+					HLCvarSet("cl_forwardspeed", 400.0);
+					HLCvarSet("cl_backspeed", 400.0);
+				}
+			}
+		}
+		else if (hl_opt_tab == HLTAB_AIM)
+		{
+			if (hl_opt_row == HLAIM_SENS)
+			{
+				if (sc == SC_CURSOR_LEFT)
+					hl_opt_sensitivity -= 0.02;
+				else
+					hl_opt_sensitivity += 0.02;
+
+				if (hl_opt_sensitivity < 0.02)
+					hl_opt_sensitivity = 0.02;
+				if (hl_opt_sensitivity > 0.60)
+					hl_opt_sensitivity = 0.60;
+			}
+			else if (hl_opt_row == HLAIM_INVERT)
+				HLCvarSet("m_pitch", -HLCvarGet("m_pitch"));
+		}
+		else if (hl_opt_tab == HLTAB_AUDIO)
+		{
+			if (hl_opt_row == HLAUD_SFX)
+			{
+				if (sc == SC_CURSOR_LEFT)
+					hl_opt_volume -= 10;
+				else
+					hl_opt_volume += 10;
+
+				hl_opt_volume = ClampI64(hl_opt_volume, 0, 100);
+				hl_snd_master = ToF64(hl_opt_volume) / 100.0;
+			}
+			else if (hl_opt_row == HLAUD_MP3)
+			{
+				if (sc == SC_CURSOR_LEFT)
+					hl_music_volume -= 0.1;
+				else
+					hl_music_volume += 0.1;
+
+				if (hl_music_volume < 0.0)
+					hl_music_volume = 0.0;
+				if (hl_music_volume > 1.0)
+					hl_music_volume = 1.0;
+
+				HLMusicApplyVolume;
+			}
+		}
+		else
+		{
+			if (hl_opt_row == HLVID_RES)
+			{
+				if (sc == SC_CURSOR_LEFT)
+					hl_opt_res--;
+				else
+					hl_opt_res++;
+
+				hl_opt_res = ClampI64(hl_opt_res, 0, HLRES_COUNT - 1);
+
+				hl_res_dirty = TRUE;
+			}
+			else if (hl_opt_row == HLVID_WINDOWED)
+			{
+				hl_opt_fullscreen = !hl_opt_fullscreen;
+				hl_res_dirty      = TRUE;
+			}
+			else if (hl_opt_row == HLVID_MTBLIT)
+				hl_r_mtblit = !hl_r_mtblit;
+			else if (hl_opt_row == HLVID_HUDSIZE)
+			{
+				if (sc == SC_CURSOR_LEFT)
+				{
+					if (!hl_hud_size)			hl_hud_size = 2560;
+					else if (hl_hud_size == 320)	hl_hud_size = 0;
+					else						hl_hud_size /= 2;
+				}
+				else
+				{
+					if (!hl_hud_size)			hl_hud_size = 320;
+					else if (hl_hud_size >= 2560)	hl_hud_size = 0;
+					else						hl_hud_size *= 2;
+				}
+				hl_hud_dirty = TRUE;
+			}
+			else if (hl_opt_row == HLVID_GAMMA)
+			{
+				if (sc == SC_CURSOR_LEFT)
+					hl_opt_gamma += 0.05;
+				else
+					hl_opt_gamma -= 0.05;
+
+				if (hl_opt_gamma < HLGAMMA_MIN)
+					hl_opt_gamma = HLGAMMA_MIN;
+				if (hl_opt_gamma > HLGAMMA_MAX)
+					hl_opt_gamma = HLGAMMA_MAX;
+
+				HLPalSetGamma(hl_opt_gamma);
+			}
+		}
+
+		HLCfgSave;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_opt_row == HLOPT_STRIP)
+			return TRUE;
+
+		if (hl_opt_tab == HLTAB_MULTI)
+		{
+			if (hl_opt_row == HLMUL_SETUP)
+			{
+				HLModelScan;
+				HLLogoScan;
+				hl_ps_row    = HLPS_NAME;
+				hl_menu_page = HLPAGE_MPSETUP;
+			}
+			else if (hl_opt_row == HLMUL_ADVANCED)
+			{
+				hl_adv_row   = HLADV_DECALS;
+				hl_menu_page = HLPAGE_MPADV;
+			}
+			else if (hl_opt_row == HLMUL_CLOSE)
+				hl_menu_page = HLPAGE_MAIN;
+		}
+		else if (hl_opt_tab == HLTAB_KEYBOARD)
+		{
+			if (hl_opt_row == HLKB_BINDINGS)
+			{
+				hl_keys_row = 0;
+				while (hl_keys_row < hl_act_count &&
+					hl_act_kind[hl_keys_row] != HLACT_ACTION)
+					hl_keys_row++;
+
+				hl_keys_top     = 0;
+				hl_keys_capture = FALSE;
+				hl_menu_page    = HLPAGE_KEYS;
+			}
+			else if (hl_opt_row == HLKB_DEFAULTS)
+				HLOptResetDefaults;
+			else if (hl_opt_row == HLKB_CLOSE)
+				hl_menu_page = HLPAGE_MAIN;
+		}
+		else if (hl_opt_tab == HLTAB_AIM)
+		{
+			if (hl_opt_row == HLAIM_CLOSE)
+				hl_menu_page = HLPAGE_MAIN;
+		}
+		else if (hl_opt_tab == HLTAB_AUDIO)
+		{
+			if (hl_opt_row == HLAUD_CLOSE)
+				hl_menu_page = HLPAGE_MAIN;
+		}
+		else
+		{
+			if (hl_opt_row == HLVID_CLOSE)
+				hl_menu_page = HLPAGE_MAIN;
+		}
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+Bool HLMenuKey(I64 sc, Bool *_start_game)
+{
+	I64 main_items[HLITEM_MAX];
+	I64 main_count;
+
+	*_start_game = FALSE;
+
+	if (hl_menu_page == HLPAGE_NOTICE)
+	{
+		if (sc == SC_ENTER)
+		{
+			HLMenuSound(HLMSND_ENTER);
+			hl_menu_page = HLPAGE_MAIN;
+			return TRUE;
+		}
+		return FALSE;
+	}
+
+	if (hl_menu_page == HLPAGE_OPTIONS)
+		return HLOptKey(sc);
+
+	if (hl_menu_page == HLPAGE_KEYS)
+		return HLKeysKey(sc);
+
+	if (hl_menu_page == HLPAGE_HELP)
+		return HLHelpKey(sc);
+
+	if (hl_menu_page == HLPAGE_BROWSER)
+		return HLBrKey(sc);
+
+	if (hl_menu_page == HLPAGE_SINGLE)
+		return HLSingleKey(sc, _start_game);
+
+	if (hl_menu_page == HLPAGE_CREATE)
+		return HLCsKey(sc);
+
+	if (hl_menu_page == HLPAGE_RULES)
+		return HLRuleKey(sc);
+
+	if (hl_menu_page == HLPAGE_MPSETUP)
+		return HLSetupKey(sc);
+
+	if (hl_menu_page == HLPAGE_MPADV)
+		return HLAdvKey(sc);
+
+	if (hl_menu_page == HLPAGE_SPRAY)
+		return HLSprayKey(sc);
+
+	if (hl_menu_page == HLPAGE_PLAYERS)
+		return FALSE;
+
+	if (hl_menu_page == HLPAGE_NEWGAME)
+		return HLNewGameKey(sc, _start_game);
+
+	if (hl_menu_page == HLPAGE_LOADGAME)
+		return HLSlotKey(sc, _start_game, FALSE);
+
+	if (hl_menu_page == HLPAGE_SAVEGAME)
+		return HLSlotKey(sc, _start_game, TRUE);
+
+	main_count = HLMenuItems(main_items);
+
+	if (sc == SC_CURSOR_UP)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_row--;
+		if (hl_menu_row < 0)
+			hl_menu_row = main_count - 1;
+		return TRUE;
+	}
+
+	if (sc == SC_CURSOR_DOWN)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		hl_menu_row++;
+		if (hl_menu_row >= main_count)
+			hl_menu_row = 0;
+		return TRUE;
+	}
+
+	if (sc == SC_ENTER)
+	{
+		HLMenuSound(HLMSND_ENTER);
+
+		if (hl_menu_row < 0 || hl_menu_row >= main_count)
+			return TRUE;
+
+		switch (main_items[hl_menu_row])
+		{
+			case HLITEM_RESUME:
+				hl_state = HLST_PLAYING;
+				break;
+
+			case HLITEM_NEWGAME:
+				hl_menu_page  = HLPAGE_NEWGAME;
+				hl_skill_row  = HLSKILL_MEDIUM;
+				break;
+
+			case HLITEM_SAVE:
+				hl_menu_page = HLPAGE_SAVEGAME;
+				hl_slot_row  = 0;
+				HLMenuSlotScan;
+				break;
+
+			case HLITEM_LOAD:
+				hl_menu_page = HLPAGE_LOADGAME;
+				hl_slot_row  = 0;
+				HLMenuSlotScan;
+				break;
+
+			case HLITEM_PLAYERS:
+				hl_menu_page = HLPAGE_PLAYERS;
+				break;
+
+			case HLITEM_FIND:
+				hl_menu_page = HLPAGE_BROWSER;
+				hl_br_row    = HLBR_REFRESH;
+				hl_br_top    = 0;
+				break;
+
+			case HLITEM_CREATE:
+				HLMapScan;
+				hl_menu_page = HLPAGE_CREATE;
+				hl_cs_row    = HLCS_MAP;
+				break;
+
+			case HLITEM_OPTIONS:
+				hl_menu_page = HLPAGE_OPTIONS;
+				hl_opt_row   = 0;
+				break;
+
+			case HLITEM_DISCONNECT:
+				hl_menu_leave_req = TRUE;
+				break;
+
+			case HLITEM_LEAVE:
+				hl_menu_leave_req = TRUE;
+				break;
+
+			case HLITEM_QUIT:
+				hl_quit_request = TRUE;
+				break;
+
+			default:
+				break;
+		}
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+I64		hl_menu_mx		= 0;
+I64		hl_menu_my		= 0;
+Bool	hl_menu_ms_ok	= FALSE;
+Bool	hl_menu_m1_was	= FALSE;
+
+U0 HLMenuMsReset()
+{
+	hl_menu_ms_ok  = FALSE;
+	hl_menu_m1_was = FALSE;
+}
+
+U0 HLMenuMsMove(CHLCanvas *c, I64 dx, I64 dy, I64 blit_w, I64 blit_h)
+{
+	I64 bw;
+	I64 bh;
+
+	if (!c || c->width < 1 || c->height < 1)
+		return;
+
+	bw = blit_w;
+	bh = blit_h;
+	if (bw < 1)	bw = 1;
+	if (bh < 1)	bh = 1;
+
+	if (!hl_menu_ms_ok)
+	{
+		hl_menu_mx     = c->width / 2;
+		hl_menu_my     = c->height / 2;
+		hl_menu_ms_ok  = TRUE;
+	}
+
+	hl_menu_mx += dx * c->width / bw;
+	hl_menu_my += dy * c->height / bh;
+
+	if (hl_menu_mx < 0)				hl_menu_mx = 0;
+	if (hl_menu_my < 0)				hl_menu_my = 0;
+	if (hl_menu_mx >= c->width)		hl_menu_mx = c->width - 1;
+	if (hl_menu_my >= c->height)	hl_menu_my = c->height - 1;
+}
+
+U0 HLMenuMsDraw(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 i;
+	I64 px;
+	I64 py;
+
+	if (!c || !c->pixels || !hl_menu_ms_ok)
+		return;
+
+	x = hl_menu_mx;
+	y = hl_menu_my;
+
+	for (i = 0; i < 12; i++)
+	{
+		px = x;
+		py = y + i;
+		if (px >= 0 && px < c->width && py >= 0 && py < c->height)
+			c->pixels[py * c->width + px] = HLMENU_C_SEL;
+
+		px = x + i;
+		py = y;
+		if (px >= 0 && px < c->width && py >= 0 && py < c->height)
+			c->pixels[py * c->width + px] = HLMENU_C_SEL;
+
+		if (i < 8)
+		{
+			px = x + i;
+			py = y + i;
+			if (px >= 0 && px < c->width && py >= 0 && py < c->height)
+				c->pixels[py * c->width + px] = HLMENU_C_SEL;
+		}
+	}
+}
+
+Bool HLMenuMsIn(I64 x, I64 y, I64 w, I64 h)
+{
+	if (w < 1 || h < 1)
+		return FALSE;
+
+	if (hl_menu_mx < x || hl_menu_my < y)
+		return FALSE;
+	if (hl_menu_mx >= x + w || hl_menu_my >= y + h)
+		return FALSE;
+
+	return TRUE;
+}
+
+Bool HLMenuMsArmRow(I64 *rowp, I64 row)
+{
+	if (row < 0)
+		return FALSE;
+
+	if (*rowp != row)
+	{
+		HLMenuSound(HLMSND_MOVE);
+		*rowp = row;
+	}
+
+	return TRUE;
+}
+
+I64 HLMenuMsListRow(I64 top, I64 pitch, I64 count, I64 left, I64 width)
+{//Vertical list hit. -1 when the pointer misses.
+	I64 row;
+
+	if (count < 1 || pitch < 1)
+		return -1;
+	if (!HLMenuMsIn(left, top, width, count * pitch))
+		return -1;
+
+	row = (hl_menu_my - top) / pitch;
+	if (row < 0 || row >= count)
+		return -1;
+
+	return row;
+}
+
+U0 HLMenuMsHoverMain(CHLCanvas *c)
+{
+	I64 items[HLITEM_MAX];
+	I64 count;
+	I64 gh;
+	I64 pitch;
+	I64 col_x;
+	I64 hint_x;
+	I64 top;
+	I64 row;
+	I64 w;
+
+	count = HLMenuItems(items);
+
+	gh = HLCHAR_H;
+	if (hl_font.ready)
+		gh = hl_font.row_height;
+
+	pitch  = ToI64(gh * HLMENU_PITCH);
+	col_x  = ToI64(c->width * HLMENU_COL_X);
+	hint_x = ToI64(c->width * HLMENU_HINT_X);
+	top    = ToI64(c->height * HLMENU_COL_Y);
+
+	if (top + count * pitch + pitch > c->height)
+		top = c->height - count * pitch - pitch;
+
+	w = hint_x - col_x;
+	if (w < 40)
+		w = c->width - col_x;
+
+	row = HLMenuMsListRow(top, pitch, count, col_x, w);
+	HLMenuMsArmRow(&hl_menu_row, row);
+}
+
+U0 HLMenuMsHoverOpt(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 col;
+	I64 pitch;
+	I64 tx;
+	I64 i;
+	I64 rows;
+	I64 row;
+	I64 tw;
+	U8 *label;
+	U8 line[80];
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	pitch = HLMenuLineH();
+	col   = x + HLDlgX(c, 20);
+	rows  = HLOptRows(hl_opt_tab);
+
+	tx = col;
+	for (i = 0; i < HLTAB_COUNT; i++)
+	{
+		label = HLOptTabLabel(i);
+		if (!label)
+			goto qmh_opt_tab;
+
+		if (i == hl_opt_tab && hl_opt_row == HLOPT_STRIP)
+			StrPrint(line, "[%s]", label);
+		else
+			StrPrint(line, " %s ", label);
+
+		tw = HLFontStrWidth(line) + 6;
+
+		if (HLMenuMsIn(tx, y + HLDlgY(c, 34), tw, pitch))
+		{
+			if (hl_opt_tab != i)
+			{
+				HLMenuSound(HLMSND_MOVE);
+				hl_opt_tab = i;
+			}
+			HLMenuMsArmRow(&hl_opt_row, HLOPT_STRIP);
+			return;
+		}
+
+		tx += tw;
+
+qmh_opt_tab:
+	}
+
+	y = y + HLDlgY(c, 64);
+	row = HLMenuMsListRow(y + pitch, pitch, rows - 1, col, w - HLDlgX(c, 40));
+	if (row >= 0)
+		HLMenuMsArmRow(&hl_opt_row, row + 1);
+}
+
+U0 HLMenuMsHoverKeys(CHLCanvas *c)
+{
+	I64 mx;
+	I64 vis;
+	I64 row;
+	I64 hit;
+
+	mx  = HLMenuXOfs(c);
+	vis = HLKeysVisible(c);
+	HLKeysScroll(c);
+
+	hit = HLMenuMsListRow(HLKEYS_TOP, HLKEYS_PITCH, vis, mx,
+		HLMENU_VW);
+	if (hit < 0)
+		return;
+
+	row = hl_keys_top + hit;
+	if (row >= HLKeysRows())
+		return;
+
+	if (row < hl_act_count && hl_act_kind[row] != HLACT_ACTION)
+		return;
+
+	HLMenuMsArmRow(&hl_keys_row, row);
+}
+
+U0 HLMenuMsHoverBr(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 h;
+	I64 bot;
+	I64 pitch;
+	I64 col;
+	I64 top;
+	I64 vis;
+	I64 count;
+	I64 row;
+	I64 i;
+	I64 tx;
+	I64 tw;
+	U8 *label;
+	U8 line[80];
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+	bot = y + h - HLDlgY(c, 44);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 20);
+	count = HLBrCount();
+
+	tx = col;
+	for (i = 0; i < HLBR_TAB_COUNT; i++)
+	{
+		label = HLBrTabLabel(i);
+		if (!label)
+			goto qmh_br_tab;
+
+		if (i == hl_br_tab && hl_br_row == HLBR_STRIP)
+			StrPrint(line, "[%s]", label);
+		else
+			StrPrint(line, " %s ", label);
+
+		tw = HLFontStrWidth(line) + 6;
+		if (HLMenuMsIn(tx, y + HLDlgY(c, 34), tw, pitch))
+		{
+			if (hl_br_tab != i)
+			{
+				HLMenuSound(HLMSND_VALUE);
+				hl_br_tab = i;
+				hl_br_top = 0;
+			}
+			HLMenuMsArmRow(&hl_br_row, HLBR_STRIP);
+			return;
+		}
+		tx += tw;
+
+qmh_br_tab:
+	}
+
+	top = y + HLDlgY(c, 60);
+
+	if (HLMenuMsIn(col, top, w - HLDlgX(c, 40), pitch))
+	{
+		HLMenuMsArmRow(&hl_br_row, HLBR_REFRESH);
+		return;
+	}
+
+	if (HLMenuMsIn(col, top + pitch, w - HLDlgX(c, 40), pitch))
+	{
+		HLMenuMsArmRow(&hl_br_row, HLBR_ADDRESS);
+		return;
+	}
+
+	y = top + 2 * pitch;
+	if (HLMenuMsIn(col, y, w - HLDlgX(c, 40), pitch))
+	{
+		HLMenuMsArmRow(&hl_br_row, HLBR_HEAD);
+		return;
+	}
+
+	y += pitch;
+	vis = (bot - y) / pitch;
+	if (vis < 1)
+		vis = 1;
+	if (vis > HLNET_SLIST_MAX)
+		vis = HLNET_SLIST_MAX;
+
+	row = HLMenuMsListRow(y, pitch, vis, col, w - HLDlgX(c, 40));
+	if (row < 0)
+		return;
+	if (hl_br_top + row >= count)
+		return;
+
+	HLMenuMsArmRow(&hl_br_row, HLBR_LIST + hl_br_top + row);
+}
+
+U0 HLMenuMsHoverDlgRows(CHLCanvas *c, I64 *rowp, I64 rows, I64 y_ofs)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 col;
+	I64 pitch;
+	I64 row;
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 20);
+	y = y + HLDlgY(c, y_ofs);
+
+	row = HLMenuMsListRow(y, pitch, rows, col, w - HLDlgX(c, 40));
+	HLMenuMsArmRow(rowp, row);
+}
+
+U0 HLMenuMsHoverNewGame(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 pitch;
+	I64 row;
+
+	x = HLDlgX(c, 390);
+	y = HLDlgY(c, 254);
+	pitch = HLMenuLineH();
+
+	row = HLMenuMsListRow(y + HLDlgY(c, 68), pitch, HLSKILL_ROWS,
+		x + HLDlgX(c, 52), HLDlgX(c, 200));
+	HLMenuMsArmRow(&hl_skill_row, row);
+}
+
+U0 HLMenuMsHoverSlots(CHLCanvas *c, Bool saving)
+{
+	I64 x;
+	I64 y;
+	I64 col;
+	I64 pitch;
+	I64 count;
+	I64 row;
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 20);
+	count = HLSlotRowCount(saving);
+
+	row = HLMenuMsListRow(y + HLDlgY(c, 80), pitch, count, col,
+		HLDlgX(c, 468));
+	HLMenuMsArmRow(&hl_slot_row, row);
+}
+
+U0 HLMenuMsHoverSpray(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 h;
+	I64 bot;
+	I64 pitch;
+	I64 col;
+	I64 vis;
+	I64 row;
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	h = HLDlgY(c, 414);
+	bot = y + h - HLDlgY(c, 44);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 20);
+	y = y + HLDlgY(c, 44);
+
+	vis = (bot - y) / pitch;
+	if (vis < 1)
+		vis = 1;
+
+	row = HLMenuMsListRow(y, pitch, vis, col, w - HLDlgX(c, 40));
+	if (row < 0)
+		return;
+	if (hl_logo_top + row >= hl_logo_count)
+		return;
+
+	HLMenuMsArmRow(&hl_logo_sel, hl_logo_top + row);
+}
+
+U0 HLMenuMsHoverSingle(CHLCanvas *c)
+{
+	I64 mx;
+	I64 row;
+
+	mx = HLMenuXOfs(c);
+	row = HLMenuMsListRow(HLMENU_Y, HLMENU_ROW_H, HLSP_ROWS, mx + 72,
+		HLMENU_VW - 72);
+	HLMenuMsArmRow(&hl_sp_row, row);
+}
+
+U0 HLMenuMsHoverPs(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 col;
+	I64 pitch;
+	I64 row;
+
+	x = HLDlgX(c, 152);
+	y = HLDlgY(c, 142);
+	w = HLDlgX(c, 508);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 230);
+	y = y + HLDlgY(c, 44);
+
+	row = HLMenuMsListRow(y, pitch, HLPS_ROWS, col, w - HLDlgX(c, 250));
+	HLMenuMsArmRow(&hl_ps_row, row);
+}
+
+U0 HLMenuMsHoverAdv(CHLCanvas *c)
+{
+	I64 x;
+	I64 y;
+	I64 w;
+	I64 col;
+	I64 pitch;
+	I64 row;
+
+	x = HLDlgX(c, 60);
+	y = HLDlgY(c, 108);
+	w = HLDlgX(c, 472);
+	pitch = HLMenuLineH();
+	col = x + HLDlgX(c, 16);
+	y = y + HLDlgY(c, 56);
+
+	row = HLMenuMsListRow(y, pitch, HLADV_ROWS, col, w - HLDlgX(c, 32));
+	HLMenuMsArmRow(&hl_adv_row, row);
+}
+
+U0 HLMenuMsHover(CHLCanvas *c)
+{
+	if (!c || !hl_menu_ms_ok)
+		return;
+
+	if (hl_menu_page == HLPAGE_MAIN)
+		HLMenuMsHoverMain(c);
+	else if (hl_menu_page == HLPAGE_OPTIONS)
+		HLMenuMsHoverOpt(c);
+	else if (hl_menu_page == HLPAGE_KEYS)
+		HLMenuMsHoverKeys(c);
+	else if (hl_menu_page == HLPAGE_BROWSER)
+		HLMenuMsHoverBr(c);
+	else if (hl_menu_page == HLPAGE_CREATE)
+		HLMenuMsHoverDlgRows(c, &hl_cs_row, HLCS_ROWS, 60);
+	else if (hl_menu_page == HLPAGE_RULES)
+		HLMenuMsHoverDlgRows(c, &hl_rule_row, HLR_ROWS, 44);
+	else if (hl_menu_page == HLPAGE_MPSETUP)
+		HLMenuMsHoverPs(c);
+	else if (hl_menu_page == HLPAGE_MPADV)
+		HLMenuMsHoverAdv(c);
+	else if (hl_menu_page == HLPAGE_NEWGAME)
+		HLMenuMsHoverNewGame(c);
+	else if (hl_menu_page == HLPAGE_LOADGAME)
+		HLMenuMsHoverSlots(c, FALSE);
+	else if (hl_menu_page == HLPAGE_SAVEGAME)
+		HLMenuMsHoverSlots(c, TRUE);
+	else if (hl_menu_page == HLPAGE_SPRAY)
+		HLMenuMsHoverSpray(c);
+	else if (hl_menu_page == HLPAGE_SINGLE)
+		HLMenuMsHoverSingle(c);
+}
+
+I64 HLMenuMsClickSc()
+{
+	if (hl_menu_page == HLPAGE_OPTIONS)
+	{
+		if (hl_opt_tab == HLTAB_KEYBOARD && hl_opt_row == HLKB_ALWAYSRUN)
+			return SC_CURSOR_RIGHT;
+		if (hl_opt_tab == HLTAB_AIM)
+		{
+			if (hl_opt_row == HLAIM_SENS || hl_opt_row == HLAIM_INVERT)
+				return SC_CURSOR_RIGHT;
+		}
+		if (hl_opt_tab == HLTAB_AUDIO)
+		{
+			if (hl_opt_row == HLAUD_SFX || hl_opt_row == HLAUD_MP3)
+				return SC_CURSOR_RIGHT;
+		}
+		if (hl_opt_tab == HLTAB_VIDEO)
+		{
+			if (hl_opt_row == HLVID_RES || hl_opt_row == HLVID_WINDOWED ||
+				hl_opt_row == HLVID_GAMMA || hl_opt_row == HLVID_MTBLIT ||
+				hl_opt_row == HLVID_HUDSIZE)
+				return SC_CURSOR_RIGHT;
+		}
+	}
+	else if (hl_menu_page == HLPAGE_RULES)
+	{
+		if (hl_rule_row != HLR_TEAMLIST && hl_rule_row != HLR_CLOSE)
+			return SC_CURSOR_RIGHT;
+	}
+	else if (hl_menu_page == HLPAGE_CREATE)
+	{
+		if (hl_cs_row == HLCS_MAP || hl_cs_row == HLCS_MAXPLAYERS)
+			return SC_CURSOR_RIGHT;
+	}
+	else if (hl_menu_page == HLPAGE_MPSETUP)
+	{
+		if (hl_ps_row == HLPS_MODEL || hl_ps_row == HLPS_PRIMARY ||
+			hl_ps_row == HLPS_SECONDARY || hl_ps_row == HLPS_SPRAYCOLOR ||
+			hl_ps_row == HLPS_HIMODELS)
+			return SC_CURSOR_RIGHT;
+	}
+	else if (hl_menu_page == HLPAGE_MPADV)
+	{
+		if (hl_adv_row == HLADV_DECALS)
+			return SC_CURSOR_RIGHT;
+	}
+
+	return SC_ENTER;
+}
+
+Bool HLMenuMouse(CHLCanvas *c, I64 dx, I64 dy, I64 blit_w, I64 blit_h,
+	Bool m1, I64 wheel, Bool *_start_game)
+{
+	Bool click;
+	Bool used;
+	I64  sc;
+
+	*_start_game = FALSE;
+	used = FALSE;
+
+	if (!c)
+		return FALSE;
+
+	if (hl_setup_editing || hl_lan_editing || hl_keys_capture)
+	{
+		hl_menu_m1_was = m1;
+		return FALSE;
+	}
+
+	HLMenuMsMove(c, dx, dy, blit_w, blit_h);
+	HLMenuMsHover(c);
+
+	click = ToBool(m1 && !hl_menu_m1_was);
+	hl_menu_m1_was = m1;
+
+	if (wheel > 0)
+	{
+		if (HLMenuKey(SC_CURSOR_UP, _start_game))
+			used = TRUE;
+	}
+	else if (wheel < 0)
+	{
+		if (HLMenuKey(SC_CURSOR_DOWN, _start_game))
+			used = TRUE;
+	}
+
+	if (click)
+	{
+		sc = HLMenuMsClickSc;
+		if (HLMenuKey(sc, _start_game))
+			used = TRUE;
+	}
+
+	return used;
+}

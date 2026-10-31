@@ -1,0 +1,1680 @@
+// ED_LoadFromFile, entity lump parsing and static spawning
+//
+// the lump is brace-delimited quoted key/value text sliced out of the map
+// buffer, not NUL terminated - every scan is bounded by an end pointer
+//
+//   brush entities  "model" "*N", index into the bsp's model list
+//   point entities  origin only
+//
+// no QuakeC VM on this path: point entities take their model from the table
+// below and spawn in the rest pose.
+
+#define HLENT_MAX	1024
+
+
+#define HLMOVETYPE_NONE			0
+#define HLMOVETYPE_ANGLENOCLIP	1
+#define HLMOVETYPE_ANGLECLIP		2
+#define HLMOVETYPE_WALK			3
+#define HLMOVETYPE_STEP			4
+#define HLMOVETYPE_FLY			5
+#define HLMOVETYPE_TOSS			6
+#define HLMOVETYPE_PUSH			7
+#define HLMOVETYPE_NOCLIP		8
+#define HLMOVETYPE_FLYMISSILE	9
+#define HLMOVETYPE_BOUNCE		10
+
+#define HLC_NONE			0
+#define HLC_DOOR			1
+#define HLC_BUTTON			2
+#define HLC_TRAIN			3
+#define HLC_TRACKTRAIN		4
+#define HLC_PLAT			5
+#define HLC_PATH			6
+#define HLC_TRIGGER			7
+#define HLC_WALL			8
+#define HLC_LIGHT			9
+#define HLC_MANAGER			10
+#define HLC_SCRIPT			11
+#define HLC_MONSTER			12
+#define HLC_SENTENCE			13
+#define HLC_ITEM				14
+#define HLC_CHARGER			15
+#define HLC_SPRITE			16
+#define HLC_BEAM				17
+#define HLC_ROTATE			18
+#define HLC_PUSHABLE			19
+#define HLC_TRACKCHANGE		20
+#define HLC_TRACKAUTO		21
+#define HLC_TANK			22
+#define HLC_WEAPONBOX		23
+#define HLC_GUNTARGET		24
+#define HLC_TRAINCONTROLS	25
+
+#define HLSOLID_NOT			0
+#define HLSOLID_TRIGGER		1
+#define HLSOLID_BBOX			2
+#define HLSOLID_SLIDEBOX		3
+#define HLSOLID_BSP			4
+
+#define HLTS_AT_TOP			0
+#define HLTS_AT_BOTTOM		1
+#define HLTS_GOING_UP		2
+#define HLTS_GOING_DOWN		3
+
+//pev->controller slots: four generic channels plus the mouth at 4
+#define HLENT_MAX_CTL		5
+
+#define HLUSE_OFF			0
+#define HLUSE_ON				1
+#define HLUSE_SET			2
+#define HLUSE_TOGGLE			3
+
+class CHLEntity
+{
+	U8		 classname[64];
+	U8		 model_name[64];
+	F64		 origin[3];
+	F64		 angles[3];
+	I64			 brush_model;	//BSP model index, or -1
+	CHLMdl		*mdl;
+	CHLStudio	*studio;
+	I64			 frame;
+
+	I64			 seq;
+	I64			 body;
+	I64			 skin;
+
+	F64		 controllers[HLENT_MAX_CTL];
+
+	F64		 blending[2];
+
+	I64		 pose;
+
+	//CBaseTurret::m_iOrientation, turret.cpp:116.
+	I64		 orient;
+
+	U8		 targetname[64];
+	U8		 target[64];
+	U8		 killtarget[64];
+	U8		 master[64];
+	U8		 message[128];
+	U8		 netname[64];
+	I64		 spawnflags;
+
+	I64		 weapons;
+
+	Bool	 follow_player;
+
+	Bool	 monsterclip;
+
+	Bool	 dormant;
+
+	I64		 movetype;
+	I64		 solid;
+	F64		 velocity[3];
+	F64		 avelocity[3];		//degrees per second
+	F64		 mins[3];
+	F64		 maxs[3];
+	F64		 absmin[3];
+	F64		 absmax[3];
+	F64		 size[3];
+
+	F64		 speed;
+
+	//CFuncTrackTrain::m_startSpeed, plats.cpp:969.
+	F64		 start_speed;
+
+	F64		 train_speed;
+	F64		 train_length;
+	F64		 train_bank;
+
+	//CFuncMortarField, dlls/mortar.cpp. m_flDelay is save-only;
+	F64		 mortar_spread;
+	I64		 mortar_count;
+	I64		 mortar_control;
+	U8		 mortar_xctl[64];
+	U8		 mortar_yctl[64];
+
+	//CFuncTank, dlls/func_tank.cpp. Map keys + mount runtime.
+	F64		 tank_yaw_rate;
+	F64		 tank_yaw_range;
+	F64		 tank_pitch_rate;
+	F64		 tank_pitch_range;
+	F64		 tank_fire_rate;
+	F64		 tank_yaw_center;
+	F64		 tank_pitch_center;
+	F64		 tank_next_fire;
+	I64		 tank_bullet;		//TANKBULLET: 0 none, 1 9mm, 2 mp5, 3 12mm
+	I64		 tank_bullet_dmg;
+	I64		 tank_kind;			//0 gun, 1 laser, 2 rocket, 3 mortar
+	I64		 tank_link;			//controls↔tank entity index, -1 none
+	Bool	 tank_mounted;
+
+	F64		 wait;
+	F64		 delay;
+	F64		 lip;
+	F64		 height;
+	F64		 dmg;
+
+	//CBaseTrigger::m_bitsDamageInflict, the "damagetype" key, triggers.cpp:575.
+	I64		 damage_type;
+
+	F64		 damage;
+	F64		 health;
+	F64		 max_health;
+	I64		 takedamage;
+	I64		 toggle_state;
+	I64		 ent_class;
+
+	U8		 ai_play[64];
+	U8		 ai_idle[64];
+	U8		 ai_entity[64];
+	I64		 ai_moveto;
+	I64		 ai_finish;
+	F64		 ai_radius;
+
+	F64		 anim_start;
+	Bool	 anim_loop;
+	Bool	 anim_done;
+
+	I64		 anim_event_frame;
+
+	I64		 move_snd;
+	I64		 stop_snd;
+	I64		 snd_index;
+	F64		 volume;
+
+	I64		 locked_snd;
+	I64		 unlocked_snd;
+	I64		 locked_sentence;
+	I64		 unlocked_sentence;
+
+	//locksound_t, doors.cpp:106.
+	F64		 lock_wait_snd;
+	F64		 lock_wait_sent;
+	I64		 lock_sent_ord;
+	I64		 unlock_sent_ord;
+	Bool	 lock_sent_eof;
+	Bool	 unlock_sent_eof;
+
+	F64		 position1[3];
+	F64		 position2[3];
+	F64		 angle1[3];
+	F64		 angle2[3];
+	F64		 finaldest[3];
+	F64		 finalangle[3];
+	F64		 move_dir[3];
+
+	I64		 think_fn;
+	F64		 next_think;		//absolute game time, 0 = never
+	I64		 move_done;
+	I64		 touch_fn;
+	I64		 use_fn;
+	I64		 blocked_fn;
+
+	Bool	 remove_after_fire;
+
+	I64		 owner;				//entity index, -1 for none
+	I64		 activator;
+	F64		 ltime;
+	F64		 pain_finished;
+
+	I64		 rendermode;
+	F64		 renderamt;
+	F64		 rendercolor[3];
+	I64		 renderfx;
+	I64		 effects;
+	I64		 style;
+
+
+	CHLSpr	*spr;
+	F64		 framerate;
+	F64		 scale;
+	Bool	 visible;
+
+	U8		 beam_start_name[64];
+	U8		 beam_end_name[64];
+	I64		 beam_start;		//entity index, -1 = use this entity's origin
+	I64		 beam_end;
+	F64		 beam_width;
+
+	I64		 beam_frame;
+
+	F64		 beam_noise;
+	F64		 beam_scroll;
+
+	F64		 beam_life;			//CLightning "life", 0 = a permanent server beam
+	F64		 beam_restrike;
+	Bool	 beam_active;
+
+	I64		 density;
+
+	I64		 blood_color;
+	F64		 blood_amount;
+
+	I64		 gib_count;
+	I64		 gib_left;
+	F64		 gib_velocity;
+	F64		 gib_variance;
+	F64		 gib_life;
+	U8		 shoot_model[64];
+
+	F64		 hold_time;
+	F64		 fade_in;
+	F64		 fade_out;
+	F64		 text_x;			//game_text x/y, -1 = centre on that axis
+	F64		 text_y;
+
+	F64		 text_color[3];
+	F64		 text_color2[3];
+
+	F64		 radius;
+	F64		 amplitude;
+	F64		 frequency;
+	F64		 duration;
+	F64		 magnitude;
+	F64		 max_delay;
+	F64		 modifier;
+	F64		 damp;
+	F64		 gravity;
+	I64		 roomtype;
+	I64		 preset;
+
+	F64		 distance;
+	Bool	 moving_angular;
+	F64		 momentary_frac;
+
+	//CBasePlatTrain::KeyValue's "rotation", plats.cpp:78 - m_vecFinalAngle.x.
+	F64		 rot_amount;
+
+	//func_trackchange / func_trackautochange. CFuncTrackChange, plats.cpp:1618.
+	U8		 track_top[64];
+	U8		 track_bottom[64];
+	U8		 track_train[64];
+	I64		 track_top_ent;
+	I64		 track_bottom_ent;
+	I64		 track_train_ent;
+	I64		 track_code;
+	I64		 track_target;
+	Bool	 track_use;
+
+	Bool	 rotates;
+
+	F64		 charge;
+	F64		 charge_next;
+
+	F64		 use_last;
+
+	I64		 material;
+
+	I64		 spawn_object;
+
+	//CWorldItem::m_iType, items.cpp:48.
+	I64		 item_type;
+
+	//trigger_camera. CTriggerCamera, triggers.cpp:2157.
+	U8		 cam_moveto[64];
+	F64		 cam_accel;
+	F64		 cam_decel;
+	F64		 cam_return;
+	F64		 cam_stop;
+	F64		 cam_move_dist;
+	F64		 cam_target_speed;
+	F64		 cam_initial_speed;
+	I64		 cam_path;
+	I64		 cam_target;
+
+	F64		 revert_message_time;
+	F64		 revert_load_time;
+
+	//func_pushable. CPushable, dlls/func_break.cpp:790
+	F64		 push_friction;		//"friction", clamped to 399 at spawn
+	F64		 push_max_speed;	//m_maxSpeed, 400 - friction. units per second
+	F64		 push_buoyancy;
+	F64		 push_snd_time;
+	I64		 push_snd_last;
+
+	//func_rotating. CFuncRotating::KeyValue, dlls/bmodels.cpp:319
+	F64		 fan_friction;		//m_flFanFriction, the key over 100
+	F64		 fan_atten;
+
+	//ambient_generic modulation. CAmbientGeneric::KeyValue, dlls/sound.cpp:283.
+	I64		 amb_pitch;
+	I64		 amb_pitchstart;
+	I64		 amb_spinup;
+	I64		 amb_spindown;
+	I64		 amb_volstart;
+	I64		 amb_lfotype;
+	I64		 amb_lforate;
+	I64		 amb_lfomodpitch;
+	I64		 amb_lfomodvol;
+	I64		 amb_cspinup;
+
+	U8		 texture[64];
+	U8		 next_map[64];
+	U8		 landmark[64];
+	U8		 global_state[64];
+	U8		 global_name[64];
+	U8		 ai_sentence[64];
+	U8		 ai_listener[64];
+	F64		 ai_refire;
+	I64		 ai_atten;
+							//0 idle, 1 static, 2 norm, 3 none
+	I64		 trigger_mode;
+	I64		 initial_state;
+
+	F64		 light_org[3];
+	I64		 light_value;
+	I64		 light_style;
+	I64		 light_style_val;
+	Bool	 light_dlit;
+	Bool	 light_valid;
+
+	Bool	 in_use;
+	Bool	 spawned;
+};
+
+CHLEntity	*hl_entities		= NULL;
+I64			 hl_num_entities	= 0;
+
+#define HLENT_LIGHT_SLOP	4.0
+
+I64 HLEntLightPoint(CHLMap *map, CHLEntity *e)
+{
+	F64	 delta[3];
+	Bool dlit;
+	Bool resample;
+
+	if (!e)
+		return HLLIGHT_FALLBACK;
+
+	dlit     = HLDlightNear(e->origin, hl_light_time);
+	resample = FALSE;
+
+	if (dlit || e->light_dlit)
+		resample = TRUE;
+	else if (!e->light_valid)
+		resample = TRUE;
+	else
+	{
+		HLVecSub(e->origin, e->light_org, delta);
+
+		if (HLVecLength(delta) > HLENT_LIGHT_SLOP)
+			resample = TRUE;
+		else if (e->light_style >= 0 &&
+			hl_light_pt_key != e->light_style_val)
+			resample = TRUE;
+	}
+
+	if (!resample)
+		return e->light_value;
+
+	e->light_value     = HLLightPoint(map, e->origin);
+	e->light_style     = hl_light_pt_key;	//-1 when no lit face was found
+	e->light_style_val = hl_light_pt_key;
+
+	HLVecCopy(e->origin, e->light_org);
+	e->light_dlit  = dlit;
+	e->light_valid = TRUE;
+
+	return e->light_value;
+}
+
+U8 *HLEntModelForClass(U8 *classname)
+{
+	if (!StrCompare(classname, "monster_scientist"))
+		return "models/scientist.mdl";
+
+	if (!StrCompare(classname, "monster_sitting_scientist"))
+		return "models/scientist.mdl";
+	if (!StrCompare(classname, "monster_scientist_dead"))
+		return "models/scientist.mdl";
+
+	if (!StrCompare(classname, "monster_barney"))	return "models/barney.mdl";
+	if (!StrCompare(classname, "monster_barney_dead"))
+		return "models/barney.mdl";
+	if (!StrCompare(classname, "monster_hgrunt_dead"))
+		return "models/hgrunt.mdl";
+
+	if (!StrCompare(classname, "monster_hevsuit_dead"))
+		return "models/player.mdl";
+
+	if (!StrCompare(classname, "monster_gman"))		return "models/gman.mdl";
+	if (!StrCompare(classname, "monster_barnacle"))
+		return "models/barnacle.mdl";
+	if (!StrCompare(classname, "monster_tripmine"))
+		return "models/v_tripmine.mdl";
+	if (!StrCompare(classname, "monster_sentry"))
+		return "models/sentry.mdl";
+	if (!StrCompare(classname, "monster_turret"))
+		return "models/turret.mdl";
+	if (!StrCompare(classname, "monster_miniturret"))
+		return "models/miniturret.mdl";
+	if (!StrCompare(classname, "monster_cockroach"))
+		return "models/roach.mdl";
+	if (!StrCompare(classname, "monster_headcrab"))	return "models/headcrab.mdl";
+	if (!StrCompare(classname, "monster_babycrab"))
+		return "models/baby_headcrab.mdl";
+	if (!StrCompare(classname, "monster_zombie"))	return "models/zombie.mdl";
+	if (!StrCompare(classname, "monster_houndeye"))	return "models/houndeye.mdl";
+	if (!StrCompare(classname, "monster_alien_slave"))
+		return "models/islave.mdl";
+	if (!StrCompare(classname, "monster_alien_grunt"))
+		return "models/agrunt.mdl";
+	if (!StrCompare(classname, "monster_human_grunt"))
+		return "models/hgrunt.mdl";
+	if (!StrCompare(classname, "monster_bullchicken"))
+		return "models/bullsquid.mdl";
+	if (!StrCompare(classname, "monster_human_assassin"))
+		return "models/hassassin.mdl";
+	if (!StrCompare(classname, "monster_alien_controller"))
+		return "models/controller.mdl";
+	if (!StrCompare(classname, "monster_gargantua"))	return "models/garg.mdl";
+	if (!StrCompare(classname, "monster_bigmomma"))
+		return "models/big_mom.mdl";
+	if (!StrCompare(classname, "monster_tentacle"))
+		return "models/tentacle2.mdl";
+	if (!StrCompare(classname, "monster_nihilanth"))
+		return "models/nihilanth.mdl";
+	if (!StrCompare(classname, "monster_apache"))
+		return "models/apache.mdl";
+	if (!StrCompare(classname, "monster_osprey"))
+		return "models/osprey.mdl";
+	if (!StrCompare(classname, "monster_snark"))	return "models/w_squeak.mdl";
+	if (!StrCompare(classname, "monster_leech"))	return "models/leech.mdl";
+	if (!StrCompare(classname, "monster_ichthyosaur"))
+		return "models/icky.mdl";
+
+	if (!StrCompare(classname, "item_healthkit"))
+		return "models/w_medkit.mdl";
+	if (!StrCompare(classname, "item_battery"))	return "models/w_battery.mdl";
+	if (!StrCompare(classname, "item_suit"))	return "models/w_suit.mdl";
+	if (!StrCompare(classname, "item_longjump"))
+		return "models/w_longjump.mdl";
+
+	//items.cpp:266 and :290.
+	if (!StrCompare(classname, "item_antidote"))
+		return "models/w_antidote.mdl";
+	if (!StrCompare(classname, "item_security"))
+		return "models/w_security.mdl";
+
+	//CItemSoda::Spawn, effects.cpp:2227. env_beverage dispenses these
+	if (!StrCompare(classname, "item_sodacan"))
+		return "models/can.mdl";
+
+	if (!StrCompare(classname, "xen_plantlight"))	return "models/light.mdl";
+	if (!StrCompare(classname, "xen_hair"))			return "models/hair.mdl";
+	if (!StrCompare(classname, "xen_tree"))			return "models/tree.mdl";
+	if (!StrCompare(classname, "xen_spore_small"))
+		return "models/fungus(small).mdl";
+	if (!StrCompare(classname, "xen_spore_medium"))	return "models/fungus.mdl";
+	if (!StrCompare(classname, "xen_spore_large"))
+		return "models/fungus(large).mdl";
+
+	if (!StrCompare(classname, "weapon_crowbar"))	return "models/w_crowbar.mdl";
+	if (!StrCompare(classname, "weapon_9mmhandgun"))
+		return "models/w_9mmhandgun.mdl";
+	if (!StrCompare(classname, "weapon_357"))	return "models/w_357.mdl";
+	if (!StrCompare(classname, "weapon_9mmAR"))	return "models/w_9mmAR.mdl";
+	if (!StrCompare(classname, "weapon_shotgun"))	return "models/w_shotgun.mdl";
+	if (!StrCompare(classname, "weapon_crossbow"))	return "models/w_crossbow.mdl";
+	if (!StrCompare(classname, "weapon_rpg"))	return "models/w_rpg.mdl";
+	if (!StrCompare(classname, "weapon_satchel"))	return "models/w_satchel.mdl";
+	if (!StrCompare(classname, "weapon_handgrenade"))
+		return "models/w_grenade.mdl";
+	if (!StrCompare(classname, "weapon_tripmine"))	return "models/w_tripmine.mdl";
+	if (!StrCompare(classname, "weapon_egon"))	return "models/w_egon.mdl";
+	if (!StrCompare(classname, "weapon_gauss"))	return "models/w_gauss.mdl";
+	if (!StrCompare(classname, "ammo_9mmclip"))	return "models/w_9mmclip.mdl";
+	if (!StrCompare(classname, "ammo_9mmbox"))	return "models/w_chainammo.mdl";
+	if (!StrCompare(classname, "ammo_buckshot"))
+		return "models/w_shotbox.mdl";
+	if (!StrCompare(classname, "ammo_rpgclip"))	return "models/w_rpgammo.mdl";
+	if (!StrCompare(classname, "ammo_357"))	return "models/w_357ammobox.mdl";
+
+	if (!StrCompare(classname, "weapon_glock"))
+		return "models/w_9mmhandgun.mdl";
+	if (!StrCompare(classname, "weapon_mp5"))	return "models/w_9mmAR.mdl";
+	if (!StrCompare(classname, "weapon_python"))	return "models/w_357.mdl";
+	if (!StrCompare(classname, "ammo_glockclip"))	return "models/w_9mmclip.mdl";
+	if (!StrCompare(classname, "ammo_mp5clip"))
+		return "models/w_9mmARclip.mdl";
+	if (!StrCompare(classname, "ammo_mp5grenades"))
+		return "models/w_ARgrenade.mdl";
+	if (!StrCompare(classname, "ammo_egonclip"))	return "models/w_gaussammo.mdl";
+
+	//the rest of pSpawnObjects
+	if (!StrCompare(classname, "ammo_9mmAR"))
+		return "models/w_9mmARclip.mdl";
+	if (!StrCompare(classname, "ammo_ARgrenades"))
+		return "models/w_ARgrenade.mdl";
+	if (!StrCompare(classname, "ammo_crossbow"))
+		return "models/w_crossbow_clip.mdl";
+	if (!StrCompare(classname, "ammo_gaussclip"))
+		return "models/w_gaussammo.mdl";
+	if (!StrCompare(classname, "weapon_snark"))
+		return "models/w_sqknest.mdl";
+	if (!StrCompare(classname, "weapon_hornetgun"))
+		return "models/w_hgun.mdl";
+
+	if (!StrCompare(classname, "item_artifact_invulnerability"))
+		return "progs/invulner.mdl";
+	if (!StrCompare(classname, "item_artifact_super_damage"))
+		return "progs/quaddama.mdl";
+	if (!StrCompare(classname, "item_artifact_envirosuit"))
+		return "progs/suit.mdl";
+	if (!StrCompare(classname, "item_artifact_invisibility"))
+		return "progs/invisibl.mdl";
+
+	if (!StrCompare(classname, "item_armor1"))		return "progs/armor.mdl";
+	if (!StrCompare(classname, "item_armor2"))		return "progs/armor.mdl";
+	if (!StrCompare(classname, "item_armorInv"))	return "progs/armor.mdl";
+	if (!StrCompare(classname, "item_key1"))		return "progs/w_s_key.mdl";
+	if (!StrCompare(classname, "item_key2"))		return "progs/w_g_key.mdl";
+	if (!StrCompare(classname, "item_backpack"))	return "progs/backpack.mdl";
+
+	if (!StrCompare(classname, "weapon_supershotgun"))
+		return "progs/g_shot.mdl";
+	if (!StrCompare(classname, "weapon_nailgun"))	return "progs/g_nail.mdl";
+	if (!StrCompare(classname, "weapon_supernailgun"))
+		return "progs/g_nail2.mdl";
+	if (!StrCompare(classname, "weapon_grenadelauncher"))
+		return "progs/g_rock.mdl";
+	if (!StrCompare(classname, "weapon_rocketlauncher"))
+		return "progs/g_rock2.mdl";
+	if (!StrCompare(classname, "weapon_lightning"))	return "progs/g_light.mdl";
+
+	if (!StrCompare(classname, "monster_army"))		return "progs/soldier.mdl";
+	if (!StrCompare(classname, "monster_dog"))		return "progs/dog.mdl";
+	if (!StrCompare(classname, "monster_ogre"))		return "progs/ogre.mdl";
+	if (!StrCompare(classname, "monster_knight"))	return "progs/knight.mdl";
+	if (!StrCompare(classname, "monster_hell_knight"))
+		return "progs/hknight.mdl";
+	if (!StrCompare(classname, "monster_zombie"))	return "progs/zombie.mdl";
+	if (!StrCompare(classname, "monster_wizard"))	return "progs/wizard.mdl";
+	if (!StrCompare(classname, "monster_demon1"))	return "progs/demon.mdl";
+	if (!StrCompare(classname, "monster_shambler"))	return "progs/shambler.mdl";
+	if (!StrCompare(classname, "monster_enforcer"))	return "progs/enforcer.mdl";
+	if (!StrCompare(classname, "monster_fish"))		return "progs/fish.mdl";
+	if (!StrCompare(classname, "monster_tarbaby"))	return "progs/tarbaby.mdl";
+	if (!StrCompare(classname, "monster_boss"))		return "progs/boss.mdl";
+
+	return NULL;
+}
+
+
+#define HLENT_SPR_CACHE	64
+
+class CHLEntSprSlot
+{
+	U8		 name[64];
+	CHLSpr	*spr;
+};
+
+CHLEntSprSlot	hl_ent_spr_cache[HLENT_SPR_CACHE];
+I64				hl_ent_spr_count = 0;
+
+U0 HLEntSprCacheInit()
+{
+	I64 i;
+
+	for (i = 0; i < HLENT_SPR_CACHE; i++)
+	{
+		hl_ent_spr_cache[i].name[0] = 0;
+		hl_ent_spr_cache[i].spr     = NULL;
+	}
+
+	hl_ent_spr_count = 0;
+}
+
+HLEntSprCacheInit;
+
+U0 HLEntSprCacheFree()
+{
+	I64 i;
+
+	for (i = 0; i < hl_ent_spr_count; i++)
+	{
+		if (hl_ent_spr_cache[i].spr)
+			HLSprFree(hl_ent_spr_cache[i].spr);
+
+		hl_ent_spr_cache[i].spr     = NULL;
+		hl_ent_spr_cache[i].name[0] = 0;
+	}
+
+	hl_ent_spr_count = 0;
+}
+
+CHLSpr *HLEntSprCacheGet(U8 *name)
+{
+	CHLSpr	*sp;
+	I64		 i;
+
+	if (!name || !name[0])
+		return NULL;
+
+	for (i = 0; i < hl_ent_spr_count; i++)
+	{
+		if (!StrICompare(hl_ent_spr_cache[i].name, name))
+			return hl_ent_spr_cache[i].spr;
+	}
+
+	if (hl_ent_spr_count >= HLENT_SPR_CACHE)
+		return NULL;
+
+	sp = HLSprLoad(name);
+
+	i = hl_ent_spr_count;
+	HLStrCopy(hl_ent_spr_cache[i].name, name, 64);
+	hl_ent_spr_cache[i].spr = sp;
+	hl_ent_spr_count        = i + 1;
+
+	return sp;
+}
+
+
+U8	*hl_ent_titles		= NULL;
+I64	 hl_ent_titles_size	= 0;
+Bool hl_ent_titles_tried	= FALSE;
+
+U0 HLEntTitlesInit()
+{
+	hl_ent_titles      = NULL;
+	hl_ent_titles_size = 0;
+	hl_ent_titles_tried = FALSE;
+}
+
+HLEntTitlesInit;
+
+U0 HLEntTitlesLoad()
+{
+	if (hl_ent_titles_tried)
+		return;
+
+	hl_ent_titles_tried = TRUE;
+	hl_ent_titles       = HLFileLoad("titles.txt", &hl_ent_titles_size);
+
+	if (!hl_ent_titles)
+		"HLEnt: titles.txt missing - env_message shows its key\n";
+}
+
+Bool HLEntTitleFind(U8 *name, U8 *out, I64 max)
+{
+	U8	*p;
+	U8	*end;
+	I64	 n;
+	I64	 k;
+	I64	 len;
+	Bool matched;
+
+	if (!out || max < 1)
+		return FALSE;
+
+	out[0] = 0;
+
+	if (!name || !name[0])
+		return FALSE;
+
+	HLEntTitlesLoad;
+
+	if (!hl_ent_titles)
+		return FALSE;
+
+	len = StrLen(name);
+	p   = hl_ent_titles;
+	end = hl_ent_titles + hl_ent_titles_size;
+
+	while (p < end)
+	{
+		matched = FALSE;
+
+		if (p + len <= end && !StrNICompare(p, name, len))
+		{
+			k = len;
+
+			while (p + k < end && (p[k] == ' ' || p[k] == 9 || p[k] == 13))
+				k++;
+
+			if (p + k >= end || p[k] == 10)
+				matched = TRUE;
+		}
+
+		while (p < end && *p != 10)
+			p++;
+		if (p < end)
+			p++;
+
+		if (!matched)
+			goto qetf_next;
+
+		while (p < end && (*p == 10 || *p == 13 || *p == ' ' || *p == 9))
+			p++;
+
+		if (p >= end || *p != 0x7B)
+			return FALSE;
+
+		p++;
+		while (p < end && *p != 10)
+			p++;
+		if (p < end)
+			p++;
+
+		n = 0;
+
+		while (p < end && *p != 0x7D && n < max - 1)
+		{
+			if (*p != 13)
+			{
+				out[n] = *p;
+				n++;
+			}
+
+			p++;
+		}
+
+		while (n > 0 && (out[n - 1] == 10 || out[n - 1] == ' '))
+			n--;
+
+		out[n] = 0;
+
+		return ToBool(n > 0);
+
+qetf_next:
+	}
+
+	return FALSE;
+}
+
+U0 HLEntFree()
+{
+	I64 i;
+
+	if (!hl_entities)
+		return;
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		hl_entities[i].mdl    = NULL;
+		hl_entities[i].studio = NULL;
+		hl_entities[i].spr    = NULL;
+	}
+
+	HLEntSprCacheFree;
+
+	Free(hl_entities);
+	hl_entities     = NULL;
+	hl_num_entities = 0;
+}
+
+U0 HLEntSlotReset(CHLEntity *e)
+{
+	I64 k;
+
+	if (!e)
+		return;
+
+	MemSet(e, 0, sizeof(CHLEntity));
+
+	e->brush_model      = -1;
+	e->owner            = -1;
+	e->activator        = -1;
+	e->beam_start       = -1;
+	e->beam_end         = -1;
+	e->light_style      = -1;
+	e->anim_event_frame = -1;
+	e->anim_loop        = TRUE;
+	e->framerate        = 10.0;
+	e->scale            = 0.0;
+	e->volume           = 1.0;
+	e->modifier         = 100.0;
+	e->blood_color      = 247;
+	e->text_x           = -1.0;
+	e->text_y           = -1.0;
+	e->trigger_mode     = HLUSE_TOGGLE;
+	e->toggle_state     = HLTS_AT_BOTTOM;
+
+	for (k = 0; k < HLENT_MAX_CTL; k++)
+		e->controllers[k] = 0.0;
+}
+
+I64 HLEntAlloc()
+{
+	CHLEntity	*e;
+	I64			 i;
+
+	if (!hl_entities)
+		return -1;
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		if (!hl_entities[i].in_use)
+		{
+			e = &hl_entities[i];
+			HLEntSlotReset(e);
+			e->in_use = TRUE;
+			return i;
+		}
+	}
+
+	if (hl_num_entities >= HLENT_MAX)
+		return -1;
+
+	i = hl_num_entities;
+	e = &hl_entities[i];
+	HLEntSlotReset(e);
+	e->in_use = TRUE;
+	hl_num_entities++;
+
+	return i;
+}
+
+U0 HLEntRelease(I64 i)
+{
+	CHLEntity *e;
+
+	if (!hl_entities || i < 0 || i >= hl_num_entities)
+		return;
+
+	e = &hl_entities[i];
+
+	e->mdl    = NULL;
+	e->studio = NULL;
+	e->spr    = NULL;
+
+	e->think_fn   = 0;
+	e->next_think = 0.0;
+	e->touch_fn   = 0;
+	e->use_fn     = 0;
+	e->blocked_fn = 0;
+	e->move_done  = 0;
+
+	e->dormant = FALSE;
+	e->spawned = FALSE;
+	e->in_use  = FALSE;
+
+	e->classname[0] = 0;
+
+	while (hl_num_entities > 0 && !hl_entities[hl_num_entities - 1].in_use)
+		hl_num_entities--;
+}
+
+I64 HLEntParse(CHLMap *map)
+{
+	CHLEntity	*e;
+	U8			*p;
+	U8			*end;
+	U8			 key[64];
+	U8			 val[160];
+	I64			 k;
+	Bool		 in_block = FALSE;
+
+	HLEntFree;
+
+	if (!map->entities || map->entities_size <= 0)
+		return 0;
+
+	hl_entities     = CAlloc(HLENT_MAX * sizeof(CHLEntity));
+	hl_num_entities = 0;
+
+	p   = map->entities;
+	end = map->entities + map->entities_size;
+
+	while (p < end && hl_num_entities < HLENT_MAX)
+	{
+		if (*p == '{')
+		{
+			e = &hl_entities[hl_num_entities];
+			e->classname[0]  = 0;
+			e->model_name[0] = 0;
+			e->brush_model   = -1;
+			e->mdl           = NULL;
+			e->studio        = NULL;
+			e->frame         = 0;
+			e->seq           = 0;
+			e->body          = 0;
+			e->skin          = 0;
+			e->pose          = 0;
+			e->orient        = 0;
+
+			for (k = 0; k < HLENT_MAX_CTL; k++)
+				e->controllers[k] = 0.0;
+
+			e->blending[0] = 0.0;
+			e->blending[1] = 0.0;
+
+			e->targetname[0] = 0;
+			e->target[0]     = 0;
+			e->killtarget[0] = 0;
+			e->master[0]     = 0;
+			e->message[0]    = 0;
+			e->netname[0]    = 0;
+			e->spawnflags    = 0;
+			e->weapons       = 0;
+			e->follow_player = FALSE;
+			e->monsterclip   = FALSE;
+			e->dormant       = FALSE;
+
+			e->movetype      = HLMOVETYPE_NONE;
+			e->solid         = HLSOLID_NOT;
+			HLVecSet(e->velocity, 0.0, 0.0, 0.0);
+			HLVecSet(e->avelocity, 0.0, 0.0, 0.0);
+			HLVecSet(e->mins, 0.0, 0.0, 0.0);
+			HLVecSet(e->maxs, 0.0, 0.0, 0.0);
+
+			e->speed         = 0.0;
+			e->start_speed   = 0.0;
+			e->wait          = 0.0;
+			e->delay         = 0.0;
+			e->lip           = 0.0;
+			e->height        = 0.0;
+			e->dmg           = 0.0;
+			e->damage_type   = 0;
+			e->damage        = 0.0;
+			e->health        = 0.0;
+			e->takedamage    = 0;
+			e->toggle_state  = HLTS_AT_BOTTOM;
+			e->ent_class     = HLC_NONE;
+			e->ai_play[0]    = 0;
+			e->ai_idle[0]    = 0;
+			e->ai_entity[0]  = 0;
+			e->ai_moveto     = 0;
+			e->ai_finish     = 0;
+			e->ai_radius     = 0.0;
+			e->anim_start    = 0.0;
+			e->anim_loop     = TRUE;
+			e->anim_done     = FALSE;
+			e->anim_event_frame = -1;
+			e->move_snd      = 0;
+			e->stop_snd      = 0;
+			e->snd_index     = 0;
+			e->volume        = 1.0;
+
+			e->locked_snd        = 0;
+			e->unlocked_snd      = 0;
+			e->locked_sentence   = 0;
+			e->unlocked_sentence = 0;
+			e->lock_wait_snd     = 0.0;
+			e->lock_wait_sent    = 0.0;
+			e->lock_sent_ord     = 0;
+			e->unlock_sent_ord   = 0;
+			e->lock_sent_eof     = FALSE;
+			e->unlock_sent_eof   = FALSE;
+
+			e->think_fn      = 0;
+			e->next_think    = 0.0;
+			e->move_done     = 0;
+			e->touch_fn      = 0;
+			e->use_fn        = 0;
+			e->blocked_fn    = 0;
+			e->remove_after_fire = FALSE;
+
+			e->owner         = -1;
+			e->activator     = -1;
+			e->ltime         = 0.0;
+
+			e->rendermode    = 0;
+			e->renderamt     = 0.0;
+			e->renderfx      = 0;
+			e->effects       = 0;
+			e->style         = 0;
+
+			e->light_valid   = FALSE;
+			e->light_dlit    = FALSE;
+			e->light_value   = 0;
+			e->light_style   = -1;
+			e->light_style_val = 0;
+			HLVecSet(e->light_org, 0.0, 0.0, 0.0);
+
+			e->spr            = NULL;
+			e->framerate      = 10.0;
+			e->scale          = 0.0;
+			e->visible        = FALSE;
+			e->beam_start_name[0] = 0;
+			e->beam_end_name[0]   = 0;
+			e->beam_start     = -1;
+			e->beam_end       = -1;
+			e->beam_width     = 0.0;
+			e->beam_frame     = 0;
+
+			e->beam_noise     = 0.0;
+			e->beam_scroll    = 0.0;
+
+			e->beam_life      = 0.0;
+			e->beam_restrike  = 0.0;
+			e->beam_active    = FALSE;
+			e->density        = 0;
+			e->blood_color    = 247;
+			e->blood_amount   = 0.0;
+			e->gib_count      = 0;
+			e->gib_left       = 0;
+			e->gib_velocity   = 0.0;
+			e->gib_variance   = 0.0;
+			e->gib_life       = 0.0;
+			e->shoot_model[0] = 0;
+			e->hold_time      = 0.0;
+			e->fade_in        = 0.0;
+			e->fade_out       = 0.0;
+			e->text_x         = -1.0;
+			e->text_y         = -1.0;
+			HLVecSet(e->text_color, 255.0, 255.0, 255.0);
+			HLVecSet(e->text_color2, 255.0, 255.0, 255.0);
+			e->radius         = 0.0;
+			e->amplitude      = 0.0;
+			e->frequency      = 0.0;
+			e->duration       = 0.0;
+			e->magnitude      = 0.0;
+			e->max_delay      = 0.0;
+			e->modifier       = 100.0;	//a percentage, 100 = untouched
+			e->damp           = 0.0;
+			e->gravity        = 0.0;
+			e->roomtype       = 0;
+			e->preset         = 0;
+			e->distance       = 0.0;
+			e->rot_amount     = 0.0;
+
+			e->track_top[0]     = 0;
+			e->track_bottom[0]  = 0;
+			e->track_train[0]   = 0;
+			e->track_top_ent    = -1;
+			e->track_bottom_ent = -1;
+			e->track_train_ent  = -1;
+			e->track_code       = 0;
+			e->track_target     = 0;
+			e->track_use        = FALSE;
+			e->train_speed      = 0.0;
+			e->train_length     = 0.0;
+			e->train_bank       = 0.0;
+			e->mortar_spread    = 0.0;
+			e->mortar_count     = 0;
+			e->mortar_control   = 0;
+			e->mortar_xctl[0]   = 0;
+			e->mortar_yctl[0]   = 0;
+			e->tank_yaw_rate    = 30.0;
+			e->tank_yaw_range   = 0.0;
+			e->tank_pitch_rate  = 30.0;
+			e->tank_pitch_range = 0.0;
+			e->tank_fire_rate   = 1.0;
+			e->tank_yaw_center  = 0.0;
+			e->tank_pitch_center = 0.0;
+			e->tank_next_fire   = 0.0;
+			e->tank_bullet      = 0;
+			e->tank_bullet_dmg  = 0;
+			e->tank_kind        = 0;
+			e->tank_link        = -1;
+			e->tank_mounted     = FALSE;
+
+			e->moving_angular = FALSE;
+			e->momentary_frac = 0.0;
+			e->rotates        = FALSE;
+			e->charge         = 0.0;
+			e->charge_next    = 0.0;
+			e->use_last       = -1.0;
+
+			e->material       = 0;
+			e->spawn_object   = 0;
+			e->item_type      = 0;
+
+			e->cam_moveto[0]      = 0;
+			e->cam_accel          = 0.0;
+			e->cam_decel          = 0.0;
+			e->cam_return         = 0.0;
+			e->cam_stop           = 0.0;
+			e->cam_move_dist      = 0.0;
+			e->cam_target_speed   = 0.0;
+			e->cam_initial_speed  = 0.0;
+			e->cam_path           = -1;
+			e->cam_target         = -1;
+			e->revert_message_time = 0.0;
+			e->revert_load_time    = 0.0;
+
+			e->push_friction  = 0.0;
+			e->push_max_speed = 0.0;
+			e->push_buoyancy  = 0.0;
+			e->push_snd_time  = 0.0;
+			e->push_snd_last  = 0;
+
+			//zero means "no key". CFuncRotating::Spawn turns it into 1
+			e->fan_friction   = 0.0;
+			e->fan_atten      = 0.0;
+
+			e->amb_pitch      = 0;
+			e->amb_pitchstart = 0;
+			e->amb_spinup     = 0;
+			e->amb_spindown   = 0;
+			e->amb_volstart   = 0;
+			e->amb_lfotype    = 0;
+			e->amb_lforate    = 0;
+			e->amb_lfomodpitch = 0;
+			e->amb_lfomodvol  = 0;
+			e->amb_cspinup    = 0;
+
+			e->texture[0]     = 0;
+			e->next_map[0]    = 0;
+			e->landmark[0]    = 0;
+			e->global_state[0] = 0;
+			e->global_name[0]  = 0;
+			e->ai_sentence[0] = 0;
+			e->ai_listener[0] = 0;
+			e->ai_refire      = 0.0;
+			e->ai_atten       = 0;
+
+			e->trigger_mode   = HLUSE_OFF;
+			e->initial_state  = 0;
+
+			e->in_use        = TRUE;
+			e->spawned       = FALSE;
+			HLVecSet(e->origin, 0.0, 0.0, 0.0);
+			HLVecSet(e->angles, 0.0, 0.0, 0.0);
+			in_block = TRUE;
+			p++;
+
+			while (p < end && *p != '}')
+			{
+				while (p < end && *p != '"' && *p != '}')
+					p++;
+				if (p >= end || *p == '}')
+					break;
+
+				p++;
+				k = 0;
+
+				while (p < end && *p != '"')
+				{
+					if (k < 63)
+					{
+						key[k] = *p;
+						k++;
+					}
+
+					p++;
+				}
+				key[k] = 0;
+				if (p < end)
+					p++;
+
+				while (p < end && *p != '"' && *p != '}')
+					p++;
+				if (p >= end || *p == '}')
+					break;
+
+				p++;
+				k = 0;
+
+				while (p < end && *p != '"')
+				{
+					if (k < 159)
+					{
+						val[k] = *p;
+						k++;
+					}
+
+					p++;
+				}
+				val[k] = 0;
+				if (p < end)
+					p++;
+
+				if (!StrCompare(key, "classname"))
+					HLStrCopy(e->classname, val, 64);
+				else if (!StrCompare(key, "model"))
+					HLStrCopy(e->model_name, val, 64);
+				else if (!StrCompare(key, "origin"))
+					HLParseVec(val, e->origin);
+				else if (!StrCompare(key, "angle"))
+				{
+					e->angles[1] = HLAtoF(val);
+				}
+				else if (!StrCompare(key, "angles"))
+					HLParseVec(val, e->angles);
+				else if (!StrCompare(key, "targetname"))
+					HLStrCopy(e->targetname, val, 64);
+				else if (!StrCompare(key, "target"))
+					HLStrCopy(e->target, val, 64);
+				else if (!StrCompare(key, "killtarget"))
+					HLStrCopy(e->killtarget, val, 64);
+				else if (!StrCompare(key, "master"))
+					HLStrCopy(e->master, val, 64);
+				else if (!StrCompare(key, "message"))
+					HLStrCopy(e->message, val, 128);
+				else if (!StrCompare(key, "netname"))
+					HLStrCopy(e->netname, val, 64);
+				else if (!StrCompare(key, "spawnflags"))
+					e->spawnflags = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "weapons"))
+					e->weapons = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "speed"))
+					e->speed = HLAtoF(val);
+				else if (!StrCompare(key, "startspeed"))
+					e->start_speed = HLAtoF(val);
+				else if (!StrCompare(key, "wait"))
+					e->wait = HLAtoF(val);
+				else if (!StrCompare(key, "delay"))
+					e->delay = HLAtoF(val);
+				else if (!StrCompare(key, "lip"))
+					e->lip = HLAtoF(val);
+				else if (!StrCompare(key, "height"))
+					e->height = HLAtoF(val);
+				else if (!StrCompare(key, "dmg"))
+					e->dmg = HLAtoF(val);
+				else if (!StrCompare(key, "damagetype"))
+					e->damage_type = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "health"))
+					e->health = HLAtoF(val);
+				else if (!StrCompare(key, "m_iszPlay"))
+					HLStrCopy(e->ai_play, val, 64);
+				else if (!StrCompare(key, "m_iszIdle"))
+					HLStrCopy(e->ai_idle, val, 64);
+				else if (!StrCompare(key, "m_iszEntity"))
+					HLStrCopy(e->ai_entity, val, 64);
+				//scripted_sentence names its actor "entity"
+				else if (!StrCompare(key, "entity"))
+					HLStrCopy(e->ai_entity, val, 64);
+				else if (!StrCompare(key, "m_fMoveTo"))
+					e->ai_moveto = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "m_iFinishSchedule"))
+					e->ai_finish = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "m_flRadius"))
+					e->ai_radius = HLAtoF(val);
+				else if (!StrCompare(key, "movesnd"))
+					e->move_snd = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "stopsnd"))
+					e->stop_snd = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "sounds"))
+					e->snd_index = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "locked_sound"))
+					e->locked_snd = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "unlocked_sound"))
+					e->unlocked_snd = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "locked_sentence"))
+					e->locked_sentence = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "unlocked_sentence"))
+					e->unlocked_sentence = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "volume"))
+					e->volume = HLAtoF(val);
+				else if (!StrCompare(key, "style"))
+					e->style = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "rendermode"))
+					e->rendermode = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "renderamt"))
+					e->renderamt = HLAtoF(val);
+				else if (!StrCompare(key, "renderfx"))
+					e->renderfx = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "rendercolor"))
+					HLParseVec(val, e->rendercolor);
+				else if (!StrCompare(key, "body"))
+					e->body = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "skin"))
+					e->skin = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "sequence"))
+					e->seq = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "pose"))
+					e->pose = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "orientation"))
+					e->orient = ToI64(HLAtoF(val));
+
+				else if (!StrCompare(key, "framerate"))
+					e->framerate = HLAtoF(val);
+				else if (!StrCompare(key, "scale"))
+					e->scale = HLAtoF(val);
+				else if (!StrCompare(key, "WaveHeight"))
+					//CBaseDoor::KeyValue, doors.cpp:238.
+					e->scale = HLAtoF(val) * (1.0 / 8.0);
+				else if (!StrCompare(key, "LightningStart"))
+					HLStrCopy(e->beam_start_name, val, 64);
+				else if (!StrCompare(key, "LightningEnd") ||
+						 !StrCompare(key, "LaserTarget"))
+					HLStrCopy(e->beam_end_name, val, 64);
+				else if (!StrCompare(key, "BoltWidth") ||
+						 !StrCompare(key, "width"))
+					e->beam_width = HLAtoF(val);
+				else if (!StrCompare(key, "framestart"))
+					e->beam_frame = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "NoiseAmplitude"))
+					e->beam_noise = HLAtoF(val);
+				else if (!StrCompare(key, "TextureScroll"))
+					e->beam_scroll = HLAtoF(val);
+				else if (!StrCompare(key, "holdtime"))
+					e->hold_time = HLAtoF(val);
+				else if (!StrCompare(key, "fadein"))
+					e->fade_in = HLAtoF(val);
+				else if (!StrCompare(key, "fadeout"))
+					e->fade_out = HLAtoF(val);
+				else if (!StrCompare(key, "x"))
+					e->text_x = HLAtoF(val);
+				else if (!StrCompare(key, "y"))
+					e->text_y = HLAtoF(val);
+				else if (!StrCompare(key, "radius"))
+					e->radius = HLAtoF(val);
+				else if (!StrCompare(key, "amplitude"))
+					e->amplitude = HLAtoF(val);
+				else if (!StrCompare(key, "frequency"))
+					e->frequency = HLAtoF(val);
+				else if (!StrCompare(key, "duration"))
+					e->duration = HLAtoF(val);
+				else if (!StrCompare(key, "iMagnitude"))
+					e->magnitude = HLAtoF(val);
+				else if (!StrCompare(key, "MaxDelay"))
+					e->max_delay = HLAtoF(val);
+				else if (!StrCompare(key, "modifier"))
+					e->modifier = HLAtoF(val);
+				else if (!StrCompare(key, "damp"))
+					e->damp = HLAtoF(val);
+				else if (!StrCompare(key, "gravity"))
+					e->gravity = HLAtoF(val);
+				else if (!StrCompare(key, "material"))
+				{
+					//CBreakable::KeyValue, func_break.cpp:83-84.
+					e->material = ToI64(HLAtoF(val));
+
+					if (e->material < 0 || e->material > 9)
+						e->material = 1;
+				}
+				else if (!StrCompare(key, "spawnobject"))
+					e->spawn_object = ToI64(HLAtoF(val));
+
+				else if (!StrCompare(key, "moveto"))
+					HLStrCopy(e->cam_moveto, val, 64);
+				else if (!StrCompare(key, "acceleration"))
+					e->cam_accel = HLAtoF(val);
+				else if (!StrCompare(key, "deceleration"))
+					e->cam_decel = HLAtoF(val);
+
+				else if (!StrCompare(key, "messagetime"))
+					e->revert_message_time = HLAtoF(val);
+				else if (!StrCompare(key, "loadtime"))
+					e->revert_load_time = HLAtoF(val);
+
+				else if (!StrCompare(key, "type"))
+					e->item_type = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "roomtype"))
+					e->roomtype = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "preset"))
+					e->preset = ToI64(HLAtoF(val));
+
+				else if (!StrCompare(key, "friction"))
+					e->push_friction = HLAtoF(val);
+				else if (!StrCompare(key, "buoyancy"))
+					e->push_buoyancy = HLAtoF(val);
+
+				else if (!StrCompare(key, "fanfriction"))
+					e->fan_friction = HLAtoF(val) / 100.0;
+
+				else if (!StrCompare(key, "pitch"))
+					e->amb_pitch = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "pitchstart"))
+					e->amb_pitchstart = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "spinup"))
+					e->amb_spinup = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "spindown"))
+					e->amb_spindown = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "volstart"))
+					e->amb_volstart = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "lfotype"))
+					e->amb_lfotype = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "lforate"))
+					e->amb_lforate = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "lfomodpitch"))
+					e->amb_lfomodpitch = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "lfomodvol"))
+					e->amb_lfomodvol = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "cspinup"))
+					e->amb_cspinup = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "distance"))
+					e->distance = HLAtoF(val);
+				else if (!StrCompare(key, "rotation"))
+					e->rot_amount = HLAtoF(val);
+				else if (!StrCompare(key, "toptrack"))
+					HLStrCopy(e->track_top, val, 64);
+				else if (!StrCompare(key, "bottomtrack"))
+					HLStrCopy(e->track_bottom, val, 64);
+				else if (!StrCompare(key, "train"))
+					HLStrCopy(e->track_train, val, 64);
+				//CFuncTrackTrain::KeyValue, plats.cpp:960
+				else if (!StrCompare(key, "wheels"))
+					e->train_length = HLAtoF(val);
+				else if (!StrCompare(key, "bank"))
+					e->train_bank = HLAtoF(val);
+				else if (!StrCompare(key, "m_flSpread"))
+					e->mortar_spread = HLAtoF(val);
+				else if (!StrCompare(key, "m_iCount"))
+					e->mortar_count = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "m_fControl"))
+					e->mortar_control = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "m_iszXController"))
+					HLStrCopy(e->mortar_xctl, val, 64);
+				else if (!StrCompare(key, "m_iszYController"))
+					HLStrCopy(e->mortar_yctl, val, 64);
+				else if (!StrCompare(key, "yawrate"))
+					e->tank_yaw_rate = HLAtoF(val);
+				else if (!StrCompare(key, "yawrange"))
+					e->tank_yaw_range = HLAtoF(val);
+				else if (!StrCompare(key, "pitchrate"))
+					e->tank_pitch_rate = HLAtoF(val);
+				else if (!StrCompare(key, "pitchrange"))
+					e->tank_pitch_range = HLAtoF(val);
+				else if (!StrCompare(key, "firerate"))
+					e->tank_fire_rate = HLAtoF(val);
+				else if (!StrCompare(key, "bullet"))
+					e->tank_bullet = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "bullet_damage"))
+					e->tank_bullet_dmg = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "texture"))
+					HLStrCopy(e->texture, val, 64);
+				else if (!StrCompare(key, "map"))
+					HLStrCopy(e->next_map, val, 64);
+				else if (!StrCompare(key, "landmark"))
+					HLStrCopy(e->landmark, val, 64);
+				else if (!StrCompare(key, "globalstate"))
+					HLStrCopy(e->global_state, val, 64);
+				else if (!StrCompare(key, "globalname"))
+					HLStrCopy(e->global_name, val, 64);
+				else if (!StrCompare(key, "sentence"))
+					HLStrCopy(e->ai_sentence, val, 64);
+				else if (!StrCompare(key, "listener"))
+					HLStrCopy(e->ai_listener, val, 64);
+				else if (!StrCompare(key, "refire"))
+					e->ai_refire = HLAtoF(val);
+				else if (!StrCompare(key, "attenuation"))
+					e->ai_atten = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "triggermode"))
+					e->trigger_mode = ToI64(HLAtoF(val));
+
+				else if (!StrCompare(key, "triggerstate"))
+				{
+					e->trigger_mode = ToI64(HLAtoF(val));
+
+					if (e->trigger_mode == 2)
+						e->trigger_mode = HLUSE_TOGGLE;
+					else if (e->trigger_mode != 0)
+						e->trigger_mode = HLUSE_ON;
+				}
+				else if (!StrCompare(key, "initialstate"))
+					e->initial_state = ToI64(HLAtoF(val));
+
+				else if (!StrCompare(key, "density"))
+					e->density = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "current"))
+				{
+					e->speed = HLAtoF(val);
+				}
+
+				else if (!StrCompare(key, "color"))
+				{
+					if (HLAtoF(val) == 1.0)
+						e->blood_color = 195;
+					else
+						e->blood_color = 247;
+
+					HLParseVec(val, e->text_color);
+				}
+				else if (!StrCompare(key, "color2"))
+					HLParseVec(val, e->text_color2);
+				else if (!StrCompare(key, "amount"))
+					e->blood_amount = HLAtoF(val);
+
+				else if (!StrCompare(key, "m_iGibs"))
+					e->gib_count = ToI64(HLAtoF(val));
+				else if (!StrCompare(key, "m_flVelocity"))
+					e->gib_velocity = HLAtoF(val);
+				else if (!StrCompare(key, "m_flVariance"))
+					e->gib_variance = HLAtoF(val);
+				else if (!StrCompare(key, "m_flGibLife"))
+					e->gib_life = HLAtoF(val);
+				else if (!StrCompare(key, "shootmodel"))
+					HLStrCopy(e->shoot_model, val, 64);
+
+				else if (!StrCompare(key, "life"))
+					e->beam_life = HLAtoF(val);
+				else if (!StrCompare(key, "StrikeTime"))
+					e->beam_restrike = HLAtoF(val);
+				else if (!StrCompare(key, "damage"))
+				{
+					e->damage = HLAtoF(val);
+				}
+				else if (!StrCompare(key, "Radius"))
+				{
+					e->radius = HLAtoF(val);
+				}
+
+			}
+
+			if (in_block && e->classname[0])
+			{
+				if (e->model_name[0] == '*')
+					e->brush_model = ToI64(HLAtoF(e->model_name + 1));
+
+				//CWorldItem::Spawn
+				if (!StrCompare(e->classname, "world_items"))
+				{
+					if (e->item_type == 42)
+						HLStrCopy(e->classname, "item_antidote", 64);
+					else if (e->item_type == 43)
+						HLStrCopy(e->classname, "item_security", 64);
+					else if (e->item_type == 44)
+						HLStrCopy(e->classname, "item_battery", 64);
+					else if (e->item_type == 45)
+						HLStrCopy(e->classname, "item_suit", 64);
+				}
+
+				hl_num_entities++;
+			}
+
+			in_block = FALSE;
+		}
+
+		if (p < end)
+			p++;
+	}
+
+	return hl_num_entities;
+}
+
+U0 HLEntInitBoneControllers(CHLEntity *e)
+{
+	F64 setting;
+	I64 c;
+
+	for (c = 0; c < HLENT_MAX_CTL; c++)
+		e->controllers[c] = 0.0;
+
+	if (!e->studio)
+		return;
+
+	for (c = 0; c < 4; c++)
+	{
+		setting = HLStudioCtlSetting(e->studio, c, 0.0);
+
+		if (setting >= 0.0)
+			e->controllers[c] = setting;
+	}
+}
+
+I64 HLEntLoadModels()
+{
+	CHLEntity	*e;
+	U8			*path;
+	I64			 n;
+	I64			 i;
+	I64			 loaded = 0;
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (e->brush_model >= 0 || e->mdl || e->studio || e->spr)
+			goto qel_next;
+
+		path = e->model_name;
+
+		if (!path[0] || path[0] == '*')
+			path = HLEntModelForClass(e->classname);
+
+		if (!path)
+			goto qel_next;
+
+		n = StrLen(path);
+
+		if (n >= 5 && !StrICompare(path + n - 4, ".spr"))
+		{
+			e->spr = HLEntSprCacheGet(path);
+
+			if (e->spr)
+				loaded++;
+
+			goto qel_next;
+		}
+
+		if (n < 5 || StrICompare(path + n - 4, ".mdl"))
+			goto qel_next;
+
+		e->studio = HLStudioCacheGet(path);
+
+		if (e->studio)
+		{
+			HLEntInitBoneControllers(e);
+			loaded++;
+			goto qel_next;
+		}
+
+		e->mdl = HLMdlCacheGet(path);
+		if (e->mdl)
+			loaded++;
+
+qel_next:
+	}
+
+	return loaded;
+}
+
+Bool HLEntFindPlayerStart(F64 *origin, F64 *angles)
+{
+	I64 i;
+
+	HLVecSet(origin, 0.0, 0.0, 0.0);
+	HLVecSet(angles, 0.0, 0.0, 0.0);
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		if (!StrCompare(hl_entities[i].classname, "info_player_start"))
+		{
+			HLVecCopy(hl_entities[i].origin, origin);
+			HLVecCopy(hl_entities[i].angles, angles);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+
+I64 hl_ent_clip_ignore = -1;
+
+Bool hl_clip_for_monster = FALSE;
+
+U0 (*hl_ent_slidebox_hook)(CHLMap *map, F64 *start, F64 *end, F64 *mins,
+	F64 *maxs, CHLTrace *trace) = NULL;
+
+hl_ent_clip_ignore    = -1;
+hl_clip_for_monster   = FALSE;
+hl_ent_slidebox_hook  = NULL;

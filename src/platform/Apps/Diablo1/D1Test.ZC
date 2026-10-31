@@ -1,0 +1,1018 @@
+// data-layer self check
+//
+// expected values come from utils/mpqtool.py against retail DIABDAT.MPQ
+// (Diablo + Hellfire CD). byte sums prove decrypt + explode end to end.
+
+I64 d1t_pass = 0;
+I64 d1t_fail = 0;
+
+U0 D1TCheck(Bool ok, U8 *what)
+{
+	if (ok)
+	{
+		d1t_pass++;
+		"  ok   %s\n", what;
+	}
+	else
+	{
+		d1t_fail++;
+		"$$LTRED$$  FAIL$$FG$$ %s\n", what;
+	}
+}
+
+U0 D1TFile(U8 *name, I64 want_size, I64 want_sum, U8 *what)
+{//want_sum < 0 skips the byte sum
+	I64	 size = 0;
+	I64	 sum  = 0;
+	I64	 i;
+	U8	*p    = D1MpqRead(name, &size);
+
+	if (!p)
+	{
+		d1t_fail++;
+		"$$LTRED$$  FAIL$$FG$$ %s: missing\n", what;
+		return;
+	}
+	if (want_sum >= 0)
+	{
+		for (i = 0; i < size; i++)
+			sum += p[i];
+		sum &= 0xFFFFFFFF;
+	}
+	else
+		sum = want_sum;
+
+	if (size == want_size && sum == want_sum)
+	{
+		d1t_pass++;
+		"  ok   %s (%d bytes)\n", what, size;
+	}
+	else
+	{
+		d1t_fail++;
+		"$$LTRED$$  FAIL$$FG$$ %s: size %d want %d sum %08X want %08X\n",
+			what, size, want_size, sum, want_sum;
+	}
+	Free(p);
+}
+
+I64 D1TSum32(U32 *p, I64 n)
+{
+	I64 i;
+	I64 s = 0;
+
+	for (i = 0; i < n; i++)
+		s += p[i];
+	return s & 0xFFFFFFFF;
+}
+
+I64 D1TS16(U32 v)
+{//low channel as a signed 16-bit sample
+	I64 x = v & 0xFFFF;
+
+	if (x >= 0x8000)
+		x -= 0x10000;
+	return x;
+}
+
+U0 D1TPcmStats(U32 *p, I64 n, U8 *what)
+{
+	I64 i;
+	I64 x;
+	I64 prev = 0;
+	I64 step = 1;
+	I64 used = 0;
+	F64 e    = 0;
+	F64 de   = 0;
+	F64 peak = 0;
+
+	if (!p || n < 2)
+	{
+		"  %s: no pcm\n", what;
+		return;
+	}
+	I64 blk;
+	I64 nblk = 400;
+	I64 runl = 512;
+	I64 b;
+	I64 k;
+
+	if (n < nblk * runl)
+	{
+		nblk = 1;
+		runl = n;
+	}
+	step = n / nblk;
+	for (b = 0; b < nblk; b++)
+	{
+		i = b * step;
+		if (i + runl > n)
+			runl = n - i;
+		for (k = 0; k < runl; k++)
+		{
+			x = D1TS16(p[i + k]);
+			e += ToF64(x) * x;
+			if (k)
+				de += ToF64(x - prev) * (x - prev);
+			if (x > peak)
+				peak = x;
+			prev = x;
+			used++;
+		}
+	}
+	no_warn blk;
+	if (e < 1)
+		e = 1;
+	"  %s: n=%d rms=%d peak=%d hf=%5.3f\n",
+		what, n, ToI64(Sqrt(e / used)), ToI64(peak), de / e;
+}
+
+U0 D1TestAudio()
+{
+	I64 s1;
+	I64 s2;
+	I64 h;
+	I64 i;
+	I64 lvls[4];
+
+	d1t_pass = 0;
+	d1t_fail = 0;
+
+	"D1Test: audio\n";
+
+	if (!d1_mpq_ready)
+		D1MpqMount("::/Apps/Diablo1/DIABDAT.MPQ");
+	if (!d1_mpq_ready)
+	{
+		"$$LTRED$$  FAIL$$FG$$ mount DIABDAT.MPQ\n";
+		return;
+	}
+
+	D1SndInit;
+	D1TCheck(d1snd_on, "AC97 present");
+	if (!d1snd_on)
+	{
+		"  no device; audio checks skipped\n";
+		return;
+	}
+
+	"  listen: stream tone...\n";
+	AudioToneTest(1200, 440);
+	Sleep(1600);
+	{
+		I64	 tf;
+		I64	 tn  = 22050 * 2;
+		I64	 sv;
+		U32 *tb  = CAlloc(tn * 4, sys_task);
+		U32 *tb2 = CAlloc(48000 * 4, sys_task);
+
+		for (tf = 0; tf < tn; tf++)
+		{
+			sv = ToI64(Sin(2.0 * pi * 440.0 * tf / 22050.0) * 8000.0);
+			tb[tf] = (sv & 0xFFFF) | ((sv & 0xFFFF) << 16);
+		}
+		for (tf = 0; tf < 48000; tf++)
+		{
+			sv = ToI64(Sin(2.0 * pi * 440.0 * tf / 48000.0) * 8000.0);
+			tb2[tf] = (sv & 0xFFFF) | ((sv & 0xFFFF) << 16);
+		}
+		"  listen: voice tone at 48000...\n";
+		tf = D1SndHwPlay(tb2, 48000, 48000, D1SND_SFX_VOL, FALSE);
+		Sleep(1400);
+		"  listen: voice tone at 22050...\n";
+		tf = D1SndHwPlay(tb, tn, 22050, D1SND_SFX_VOL, FALSE);
+		Sleep(2400);
+		D1SndHwIdle(tf);
+		Free(tb);
+		Free(tb2);
+	}
+	"  all three clean = mixer fine, fault is in the data path.\n";
+	"  stream clean, voices noisy = the mixer's voice arm.\n";
+	"  all noisy = the AC97 driver; retest ZealAmp to confirm.\n";
+
+	D1SndPlay("Sfx\\Items\\Gold.wav");
+	D1TCheck(d1snd_voice[0].handle >= 0, "sfx voice allocated");
+	Sleep(1500);
+
+	for (i = 0; i < D1SND_VOICES + 4; i++)
+		D1SndPlay("Sfx\\Items\\Flippot.wav");
+	D1TCheck(TRUE, "sfx pool oversubscribed without fault");
+	Sleep(2000);
+
+	lvls[0] = 0;
+	lvls[1] = 1;
+	lvls[2] = 5;
+	lvls[3] = 0;
+	for (i = 0; i < 4; i++)
+	{
+		D1SndMusicForLevel(lvls[i]);
+		if (!d1snd_mus_frames)
+		{
+			d1t_fail++;
+			"$$LTRED$$  FAIL$$FG$$ music %d: no PCM\n", lvls[i];
+		}
+		else
+		{
+			D1TPcmStats(d1snd_mus_frames, d1snd_mus_count, "music pcm");
+			s1 = D1TSum32(d1snd_mus_frames, d1snd_mus_count);
+			Sleep(3000);
+			s2 = D1TSum32(d1snd_mus_frames, d1snd_mus_count);
+			if (s1 != s2)
+				"    sum %08X -> %08X after 3s\n", s1, s2;
+			D1TCheck(s1 == s2, "music buffer stable while playing");
+		}
+	}
+
+	s1 = D1TSum32(d1snd_mus_frames, d1snd_mus_count);
+	for (i = 0; i < 6; i++)
+	{
+		D1SndPlay("Sfx\\Misc\\Walk1.wav");
+		Sleep(300);
+	}
+	s2 = D1TSum32(d1snd_mus_frames, d1snd_mus_count);
+	D1TCheck(s1 == s2, "music survives sfx allocation");
+
+	i = D1SndCacheLoad("Sfx\\Misc\\Walk1.wav");
+	if (i >= 0)
+		D1TPcmStats(d1snd_cache[i].frames, d1snd_cache[i].count, "sfx pcm  ");
+
+	h = d1snd_mus_handle;
+	D1SndMusicStop;
+	D1TCheck(d1snd_mus_frames == NULL, "music stop releases PCM");
+	D1TCheck(!D1SndHwPlaying(h), "music voice retired before free");
+
+	D1SndStopAll;
+	"D1Test audio: %d pass, %d fail\n", d1t_pass, d1t_fail;
+	"listen: 4 tracks, ~3s each, then footsteps over the last one.\n";
+}
+
+U0 D1Test()
+{
+	U8	*p;
+	I64	 size = 0;
+	I64	 sum;
+	I64	 i;
+	I64	 rate2  = 0;
+	I64	 count2 = 0;
+	I64	 rcount = 0;
+	U32	*fr = NULL;
+	U32	*rs;
+
+	d1t_pass = 0;
+	d1t_fail = 0;
+
+	"D1Test: data layer\n";
+
+	if (!d1_mpq_ready)
+		D1MpqMount("::/Apps/Diablo1/DIABDAT.MPQ");
+	D1TCheck(d1_mpq_ready, "mount DIABDAT.MPQ");
+	if (!d1_mpq_ready)
+		return;
+
+	D1TCheck(d1_mpq.hash_count == 4096 && d1_mpq.block_count == 2911,
+		"table sizes");
+
+	D1TFile("Levels\\TownData\\Town.CEL", 2176004, 0x0B645232, "Town.CEL");
+	D1TFile("CtrlPan\\SmalText.CEL", 4419, 0x000D51F8, "SmalText.CEL");
+	D1TFile("Levels\\TownData\\Town.MIN", 40256, -1, "Town.MIN");
+	D1TFile("Levels\\TownData\\Town.SOL", 1258, -1, "Town.SOL");
+	D1TFile("Levels\\TownData\\Town.TIL", 2736, -1, "Town.TIL");
+	D1TFile("Levels\\TownData\\Town.pal", 768, -1, "Town.pal");
+	D1TFile("Gendata\\Cuttt.CEL", 310092, -1, "Cuttt.CEL");
+	D1TFile("Music\\DTowne.wav", 25457728, 0xBB303A6D, "DTowne per-sector decrypt");
+
+	p = D1MpqRead("Levels\\TownData\\Town.CEL", &size);
+	if (p)
+	{
+		D1TCheck(D1CelNFrames(p) == 3547, "Town.CEL frame count 3547");
+		Free(p);
+	}
+	p = D1MpqRead("Data\\PentSpin.CEL", &size);
+	if (p)
+	{
+		D1TCheck(D1CelNFrames(p) == 8, "PentSpin 8 frames");
+		Free(p);
+	}
+	p = D1MpqRead("PlrGFX\\Warrior\\wls\\wlsst.cl2", &size);
+	if (p)
+	{
+		D1TCheck(size == 179011, "wlsst.cl2 size");
+		D1TCheck(D1CelNFrames(D1Cl2Dir(p, 0)) == 20, "town stand 20 frames");
+		Free(p);
+	}
+	p = D1MpqRead("PlrGFX\\Warrior\\wls\\wlswl.cl2", &size);
+	if (p)
+	{
+		D1TCheck(D1CelNFrames(D1Cl2Dir(p, 0)) == 8, "town walk 8 frames");
+		Free(p);
+	}
+
+	D1TCheck(D1TownLoad(), "town assembly");
+	if (d1_lvl_ready)
+	{
+		D1TCheck(d1_npieces == 1258, "1258 town pieces");
+		D1TCheck(D1Piece(75, 68) != 0, "spawn tile has a piece");
+		D1TCheck(D1Walkable(75, 68), "spawn tile walkable");
+	}
+
+	D1MakeLightTable;
+	sum = 0;
+	for (i = 0; i < 16 * 256; i++)
+		sum += d1_light_tbl[i];
+	D1TCheck(sum == 0x43FB8, "light table checksum");
+
+	D1TCheck(D1L1LevelLoad(1, 1234567, 0), "cathedral L1 gen");
+	if (d1_lvl_ready)
+	{
+		sum = 0;
+		for (i = 0; i < D1_MAXDUN * D1_MAXDUN; i++)
+			sum = (sum * 31 + d1_dpiece[i]) & 0xFFFFFFFF;
+		D1TCheck(sum == 0x5D4480D2, "L1 seed 1234567 layout matches host");
+		D1TCheck(d1_trig_up_x >= 0 && d1_trig_down_x >= 0, "both stairs present");
+		D1TCheck(D1Walkable(d1_lvl_vx, d1_lvl_vy), "entry view walkable");
+	}
+
+	D1MonTypesInit;
+	D1TCheck(D1MonTypeLoad(0), "zombie gfx");
+	D1TCheck(D1MonTypeLoad(1), "fallen gfx + TRN");
+
+	p = D1MpqRead("Music\\Dintro.wav", &size);
+	if (p)
+	{
+		count2 = D1SndDecodeNative(p, size, &fr, &rate2);
+		Free(p);
+		D1TCheck(count2 == 2037085 && rate2 == 22050, "Dintro decode dims");
+		if (fr)
+		{
+			sum = 0;
+			for (i = 0; i < count2; i++)
+				sum += fr[i];
+			D1TCheck((sum & 0xFFFFFFFF) == 0x81628961, "Dintro PCM sum");
+			rs = D1SndResample48(fr, count2, rate2, &rcount);
+			if (rs)
+			{
+				sum = 0;
+				for (i = 0; i < rcount; i++)
+					sum += rs[i];
+				D1TCheck(rcount == 4434470 &&
+					(sum & 0xFFFFFFFF) == 0x684C0C4A, "Dintro 48k sum");
+				Free(rs);
+			}
+			Free(fr);
+		}
+	}
+
+	"D1Test: %d pass, %d fail\n", d1t_pass, d1t_fail;
+	"NOTE: D1Test leaves cathedral L1 loaded; run Diablo1; for the game.\n";
+	"Type $$LTBLUE$$D1TestNet;$$FG$$ for the net-layer check, then\n";
+	"$$LTBLUE$$D1TestLockstep;$$FG$$ for the two-peer determinism harness.\n";
+}
+
+
+#define D1LS_TURNS	48
+
+I64 d1ls_a[D1_SNAP_LEN];
+I64 d1ls_b[D1_SNAP_LEN];
+I64 d1ls_bad_turn  = -1;
+I64 d1ls_bad_slot  = -1;
+
+I64 *d1ls_snaps = NULL;
+I64  d1ls_nsnap = 0;
+
+Bool D1SnapAlloc(I64 nturns)
+{
+	if (d1ls_snaps)
+		Free(d1ls_snaps);
+	d1ls_snaps = CAlloc(nturns * D1_SNAP_LEN * sizeof(I64));
+	d1ls_nsnap = nturns;
+	return ToBool(d1ls_snaps != NULL);
+}
+
+U0 D1SnapFree()
+{
+	if (d1ls_snaps)
+		Free(d1ls_snaps);
+	d1ls_snaps = NULL;
+	d1ls_nsnap = 0;
+}
+
+U0 D1SnapStash(I64 turn)
+{
+	I64 i;
+	I64 o = turn * D1_SNAP_LEN;
+
+	if (!d1ls_snaps || turn < 0 || turn >= d1ls_nsnap)
+		return;
+	for (i = 0; i < D1_SNAP_LEN; i++)
+		d1ls_snaps[o + i] = d1ls_a[i];
+}
+
+U0 D1SnapLoad(I64 turn, I64 *dst)
+{
+	I64 i;
+	I64 o = turn * D1_SNAP_LEN;
+
+	if (!d1ls_snaps || turn < 0 || turn >= d1ls_nsnap)
+		return;
+	for (i = 0; i < D1_SNAP_LEN; i++)
+		dst[i] = d1ls_snaps[o + i];
+}
+
+Bool D1TestLockstepSetup(I64 seed, I64 selfid, I64 *x0, I64 *y0,
+	I64 *x1, I64 *y1)
+{
+	I64 i;
+	I64 ty;
+
+	D1CharCreate(D1CL_WARRIOR, "Peer0");
+	D1MonClearAll;
+	D1MisClear;
+	D1ItemClear;
+	D1ObjClear;
+	D1AffixInit;
+	for (i = 0; i < D1_MAXUNQ; i++)
+		d1_unq_taken[i] = FALSE;
+
+	if (!D1L1LevelLoad(1, seed, 0))
+		return FALSE;
+
+	*x0 = d1_lvl_vx;
+	*y0 = d1_lvl_vy;
+	*x1 = *x0 + 3;
+	*y1 = *y0;
+	if (!D1Walkable(*x1, *y1))
+	{
+		*x1 = *x0;
+		*y1 = *y0 + 3;
+	}
+	if (!D1Walkable(*x1, *y1))
+	{
+		*x1 = *x0 + 1;
+		*y1 = *y0 + 1;
+	}
+
+	D1PlacePlayer(*x0, *y0);
+	D1MonSpawnLevel(1, *x0, *y0);
+	D1ObjSpawnLevel(1);
+
+	if (d1_nmons > 0)
+	{
+		ty = d1_mons[0].type;
+		for (i = 0; i < 3; i++)
+		{
+			D1MonPlace(ty, *x0 + 1 + i, *y0);
+			D1MonPlace(ty, *x0, *y0 + 1 + i);
+			D1MonPlace(ty, *x1 - 1 - i, *y1);
+			D1MonPlace(ty, *x1, *y1 + 1 + i);
+		}
+	}
+
+	D1NetReset;
+	d1_net_on      = TRUE;
+	d1_net_state   = D1NS_PLAY;
+	d1_net_self    = selfid;
+	d1_net_npeers  = 2;
+	d1_net_turn    = 0;
+	d1_net_tick    = 0;
+	d1_net_gameseed = seed;
+	d1_net_simseed  = d1_seed;
+	d1_net_insim    = FALSE;
+
+	D1PeerFill(0, ToBool(selfid == 0), "Peer0", *x0, *y0);
+	D1PeerFill(1, ToBool(selfid == 1), "Peer1", *x1, *y1);
+	d1_plr_hp    = d1_peers[selfid].hp;
+	d1_plr_maxhp = d1_peers[selfid].maxhp;
+	d1_plr_mana  = d1_peers[selfid].mana;
+	d1_plr_dead  = FALSE;
+	d1_seed = 0x1000 + selfid * 0x7777;
+	return TRUE;
+}
+
+I64 D1TestLockstepRun(I64 selfid, I64 nturns, I64 x0, I64 y0, I64 x1, I64 y1,
+	Bool compare)
+{
+	I64 t;
+	I64 f;
+	I64 i;
+	I64 c0;
+	I64 a0;
+	I64 b0;
+	I64 c1;
+	I64 a1;
+	I64 b1;
+
+	no_warn selfid;
+	for (t = 0; t < nturns; t++)
+	{
+		D1PeerSimScript(t, x0, y0, x1, y1, &c0, &a0, &b0, &c1, &a1, &b1);
+		D1NetSimEnter;
+		D1PeerApplyCmd(0, c0, a0, b0, 0);
+		D1PeerApplyCmd(1, c1, a1, b1, 0);
+		for (f = 0; f < D1NET_TICKS; f++)
+		{
+			D1PeerTickAll;
+			D1MonTickAll;
+			D1ItemTickAll;
+			D1ObjTickAll;
+		}
+		D1NetSimLeave;
+
+		if (!compare)
+		{
+			D1PeerSnapWrite(d1ls_a);
+			D1SnapStash(t);
+		}
+		else
+		{
+			D1PeerSnapWrite(d1ls_b);
+			D1SnapLoad(t, d1ls_a);
+			for (i = 0; i < D1_SNAP_LEN; i++)
+			{
+				if (d1ls_bad_slot < 0 && d1ls_a[i] != d1ls_b[i])
+				{
+					d1ls_bad_slot = i;
+					d1ls_bad_turn = t;
+				}
+			}
+			if (d1ls_bad_slot >= 0)
+				return t;
+		}
+	}
+	return -1;
+}
+
+U0 D1TestLockstep()
+{
+	I64 x0;
+	I64 y0;
+	I64 x1;
+	I64 y1;
+	I64 bad;
+
+	d1t_pass = 0;
+	d1t_fail = 0;
+	d1ls_bad_turn = -1;
+	d1ls_bad_slot = -1;
+
+	"D1TestLockstep: two-peer determinism\n";
+
+	if (!d1_mpq_ready)
+		D1MpqMount("::/Apps/Diablo1/DIABDAT.MPQ");
+	D1TCheck(d1_mpq_ready, "mount DIABDAT.MPQ");
+	if (!d1_mpq_ready)
+		return;
+
+	d1_opt_sfx = FALSE;
+
+	if (!D1SnapAlloc(D1LS_TURNS))
+	{
+		D1TCheck(FALSE, "snapshot buffer");
+		return;
+	}
+
+	D1TCheck(D1TestLockstepSetup(1234567, 0, &x0, &y0, &x1, &y1),
+		"world built on peer 0's machine");
+	if (d1t_fail)
+	{
+		D1SnapFree;
+		return;
+	}
+	D1TestLockstepRun(0, D1LS_TURNS, x0, y0, x1, y1, FALSE);
+
+	D1TCheck(D1TestLockstepSetup(1234567, 1, &x0, &y0, &x1, &y1),
+		"world built on peer 1's machine");
+	if (d1t_fail)
+	{
+		D1SnapFree;
+		return;
+	}
+	bad = D1TestLockstepRun(1, D1LS_TURNS, x0, y0, x1, y1, TRUE);
+
+	if (bad >= 0)
+	{
+		"$$LTRED$$  DESYNC$$FG$$ turn %d, field '%s': "
+			"peer 0 machine %d, peer 1 machine %d\n",
+			d1ls_bad_turn, D1PeerSnapName(d1ls_bad_slot),
+			d1ls_a[d1ls_bad_slot], d1ls_b[d1ls_bad_slot];
+		D1TCheck(FALSE, "the two machines agree every turn");
+	}
+	else
+		D1TCheck(TRUE, "the two machines agree every turn over 48 turns");
+
+	D1SnapFree;
+	d1_net_on = FALSE;
+	D1NetReset;
+
+	"D1TestLockstep: %d pass, %d fail\n", d1t_pass, d1t_fail;
+	if (d1t_fail)
+		"$$LTRED$$Lockstep is broken; a LAN game will desync.$$FG$$\n";
+	else
+		"$$LTGREEN$$Lockstep holds.$$FG$$\n";
+}
+
+
+U8 d1tn_pkt[D1NET_MTU];
+U8 d1tn_pack[D1NET_PACKMAX];
+U8 d1tn_rebuild[D1NET_PACKMAX];
+
+U0 D1TestNetTransport()
+{
+	Bool opened;
+
+	"\n$$LTBLUE$$transport$$FG$$\n";
+	if (!D1NetAvailable())
+	{
+		"  ..   no UDP at compile time - run "
+			"$$LTBLUE$$ExeFile(\"::/Apps/Diablo1/RunNet\");$$FG$$ for the\n"
+			"       transport half of this check. The codec, ring and turn "
+			"checks below still run.\n";
+		D1TCheck(!D1NetOpen(D1NET_PORT), "open reports failure, not a lie");
+		return;
+	}
+	opened = D1NetOpen(D1NET_PORT);
+	D1TCheck(opened, d1_net_status);
+	if (!opened)
+	{
+		"       (an address is needed first: Multiplayer / My IP)\n";
+		return;
+	}
+	D1TCheck(D1NetOpen(D1NET_PORT), "a second open is a no-op");
+	D1TCheck(!D1NetSendRawTo(d1tn_pkt, 12, 0, D1NET_PORT),
+		"a send to address 0 is refused");
+	D1TCheck(!D1NetSendRawTo(d1tn_pkt, D1NET_MTU + 1, 0x0100007F, D1NET_PORT),
+		"a datagram over the MTU is refused");
+	D1NetClose;
+	D1TCheck(TRUE, "close");
+}
+
+U0 D1TestNetCodec()
+{
+	I64 n;
+	I64 id  = 0;
+	I64 np  = 0;
+	I64 tot = 0;
+	I64 off = 0;
+	I64 fl  = 0;
+	I64 i;
+	Bool seeds_ok;
+
+	"\n$$LTBLUE$$packet encode / decode$$FG$$\n";
+	D1NetReset;
+	d1_net_self  = 2;
+	d1_net_turn  = 77;
+	d1_net_state = D1NS_PLAY;
+
+	n = D1NetEncQuery(d1tn_pkt);
+	D1TCheck(n == D1NET_HDR, "QUERY is a bare header");
+	D1TCheck(D1NetPktType(d1tn_pkt, n) == D1NP_QUERY, "QUERY type round trip");
+	D1TCheck(D1NetPktPeer(d1tn_pkt, n) == 2, "sender id round trip");
+
+	d1tn_pkt[0] = 'X';
+	D1TCheck(D1NetPktType(d1tn_pkt, n) == 0, "a bad magic decodes to nothing");
+	d1tn_pkt[0] = 'D';
+	d1tn_pkt[6] = D1NET_VER + 1;
+	D1TCheck(D1NetPktType(d1tn_pkt, n) == 0, "a bad version decodes to nothing");
+
+	n = D1NetEncInfo(d1tn_pkt);
+	D1TCheck(n == D1NET_HDR + 34 && D1NetPktType(d1tn_pkt, n) == D1NP_INFO,
+		"INFO is 46 bytes");
+
+	n = D1NetEncJoin(d1tn_pkt, "Aidan");
+	D1TCheck(n == D1NET_HDR + 32 && D1NetPktType(d1tn_pkt, n) == D1NP_JOIN,
+		"JOIN is 44 bytes");
+	D1TCheck(!StrCompare(d1tn_pkt + D1NET_HDR, "Aidan"),
+		"JOIN carries the character name");
+
+	D1NetSeedRoll(1234567);
+	for (i = 0; i < D1NET_NSEED; i++)
+		d1ls_a[i] = d1_net_seeds[i];
+	d1ls_b[0] = d1_net_gameseed;
+
+	n = D1NetEncAccept(d1tn_pkt, 1, 2);
+	D1TCheck(n == D1NET_HDR + 8 + D1NET_NSEED * 4, "ACCEPT is 88 bytes");
+	for (i = 0; i < D1NET_NSEED; i++)
+		d1_net_seeds[i] = 0;
+	d1_net_gameseed = 0;
+	D1TCheck(D1NetDecAccept(d1tn_pkt, n, &id, &np), "ACCEPT decodes");
+	D1TCheck(id == 1 && np == 2, "ACCEPT carries the assigned id");
+	seeds_ok = TRUE;
+	for (i = 0; i < D1NET_NSEED; i++)
+	{
+		if (d1_net_seeds[i] != d1ls_a[i])
+			seeds_ok = FALSE;
+	}
+	D1TCheck(seeds_ok && d1_net_gameseed == d1ls_b[0],
+		"all 17 level seeds survive the ACCEPT");
+	D1TCheck(!D1NetDecAccept(d1tn_pkt, n - 1, &id, &np),
+		"a truncated ACCEPT is refused");
+
+	n = D1NetEncReject(d1tn_pkt, D1NR_FULL);
+	D1TCheck(n == D1NET_HDR + 4 && D1NetPktType(d1tn_pkt, n) == D1NP_REJECT,
+		"REJECT is 16 bytes");
+
+	for (i = 0; i < 600; i++)
+		d1tn_pack[i] = (i * 7 + 3) & 0xFF;
+	n = D1NetEncPack(d1tn_pkt, d1tn_pack, 600, 512, 88);
+	D1TCheck(n == D1NET_HDR + 12 + 88 && n <= D1NET_MTU,
+		"a PACK fragment fits the MTU");
+	D1TCheck(D1NetDecPack(d1tn_pkt, n, &tot, &off, &fl) &&
+		tot == 600 && off == 512 && fl == 88, "PACK header round trip");
+	D1TCheck(!D1NetDecPack(d1tn_pkt, D1NET_HDR + 12 + 87, &tot, &off, &fl),
+		"a PACK shorter than its fragment length is refused");
+
+	n = D1NetEncPack(d1tn_pkt, d1tn_pack, 600, 512, 200);
+	D1TCheck(!D1NetDecPack(d1tn_pkt, n, &tot, &off, &fl),
+		"a fragment running past the total is refused");
+
+	n = D1NetEncPackAck(d1tn_pkt, 1024);
+	D1TCheck(n == D1NET_HDR + 4, "PACKACK is 16 bytes");
+
+	n = D1NetEncLeave(d1tn_pkt);
+	D1TCheck(n == D1NET_HDR && D1NetPktType(d1tn_pkt, n) == D1NP_LEAVE,
+		"LEAVE is a bare header");
+}
+
+U0 D1TestNetRing()
+{
+	I64 n;
+	I64 cmd = 0;
+	I64 a   = 0;
+	I64 b   = 0;
+	I64 c   = 0;
+
+	"\n$$LTBLUE$$turn ring$$FG$$\n";
+	D1NetReset;
+	d1_net_self  = 0;
+	d1_net_turn  = 0;
+	d1_peers[0].used = TRUE;
+	d1_peers[1].used = TRUE;
+
+	D1TCheck(D1NetPostCmd(1, 0, D1NC_WALK, 40, 50, 0), "a fresh record posts");
+	D1TCheck(!D1NetPostCmd(1, 0, D1NC_WALK, 40, 50, 0),
+		"the same turn twice is a duplicate");
+	D1TCheck(d1_net_dups == 1, "the duplicate is counted, not an error");
+	D1TCheck(!D1NetHaveTurn(0), "one peer of two is not a turn");
+	D1TCheck(D1NetPostCmd(0, 0, D1NC_STAND, 1, 2, 0), "the other peer posts");
+	D1TCheck(D1NetHaveTurn(0), "both peers make the turn ready");
+
+	D1NetTakeCmd(1, 0, &cmd, &a, &b, &c);
+	D1TCheck(cmd == D1NC_WALK && a == 40 && b == 50,
+		"the record comes back as posted");
+	D1NetTakeCmd(1, 0, &cmd, &a, &b, &c);
+	D1TCheck(cmd == D1NC_NONE, "a taken slot is released");
+
+	d1_net_turn = 10;
+	D1TCheck(!D1NetPostCmd(1, 9, D1NC_WALK, 0, 0, 0),
+		"a record older than the executed turn is dropped");
+	D1TCheck(d1_net_late == 1, "the late record is counted");
+	D1TCheck(!D1NetPostCmd(1, 10 + D1NET_RING, D1NC_WALK, 0, 0, 0),
+		"a record past the ring is dropped");
+	D1TCheck(!D1NetPostCmd(-1, 10, D1NC_WALK, 0, 0, 0),
+		"a bad peer index is dropped");
+
+	D1NetReset;
+	d1_net_self = 0;
+	d1_net_turn = 0;
+	d1_peers[0].used = TRUE;
+	d1_peers[1].used = TRUE;
+	D1NetPostCmd(0, 3, D1NC_WALK, 3, 3, 0);
+	D1NetPostCmd(0, 4, D1NC_WALK, 4, 4, 0);
+	n = D1NetEncTurn(d1tn_pkt, 5, D1NC_WALK, 5, 5, 0);
+	D1TCheck(d1tn_pkt[D1NET_HDR] == D1NET_REDUN,
+		"a TURN datagram carries three records");
+	D1TCheck(n == D1NET_HDR + 4 + D1NET_REDUN * 20 && n <= D1NET_MTU,
+		"a TURN datagram fits the MTU");
+
+	D1NetReset;
+	d1_net_turn = 0;
+	d1_peers[0].used = TRUE;
+	d1_peers[1].used = TRUE;
+	D1TCheck(D1NetDecTurn(d1tn_pkt, n, 1) == 3,
+		"all three records land on a peer that heard nothing");
+	D1TCheck(D1NetDecTurn(d1tn_pkt, n, 1) == 0,
+		"the same datagram again adds nothing");
+	D1TCheck(D1NetHaveTurn(3) == FALSE || d1_net_ring[0].turn >= 0,
+		"the ring holds the recovered turns");
+	D1NetTakeCmd(1, 3, &cmd, &a, &b, &c);
+	D1TCheck(cmd == D1NC_WALK && a == 3, "the oldest redundant record is intact");
+
+	d1tn_pkt[D1NET_HDR] = D1NET_REDUN + 1;
+	D1TCheck(D1NetDecTurn(d1tn_pkt, n, 1) == 0,
+		"a record count over the redundancy is refused");
+}
+
+U0 D1TestNetPack()
+{
+	I64 len;
+	I64 off;
+	I64 flen;
+	I64 n;
+	I64 tot = 0;
+	I64 o   = 0;
+	I64 fl  = 0;
+	I64 i;
+	I64 frags = 0;
+	Bool same;
+
+	"\n$$LTBLUE$$character pack$$FG$$\n";
+	if (!d1_plr_name[0])
+		D1CharCreate(D1CL_WARRIOR, "Aidan");
+
+	len = D1SavePackBuild(d1tn_pack, D1NET_PACKMAX);
+	D1TCheck(len == D1_PACK_LEN, "the pack is the D1Save v6 image plus trailer");
+	D1TCheck(d1tn_pack[0] == 'D' && d1tn_pack[1] == '1' &&
+		d1tn_pack[2] == 'S' && d1tn_pack[3] == 'V',
+		"the pack opens with the save magic");
+	D1TCheck(D1SaveHdrOk(d1tn_pack, D1_SAVE_LEN),
+		"the save header and body checksum verify");
+	D1TCheck(!D1SavePackBuild(d1tn_pack, D1_PACK_LEN - 1),
+		"a short buffer is refused");
+
+	for (i = 0; i < D1NET_PACKMAX; i++)
+		d1tn_rebuild[i] = 0;
+	off = 0;
+	while (off < len)
+	{
+		flen = len - off;
+		if (flen > D1NET_FRAG)
+			flen = D1NET_FRAG;
+		n = D1NetEncPack(d1tn_pkt, d1tn_pack, len, off, flen);
+		if (n > D1NET_MTU)
+			frags = -9999;
+		if (D1NetDecPack(d1tn_pkt, n, &tot, &o, &fl))
+			MemCopy(d1tn_rebuild + o, d1tn_pkt + D1NET_HDR + 12, fl);
+		off += flen;
+		frags++;
+	}
+	D1TCheck(frags == 8, "the pack fragments into eight datagrams");
+	same = TRUE;
+	for (i = 0; i < len; i++)
+	{
+		if (d1tn_rebuild[i] != d1tn_pack[i])
+			same = FALSE;
+	}
+	D1TCheck(same, "reassembly is byte identical");
+
+	D1NetReset;
+	D1PeerClear(1);
+	D1TCheck(D1SavePackApply(1, d1tn_rebuild, len), "the pack applies to peer 1");
+	D1TCheck(!StrCompare(d1_peers[1].name, d1_plr_name),
+		"the name crosses");
+	D1TCheck(d1_peers[1].cls == d1_plr_class &&
+		d1_peers[1].lvl == d1_plr_lvl &&
+		d1_peers[1].str == d1_plr_str &&
+		d1_peers[1].dex == d1_plr_dex,
+		"class, level, strength and dexterity cross");
+	D1TCheck(d1_peers[1].maxhp == d1_plr_maxhp &&
+		d1_peers[1].maxmana == d1_plr_maxmana,
+		"hp and mana cross");
+	D1TCheck(d1_peers[1].ac == D1InvAC() &&
+		d1_peers[1].dmin == D1InvDmgMin() &&
+		d1_peers[1].dmax == D1InvDmgMax(),
+		"AC and weapon damage cross in the trailer");
+	D1TCheck(!d1_peers[1].local, "an applied peer is not local");
+
+	d1tn_rebuild[D1_SAVE_HDR] = d1tn_rebuild[D1_SAVE_HDR] ^ 0xFF;
+	D1TCheck(!D1SavePackApply(1, d1tn_rebuild, len),
+		"a corrupt body is refused by the checksum");
+	d1tn_rebuild[D1_SAVE_HDR] = d1tn_rebuild[D1_SAVE_HDR] ^ 0xFF;
+	d1tn_rebuild[0] = 'X';
+	D1TCheck(!D1SavePackApply(1, d1tn_rebuild, len),
+		"a bad magic is refused");
+	d1tn_rebuild[0] = 'D';
+	D1TCheck(!D1SavePackApply(1, d1tn_rebuild, len - 1),
+		"a short pack is refused");
+}
+
+U0 D1TestNetRng()
+{
+	I64 shared;
+	I64 local;
+
+	"\n$$LTBLUE$$RNG window$$FG$$\n";
+	D1NetReset;
+	d1_net_on      = TRUE;
+	d1_net_simseed = 0x11111111;
+	d1_seed        = 0x22222222;
+	d1_net_insim   = FALSE;
+
+	D1NetSimEnter;
+	D1TCheck(d1_seed == 0x11111111, "entering the window swaps in the shared stream");
+	D1Rnd(100);
+	shared = d1_seed;
+	D1NetSimLeave;
+	D1TCheck(d1_seed == 0x22222222, "leaving restores the local stream");
+	D1TCheck(d1_net_simseed == shared, "the shared stream is parked, not lost");
+
+	D1NetSimEnter;
+	shared = d1_seed;
+	local  = d1_net_locseed;
+	D1TCheck(D1NetLocalIn(), "a local roll steps out of the shared stream");
+	D1TCheck(d1_seed == local, "the local stream is back in d1_seed");
+	D1Rnd(4);
+	D1Rnd(3);
+	D1NetLocalOut(TRUE);
+	D1TCheck(d1_seed == shared, "the shared stream is untouched by a local roll");
+	D1NetSimLeave;
+
+	d1_net_on = FALSE;
+	D1TCheck(!D1NetLocalIn(), "outside a session the swap is a no-op");
+	D1NetReset;
+}
+
+U0 D1TestNetTurnLoop()
+{
+	I64 t;
+	I64 f;
+	I64 c0 = 0;
+	I64 a0 = 0;
+	I64 b0 = 0;
+	I64 c1 = 0;
+	I64 a1 = 0;
+	I64 b1 = 0;
+	I64 x0;
+	I64 y0;
+	I64 x1;
+	I64 y1;
+	I64 h0;
+	I64 h1;
+	I64 moved = 0;
+
+	"\n$$LTBLUE$$turn loop$$FG$$\n";
+	if (!d1_mpq_ready)
+		D1MpqMount("::/Apps/Diablo1/DIABDAT.MPQ");
+	if (!d1_mpq_ready)
+	{
+		D1TCheck(FALSE, "mount DIABDAT.MPQ");
+		return;
+	}
+	d1_opt_sfx = FALSE;
+
+	if (!D1TestLockstepSetup(1234567, 0, &x0, &y0, &x1, &y1))
+	{
+		D1TCheck(FALSE, "world built");
+		return;
+	}
+	D1TCheck(TRUE, "world built");
+
+	d1_net_tick = 0;
+	for (f = 0; f < D1NET_TICKS - 1; f++)
+		D1NetTurnDue;
+	D1TCheck(D1NetTurnDue(), "a turn falls due every four game ticks");
+	D1TCheck(!D1NetTurnDue(), "and not on the tick after it");
+	d1_net_tick = 0;
+
+	h0 = D1PeerSnapHash();
+	for (t = 0; t < 8; t++)
+	{
+		D1PeerSimScript(t, x0, y0, x1, y1, &c0, &a0, &b0, &c1, &a1, &b1);
+		D1NetSimEnter;
+		D1PeerApplyCmd(0, c0, a0, b0, 0);
+		D1PeerApplyCmd(1, c1, a1, b1, 0);
+		for (f = 0; f < D1NET_TICKS; f++)
+		{
+			D1PeerTickAll;
+			D1MonTickAll;
+			D1ItemTickAll;
+			D1ObjTickAll;
+		}
+		D1NetSimLeave;
+	}
+	h1 = D1PeerSnapHash();
+	D1TCheck(h0 != h1, "eight turns of the shared stream move the world");
+	if (d1_peers[0].x != x0 || d1_peers[0].y != y0)
+		moved++;
+	if (d1_peers[1].x != x1 || d1_peers[1].y != y1)
+		moved++;
+	D1TCheck(moved == 2, "both peers walked, not just the local one");
+	D1TCheck(!d1_net_insim, "the sim window is closed when the turn ends");
+
+	d1_net_on = FALSE;
+	D1NetReset;
+}
+
+U0 D1TestNet()
+{
+	d1t_pass = 0;
+	d1t_fail = 0;
+
+	"D1TestNet: transport, codec, ring, pack, RNG window, turn loop\n";
+
+	D1TestNetTransport;
+	D1TestNetCodec;
+	D1TestNetRing;
+	D1TestNetPack;
+	D1TestNetRng;
+	D1TestNetTurnLoop;
+
+	"\nD1TestNet: %d pass, %d fail\n", d1t_pass, d1t_fail;
+	if (d1t_fail)
+		"$$LTRED$$The net layer is NOT sound - do not start a LAN game.$$FG$$\n";
+	else
+	{
+		"$$LTGREEN$$The net layer is sound on this machine.$$FG$$\n";
+		"Run $$LTBLUE$$D1TestLockstep;$$FG$$ next: it is the one that proves "
+			"two machines stay in step.\n";
+	}
+	D1NetReset;
+}

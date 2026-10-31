@@ -1,0 +1,2773 @@
+// message buffers and the loopback link
+//
+// wire format. demos and other HL1 clients depend on it:
+//   coord  16-bit signed, 1/8 unit    (MSG_WriteCoord: (int)(f*8))
+//   angle  8-bit, 256 units per turn  (MSG_WriteAngle: (int)(f*256/360) & 255)
+//   short  16-bit little endian
+//   long   32-bit little endian
+//
+// a coord spans +/-4096 units at eighth resolution; the original nudges the view
+// by 1/32 to keep it off node planes
+
+#define HLNET_MAX_MSG		8192
+#define HLNET_MAX_DATAGRAM	1400
+#define HLNET_MAX_BACKLOG	4
+
+//WinQuake net.h NETFLAG_* and control opcodes, big-endian on the wire
+#define HLNETFLAG_LENGTH_MASK	0x0000FFFF
+#define HLNETFLAG_DATA		0x00010000
+#define HLNETFLAG_ACK		0x00020000
+#define HLNETFLAG_NAK		0x00040000
+#define HLNETFLAG_EOM		0x00080000
+#define HLNETFLAG_UNRELIABLE	0x00100000
+#define HLNETFLAG_CTL		0x80000000
+#define HLNET_HEADERSIZE		8
+#define HLNET_CTL_VERSION	3
+
+#define HLCCREQ_CONNECT		0x01
+#define HLCCREQ_SERVER_INFO	0x02
+#define HLCCREP_ACCEPT		0x81
+#define HLCCREP_REJECT		0x82
+#define HLCCREP_SERVER_INFO	0x83
+
+U32 HLNetBigLong(U32 v)
+{
+	return EndianU32(v);
+}
+
+U0 HLNetWriteBigLong(U8 *p, U32 v)
+{
+	U32 be = EndianU32(v);
+	MemCopy(p, &be, 4);
+}
+
+U32 HLNetReadBigLong(U8 *p)
+{
+	U32 be;
+	MemCopy(&be, p, 4);
+	return EndianU32(be);
+}
+
+#define HLSVC_BAD				0
+#define HLSVC_NOP				1
+#define HLSVC_DISCONNECT		2
+#define HLSVC_EVENT				3
+#define HLSVC_VERSION			4
+#define HLSVC_SETVIEW			5
+#define HLSVC_SOUND				6
+#define HLSVC_TIME				7
+#define HLSVC_PRINT				8
+#define HLSVC_STUFFTEXT			9
+#define HLSVC_SETANGLE			10
+#define HLSVC_SERVERINFO		11
+#define HLSVC_LIGHTSTYLE		12
+#define HLSVC_UPDATEUSERINFO	13
+#define HLSVC_DELTADESCRIPTION	14
+#define HLSVC_CLIENTDATA		15
+#define HLSVC_STOPSOUND			16
+#define HLSVC_PINGS				17
+#define HLSVC_PARTICLE			18
+#define HLSVC_DAMAGE			19
+#define HLSVC_SPAWNSTATIC		20
+#define HLSVC_EVENT_RELIABLE	21
+#define HLSVC_SPAWNBASELINE		22
+#define HLSVC_TEMPENTITY_		23
+#define HLSVC_SETPAUSE			24
+#define HLSVC_SIGNONNUM			25
+#define HLSVC_CENTERPRINT		26
+#define HLSVC_KILLEDMONSTER		27
+#define HLSVC_FOUNDSECRET		28
+#define HLSVC_SPAWNSTATICSOUND	29
+#define HLSVC_INTERMISSION_		30
+#define HLSVC_FINALE_			31
+#define HLSVC_CDTRACK			32
+#define HLSVC_RESTORE			33
+#define HLSVC_CUTSCENE_			34
+#define HLSVC_WEAPONANIM		35
+#define HLSVC_DECALNAME			36
+#define HLSVC_ROOMTYPE			37
+#define HLSVC_ADDANGLE			38
+#define HLSVC_NEWUSERMSG		39
+#define HLSVC_PACKETENTITIES	40
+#define HLSVC_DELTAPACKETENTITIES 41
+#define HLSVC_CHOKE				42
+#define HLSVC_RESOURCELIST		43
+#define HLSVC_NEWMOVEVARS		44
+#define HLSVC_RESOURCEREQUEST	45
+#define HLSVC_CUSTOMIZATION		46
+#define HLSVC_CROSSHAIRANGLE	47
+#define HLSVC_SOUNDFADE			48
+#define HLSVC_FILETXFERFAILED	49
+#define HLSVC_HLTV				50
+#define HLSVC_DIRECTOR			51
+#define HLSVC_VOICEINIT			52
+#define HLSVC_VOICEDATA			53
+#define HLSVC_SENDEXTRAINFO		54
+#define HLSVC_TIMESCALE			55
+#define HLSVC_RESOURCELOCATION	56
+#define HLSVC_SENDCVARVALUE		57
+#define HLSVC_SENDCVARVALUE2	58
+
+//last engine opcode.
+#define HLSVC_ENGINE_LAST		58
+#define HLUSERMSG_FIRST			64
+
+#define HLUM_HEALTH				64
+#define HLUM_BATTERY			65
+#define HLUM_DAMAGE				66		//12: armor, dmg, bits, 3 coords
+#define HLUM_SAYTEXT			67
+
+//svc_sound field_mask bits.
+#define HLSND_VOLUME			1
+#define HLSND_ATTENUATION		2
+#define HLSND_LARGE_INDEX		4		//SND_LARGE_INDEX: 16-bit sound number
+#define HLSND_PITCH				8
+#define HLSND_SENTENCE			16
+#define HLSND_STOP				32
+#define HLSND_CHANGE_VOL		64
+#define HLSND_CHANGE_PITCH		128
+#define HLSND_SPAWNING			256
+#define HLSND_DEFAULT_VOL		255
+#define HLSND_DEFAULT_ATTEN		1.0
+#define HLSND_DEFAULT_PITCH		100
+
+#define HLCLC_BAD				0
+#define HLCLC_NOP				1
+#define HLCLC_MOVE				2
+#define HLCLC_STRINGCMD			3
+#define HLCLC_DELTA				4
+#define HLCLC_RESOURCELIST		5
+#define HLCLC_TMOVE				6
+#define HLCLC_FILECONSISTENCY	7
+#define HLCLC_VOICEDATA			8
+#define HLCLC_HLTV				9
+#define HLCLC_CVARVALUE			10
+#define HLCLC_CVARVALUE2		11
+
+class CHLMsg
+{
+	U8	 data[HLNET_MAX_MSG];
+	I64	 len;
+	I64	 read;
+	Bool overflowed;
+	Bool badread;
+
+	I64	 wbit;
+	I64	 rbit;
+};
+
+CHLMsg	hl_sv_datagram;
+
+
+U0 HLMsgClear(CHLMsg *m)
+{
+	m->len        = 0;
+	m->read       = 0;
+	m->overflowed = FALSE;
+	m->badread    = FALSE;
+	m->wbit       = 0;
+	m->rbit       = 0;
+}
+
+U0 HLMsgWriteByte(CHLMsg *m, I64 v)
+{
+	if (m->len + 1 > HLNET_MAX_MSG)
+	{
+		m->overflowed = TRUE;
+		return;
+	}
+
+	m->data[m->len] = v & 0xFF;
+	m->len++;
+}
+
+U0 HLMsgWriteShort(CHLMsg *m, I64 v)
+{//little endian
+	HLMsgWriteByte(m, v & 0xFF);
+	HLMsgWriteByte(m, (v >> 8) & 0xFF);
+}
+
+U0 HLMsgWriteLong(CHLMsg *m, I64 v)
+{
+	HLMsgWriteByte(m, v & 0xFF);
+	HLMsgWriteByte(m, (v >> 8) & 0xFF);
+	HLMsgWriteByte(m, (v >> 16) & 0xFF);
+	HLMsgWriteByte(m, (v >> 24) & 0xFF);
+}
+
+U0 HLMsgWriteChar(CHLMsg *m, I64 v)
+{
+	HLMsgWriteByte(m, v & 0xFF);
+}
+
+U0 HLMsgWriteFloat(CHLMsg *m, F64 f)
+{
+	HLMsgWriteLong(m, HLWrF32(f));
+}
+
+U0 HLMsgWriteCoord(CHLMsg *m, F64 f)
+{
+	HLMsgWriteShort(m, ToI64(f * 8.0));
+}
+
+U0 HLMsgWriteAngle(CHLMsg *m, F64 f)
+{//MSG_WriteAngle - a whole turn in 256 steps
+	HLMsgWriteByte(m, ToI64(f * 256.0 / 360.0) & 255);
+}
+
+U0 HLMsgWriteHiresAngle(CHLMsg *m, F64 f)
+{
+	HLMsgWriteShort(m, ToI64(f * 65536.0 / 360.0) & 65535);
+}
+
+U0 HLMsgWriteString(CHLMsg *m, U8 *s)
+{
+	I64 i = 0;
+
+	if (s)
+	{
+		while (s[i])
+		{
+			HLMsgWriteByte(m, s[i]);
+			i++;
+		}
+	}
+
+	HLMsgWriteByte(m, 0);
+}
+
+U0 HLMsgAppend(CHLMsg *dst, CHLMsg *src)
+{
+	I64 i;
+
+	if (!dst || !src || src->len < 1 || dst->overflowed || src->overflowed)
+		return;
+
+	for (i = 0; i < src->len; i++)
+		HLMsgWriteByte(dst, src->data[i]);
+}
+
+U0 HLMsgAppendIfRoom(CHLMsg *dst, CHLMsg *src, I64 max_len)
+{
+	if (!dst || !src || src->len < 1)
+		return;
+	if (dst->len + src->len > max_len)
+		return;
+	HLMsgAppend(dst, src);
+}
+
+
+I64 HLMsgReadByte(CHLMsg *m)
+{
+	I64 v;
+
+	if (m->read + 1 > m->len)
+	{
+		m->badread = TRUE;
+		return -1;
+	}
+
+	v = m->data[m->read];
+	m->read++;
+
+	return v;
+}
+
+I64 HLMsgReadShort(CHLMsg *m)
+{
+	I64 v;
+
+	if (m->read + 2 > m->len)
+	{
+		m->badread = TRUE;
+		return -1;
+	}
+
+	v = m->data[m->read] | (m->data[m->read + 1] << 8);
+	m->read += 2;
+
+	if (v & 0x8000)
+		v -= 0x10000;
+
+	return v;
+}
+
+I64 HLMsgReadLong(CHLMsg *m)
+{
+	I64 v;
+
+	if (m->read + 4 > m->len)
+	{
+		m->badread = TRUE;
+		return -1;
+	}
+
+	v = m->data[m->read] | (m->data[m->read + 1] << 8) |
+		(m->data[m->read + 2] << 16) | (m->data[m->read + 3] << 24);
+	m->read += 4;
+
+	if (v & 0x80000000)
+		v -= 0x100000000;
+
+	return v;
+}
+
+I64 HLMsgReadChar(CHLMsg *m)
+{
+	I64 v = HLMsgReadByte(m);
+
+	if (v < 0)
+		return -1;
+
+	if (v & 0x80)
+		v -= 0x100;
+
+	return v;
+}
+
+F64 HLMsgReadFloat(CHLMsg *m)
+{
+	U8 b[4];
+	I64 i;
+
+	for (i = 0; i < 4; i++)
+	{
+		b[i] = HLMsgReadByte(m) & 0xFF;
+		if (m->badread)
+			return 0.0;
+	}
+
+	return HLRdF32(b);
+}
+
+F64 HLMsgReadCoord(CHLMsg *m)
+{
+	return ToF64(HLMsgReadShort(m)) * 0.125;
+}
+
+F64 HLMsgReadAngle(CHLMsg *m)
+{
+	return ToF64(HLMsgReadChar(m)) * 360.0 / 256.0;
+}
+
+F64 HLMsgReadHiresAngle(CHLMsg *m)
+{
+	return ToF64(HLMsgReadShort(m)) * 360.0 / 65536.0;
+}
+
+U0 HLMsgReadString(CHLMsg *m, U8 *out, I64 max)
+{
+	I64 i = 0;
+	I64 c;
+
+	while (i < max - 1)
+	{
+		c = HLMsgReadByte(m);
+		if (c <= 0)
+			break;
+
+		out[i] = c;
+		i++;
+	}
+
+	out[i] = 0;
+}
+
+
+class CHLNetLink
+{
+	CHLMsg	queue[HLNET_MAX_BACKLOG];
+	I64		head;
+	I64		tail;
+	I64		count;
+	I64		dropped;
+};
+
+CHLNetLink	hl_net_s2c;
+CHLNetLink	hl_net_c2s;
+CHLMsg		hl_net_send;
+CHLMsg		hl_net_cmd;
+Bool		hl_net_active = FALSE;
+
+U0 HLNetLinkClear(CHLNetLink *l)
+{
+	I64 i;
+
+	l->head    = 0;
+	l->tail    = 0;
+	l->count   = 0;
+	l->dropped = 0;
+
+	for (i = 0; i < HLNET_MAX_BACKLOG; i++)
+		HLMsgClear(&l->queue[i]);
+}
+
+U0 HLNetInit()
+{
+	HLNetLinkClear(&hl_net_s2c);
+	HLNetLinkClear(&hl_net_c2s);
+
+	HLMsgClear(&hl_net_send);
+	HLMsgClear(&hl_net_cmd);
+	HLMsgClear(&hl_sv_datagram);
+	hl_net_active = TRUE;
+}
+
+Bool HLNetLinkSend(CHLNetLink *l, CHLMsg *m)
+{
+	CHLMsg *slot;
+
+	if (!hl_net_active || m->overflowed || m->len < 1)
+		return FALSE;
+
+	if (l->count >= HLNET_MAX_BACKLOG)
+	{
+		l->dropped++;
+		return FALSE;
+	}
+
+	slot = &l->queue[l->head];
+	HLMsgClear(slot);
+	MemCopy(slot->data, m->data, m->len);
+	slot->len = m->len;
+
+	l->head = (l->head + 1) % HLNET_MAX_BACKLOG;
+	l->count++;
+
+	return TRUE;
+}
+
+Bool HLNetLinkGet(CHLNetLink *l, CHLMsg *out)
+{
+	CHLMsg *slot;
+
+	if (!hl_net_active || l->count < 1)
+		return FALSE;
+
+	slot = &l->queue[l->tail];
+
+	HLMsgClear(out);
+	MemCopy(out->data, slot->data, slot->len);
+	out->len = slot->len;
+
+	l->tail = (l->tail + 1) % HLNET_MAX_BACKLOG;
+	l->count--;
+
+	return TRUE;
+}
+
+Bool HLNetSendToClient(CHLMsg *m)
+{
+	return HLNetLinkSend(&hl_net_s2c, m);
+}
+
+Bool HLNetGetMessage(CHLMsg *out)
+{
+	return HLNetLinkGet(&hl_net_s2c, out);
+}
+
+Bool HLNetSendToServer(CHLMsg *m)
+{
+	return HLNetLinkSend(&hl_net_c2s, m);
+}
+
+Bool HLNetServerGetMessage(CHLMsg *out)
+{
+	return HLNetLinkGet(&hl_net_c2s, out);
+}
+
+#define HLNET_MAX_ENTS	600
+
+#define HLU_MOREBITS		1
+#define HLU_ORIGIN1		2
+#define HLU_ORIGIN2		4
+#define HLU_ORIGIN3		8
+#define HLU_ANGLE2		16
+#define HLU_NOLERP		32
+#define HLU_FRAME		64
+#define HLU_SIGNAL		128
+#define HLU_ANGLE1		256
+#define HLU_ANGLE3		512
+#define HLU_MODEL		1024
+#define HLU_COLORMAP		2048
+#define HLU_SKIN			4096
+#define HLU_EFFECTS		8192
+#define HLU_LONGENTITY	16384
+
+class CHLEntState
+{
+	F64	 origin[3];
+	F64	 angles[3];
+	I64	 modelindex;
+	I64	 frame;
+	I64	 colormap;
+	I64	 skin;
+	I64	 effects;
+	Bool step;
+	Bool active;
+	F64	 msgtime;
+
+	F64	 trail_org[3];
+	Bool trail_valid;
+
+	F64	 prev_origin[3];
+	F64	 prev_angles[3];
+	Bool forcelink;
+};
+
+U8	hl_host_name[32];
+
+U0 HLHostNameInit()
+{
+	HLStrCopy(hl_host_name, "UNNAMED", 32);
+}
+
+F64 hl_net_msgtime = 0.0;
+
+//cl.mtime[1], the update before. the pair brackets the lerp interval
+F64 hl_net_msgtime_prev = 0.0;
+
+F64 hl_cl_clock = 0.0;
+F64 hl_cl_clock_last = 0.0;
+
+U0 HLNetClockInit()
+{
+	hl_net_msgtime      = 0.0;
+	hl_net_msgtime_prev = 0.0;
+	hl_cl_clock         = 0.0;
+	hl_cl_clock_last    = 0.0;
+}
+
+CHLEntState	hl_net_baseline[HLNET_MAX_ENTS];
+CHLEntState	hl_net_sent[HLNET_MAX_ENTS];
+CHLEntState	hl_net_cl[HLNET_MAX_ENTS];
+I64			hl_net_num_ents = 0;
+
+U0 HLNetStateClear(CHLEntState *e)
+{
+	HLVecSet(e->origin, 0.0, 0.0, 0.0);
+	HLVecSet(e->angles, 0.0, 0.0, 0.0);
+	e->modelindex = 0;
+	e->frame      = 0;
+	e->colormap   = 0;
+	e->skin       = 0;
+	e->effects    = 0;
+	e->step       = FALSE;
+	e->active     = FALSE;
+	e->msgtime    = 0.0;
+	HLVecSet(e->trail_org, 0.0, 0.0, 0.0);
+	e->trail_valid = FALSE;
+	HLVecSet(e->prev_origin, 0.0, 0.0, 0.0);
+	HLVecSet(e->prev_angles, 0.0, 0.0, 0.0);
+	e->forcelink = TRUE;
+}
+
+U0 HLNetStatesClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLNET_MAX_ENTS; i++)
+	{
+		HLNetStateClear(&hl_net_baseline[i]);
+		HLNetStateClear(&hl_net_sent[i]);
+		HLNetStateClear(&hl_net_cl[i]);
+	}
+
+	hl_net_num_ents = 0;
+}
+
+Bool HLNetOriginDiffers(F64 a, F64 b)
+{
+	F64 miss = a - b;
+
+	return ToBool(miss < -0.1 || miss > 0.1);
+}
+
+U0 HLNetWriteEntityUpdate(CHLMsg *m, I64 num, CHLEntState *now,
+	CHLEntState *baseline)
+{
+	I64 bits = 0;
+
+	if (HLNetOriginDiffers(now->origin[0], baseline->origin[0]))
+		bits |= HLU_ORIGIN1;
+	if (HLNetOriginDiffers(now->origin[1], baseline->origin[1]))
+		bits |= HLU_ORIGIN2;
+	if (HLNetOriginDiffers(now->origin[2], baseline->origin[2]))
+		bits |= HLU_ORIGIN3;
+
+	if (now->angles[0] != baseline->angles[0])	bits |= HLU_ANGLE1;
+	if (now->angles[1] != baseline->angles[1])	bits |= HLU_ANGLE2;
+	if (now->angles[2] != baseline->angles[2])	bits |= HLU_ANGLE3;
+
+	if (now->step)
+		bits |= HLU_NOLERP;
+
+	if (now->frame      != baseline->frame)		bits |= HLU_FRAME;
+	if (now->modelindex != baseline->modelindex)	bits |= HLU_MODEL;
+	if (now->colormap   != baseline->colormap)	bits |= HLU_COLORMAP;
+	if (now->skin       != baseline->skin)		bits |= HLU_SKIN;
+	if (now->effects    != baseline->effects)	bits |= HLU_EFFECTS;
+
+	if (num >= 256)
+		bits |= HLU_LONGENTITY;
+	if (bits >= 256)
+		bits |= HLU_MOREBITS;
+
+	HLMsgWriteByte(m, (bits | HLU_SIGNAL) & 255);
+
+	if (bits & HLU_MOREBITS)
+		HLMsgWriteByte(m, (bits >> 8) & 255);
+
+	if (bits & HLU_LONGENTITY)
+		HLMsgWriteShort(m, num);
+	else
+		HLMsgWriteByte(m, num);
+
+	if (bits & HLU_MODEL)	HLMsgWriteByte(m, now->modelindex);
+	if (bits & HLU_FRAME)	HLMsgWriteByte(m, now->frame);
+	if (bits & HLU_COLORMAP)	HLMsgWriteByte(m, now->colormap);
+	if (bits & HLU_SKIN)		HLMsgWriteByte(m, now->skin);
+	if (bits & HLU_EFFECTS)	HLMsgWriteByte(m, now->effects);
+
+	if (bits & HLU_ORIGIN1)	HLMsgWriteCoord(m, now->origin[0]);
+	if (bits & HLU_ANGLE1)	HLMsgWriteAngle(m, now->angles[0]);
+	if (bits & HLU_ORIGIN2)	HLMsgWriteCoord(m, now->origin[1]);
+	if (bits & HLU_ANGLE2)	HLMsgWriteAngle(m, now->angles[1]);
+	if (bits & HLU_ORIGIN3)	HLMsgWriteCoord(m, now->origin[2]);
+	if (bits & HLU_ANGLE3)	HLMsgWriteAngle(m, now->angles[2]);
+}
+
+Bool HLNetReadEntityUpdate(CHLMsg *m, I64 bits)
+{
+	CHLEntState	*e;
+	I64			 num;
+
+	if (bits & HLU_MOREBITS)
+		bits |= HLMsgReadByte(m) << 8;
+
+	if (bits & HLU_LONGENTITY)
+		num = HLMsgReadShort(m);
+	else
+		num = HLMsgReadByte(m);
+
+	if (num < 0 || num >= HLNET_MAX_ENTS || m->badread)
+		return FALSE;
+
+	e = &hl_net_cl[num];
+
+	if (!e->active)
+	{
+		MemCopy(e, &hl_net_baseline[num], sizeof(CHLEntState));
+		e->forcelink = TRUE;
+	}
+
+	if (e->msgtime != hl_net_msgtime_prev)
+		e->forcelink = TRUE;
+
+	//msg_origins[0] becomes msg_origins[1], the bytes below overwrite [0]
+	HLVecCopy(e->origin, e->prev_origin);
+	HLVecCopy(e->angles, e->prev_angles);
+
+	e->step = ToBool((bits & HLU_NOLERP) != 0);
+
+	if (bits & HLU_MODEL)	e->modelindex = HLMsgReadByte(m);
+	if (bits & HLU_FRAME)	e->frame      = HLMsgReadByte(m);
+	if (bits & HLU_COLORMAP)	e->colormap   = HLMsgReadByte(m);
+	if (bits & HLU_SKIN)		e->skin       = HLMsgReadByte(m);
+	if (bits & HLU_EFFECTS)	e->effects    = HLMsgReadByte(m);
+
+	if (bits & HLU_ORIGIN1)	e->origin[0] = HLMsgReadCoord(m);
+	if (bits & HLU_ANGLE1)	e->angles[0] = HLMsgReadAngle(m);
+	if (bits & HLU_ORIGIN2)	e->origin[1] = HLMsgReadCoord(m);
+	if (bits & HLU_ANGLE2)	e->angles[1] = HLMsgReadAngle(m);
+	if (bits & HLU_ORIGIN3)	e->origin[2] = HLMsgReadCoord(m);
+	if (bits & HLU_ANGLE3)	e->angles[2] = HLMsgReadAngle(m);
+
+	if (e->forcelink)
+	{
+		HLVecCopy(e->origin, e->prev_origin);
+		HLVecCopy(e->angles, e->prev_angles);
+	}
+
+	e->active  = TRUE;
+	e->msgtime = hl_net_msgtime;
+
+	if (num >= hl_net_num_ents)
+		hl_net_num_ents = num + 1;
+
+	return ToBool(!m->badread);
+}
+
+
+U0 HLBitWriteStart(CHLMsg *m)
+{
+	m->wbit = m->len * 8;
+}
+
+U0 HLBitWriteBits(CHLMsg *m, I64 v, I64 n)
+{
+	I64 i;
+	I64 byte_idx;
+
+	if (n < 1 || n > 32)
+		return;
+
+	for (i = 0; i < n; i++)
+	{
+		byte_idx = m->wbit >> 3;
+
+		if (byte_idx >= HLNET_MAX_MSG)
+		{
+			m->overflowed = TRUE;
+			return;
+		}
+
+		if (!(m->wbit & 7))
+			m->data[byte_idx] = 0;
+
+		if ((v >> i) & 1)
+			m->data[byte_idx] = m->data[byte_idx] | (1 << (m->wbit & 7));
+
+		m->wbit++;
+
+		if (byte_idx + 1 > m->len)
+			m->len = byte_idx + 1;
+	}
+}
+
+U0 HLBitWriteSBits(CHLMsg *m, I64 v, I64 n)
+{
+	if (n < 1 || n > 32)
+		return;
+
+	HLBitWriteBits(m, v & ((1 << n) - 1), n);
+}
+
+U0 HLBitWriteEnd(CHLMsg *m)
+{
+	m->wbit = m->len * 8;
+}
+
+U0 HLBitReadStart(CHLMsg *m)
+{
+	m->rbit = m->read * 8;
+}
+
+I64 HLBitReadBits(CHLMsg *m, I64 n)
+{
+	I64 i;
+	I64 v = 0;
+	I64 byte_idx;
+
+	if (n < 1 || n > 32)
+		return 0;
+
+	for (i = 0; i < n; i++)
+	{
+		byte_idx = m->rbit >> 3;
+
+		if (byte_idx >= m->len)
+		{
+			m->badread = TRUE;
+			return 0;
+		}
+
+		if (m->data[byte_idx] & (1 << (m->rbit & 7)))
+			v = v | (1 << i);
+
+		m->rbit++;
+	}
+
+	return v;
+}
+
+I64 HLBitReadSBits(CHLMsg *m, I64 n)
+{//sign extend from bit n-1
+	I64 v = HLBitReadBits(m, n);
+
+	if (n < 1 || n >= 32)
+		return v;
+
+	if (v & (1 << (n - 1)))
+		v -= 1 << n;
+
+	return v;
+}
+
+U0 HLBitReadEnd(CHLMsg *m)
+{
+	m->read = (m->rbit + 7) >> 3;
+}
+
+U0 HLBitWriteBitString(CHLMsg *m, U8 *s)
+{
+	I64 i = 0;
+
+	if (s)
+	{
+		while (s[i])
+		{
+			HLBitWriteBits(m, s[i], 8);
+			i++;
+		}
+	}
+
+	HLBitWriteBits(m, 0, 8);
+}
+
+U0 HLBitReadBitString(CHLMsg *m, U8 *out, I64 max)
+{
+	I64 i = 0;
+	I64 c;
+
+	if (out && max > 0)
+		out[0] = 0;
+
+	while (TRUE)
+	{
+		c = HLBitReadBits(m, 8);
+		if (m->badread || !c)
+			break;
+
+		if (out && i < max - 1)
+		{
+			out[i] = c;
+			i++;
+		}
+	}
+
+	if (out && max > 0)
+		out[i] = 0;
+}
+
+U0 HLBitWriteBitCoord(CHLMsg *m, F64 f)
+{
+	I64	sign = 0;
+	I64	intval;
+	I64	fracval;
+	F64	av;
+
+	av = f;
+	if (av < 0.0)
+	{
+		sign = 1;
+		av   = -av;
+	}
+
+	intval  = ToI64(av);
+	fracval = ToI64(av * 8.0) & 7;
+
+	if (intval > 4095)
+		intval = 4095;
+
+	if (intval)
+		HLBitWriteBits(m, 1, 1);
+	else
+		HLBitWriteBits(m, 0, 1);
+
+	if (fracval)
+		HLBitWriteBits(m, 1, 1);
+	else
+		HLBitWriteBits(m, 0, 1);
+
+	if (!intval && !fracval)
+		return;
+
+	HLBitWriteBits(m, sign, 1);
+
+	if (intval)
+		HLBitWriteBits(m, intval, 12);
+	if (fracval)
+		HLBitWriteBits(m, fracval, 3);
+}
+
+F64 HLBitReadBitCoord(CHLMsg *m)
+{
+	I64	has_int;
+	I64	has_frac;
+	I64	intval  = 0;
+	I64	fracval = 0;
+	I64	sign    = 0;
+	F64	v;
+
+	has_int  = HLBitReadBits(m, 1);
+	has_frac = HLBitReadBits(m, 1);
+
+	if (!has_int && !has_frac)
+		return 0.0;
+
+	sign = HLBitReadBits(m, 1);
+
+	if (has_int)
+		intval = HLBitReadBits(m, 12);
+	if (has_frac)
+		fracval = HLBitReadBits(m, 3);
+
+	v = ToF64(intval) + ToF64(fracval) * 0.125;
+
+	if (sign)
+		v = -v;
+
+	return v;
+}
+
+U0 HLBitWriteBitAngle(CHLMsg *m, F64 f, I64 bits)
+{
+	I64 shift;
+
+	if (bits < 1 || bits > 32)
+		return;
+
+	shift = 1 << bits;
+	HLBitWriteBits(m, ToI64(f * ToF64(shift) / 360.0) & (shift - 1), bits);
+}
+
+F64 HLBitReadBitAngle(CHLMsg *m, I64 bits)
+{
+	I64 shift;
+
+	if (bits < 1 || bits > 32)
+		return 0.0;
+
+	shift = 1 << bits;
+
+	return ToF64(HLBitReadBits(m, bits)) * 360.0 / ToF64(shift);
+}
+
+
+#define HLDT_BYTE			1
+#define HLDT_SHORT			2
+#define HLDT_FLOAT			4
+#define HLDT_INTEGER		8
+#define HLDT_ANGLE			16
+#define HLDT_TIMEWINDOW_8	32
+#define HLDT_TIMEWINDOW_BIG	64
+#define HLDT_STRING			128
+#define HLDT_SIGNED			0x80000000
+#define HLDT_TYPEMASK		0x7FFFFFFF
+
+#define HLDELTA_MAX_SLOTS	64
+#define HLDELTA_MAX_FIELDS	64
+
+class CHLDeltaField
+{
+	I64	slot;
+	I64	type;
+	I64	bits;
+	F64	scale;
+	F64	post;		//DEFINE_DELTA_POST postmultiply, 0.0 = none
+	U8	name[24];
+};
+
+class CHLDelta
+{
+	CHLDeltaField	f[HLDELTA_MAX_FIELDS];
+	I64				count;
+	U8				name[24];
+};
+
+CHLDelta	hl_delta_entity;
+CHLDelta	hl_delta_player;
+CHLDelta	hl_delta_custom;
+CHLDelta	hl_delta_clientdata;
+CHLDelta	hl_delta_weapon;
+CHLDelta	hl_delta_usercmd;
+CHLDelta	hl_delta_event;
+
+
+#define HLES_ANIMTIME		0
+#define HLES_FRAME			1
+#define HLES_ORIGIN			2	//+0..2
+#define HLES_ANGLES			5	//+0..2
+#define HLES_SEQUENCE		8
+#define HLES_GAITSEQUENCE	9
+#define HLES_MODELINDEX		10
+#define HLES_MOVETYPE		11
+#define HLES_SOLID			12
+#define HLES_MINS			13	//+0..2
+#define HLES_MAXS			16	//+0..2
+#define HLES_ENDPOS			19	//+0..2
+#define HLES_STARTPOS		22	//+0..2
+#define HLES_IMPACTTIME		25
+#define HLES_STARTTIME		26
+#define HLES_WEAPONMODEL	27
+#define HLES_OWNER			28
+#define HLES_EFFECTS		29
+#define HLES_EFLAGS			30
+#define HLES_COLORMAP		31
+#define HLES_FRAMERATE		32
+#define HLES_SKIN			33
+#define HLES_CONTROLLER		34	//+0..3
+#define HLES_BLENDING		38	//+0..1
+#define HLES_BODY			40
+#define HLES_RENDERMODE		41
+#define HLES_RENDERAMT		42
+#define HLES_RENDERFX		43
+#define HLES_SCALE			44
+#define HLES_RENDERCOLOR	45	//+0..2, r g b
+#define HLES_AIMENT			48
+#define HLES_BASEVELOCITY	49	//+0..2
+#define HLES_PLAYERCLASS	52
+#define HLES_TEAM			53
+#define HLES_FRICTION		54
+#define HLES_USEHULL		55
+#define HLES_GRAVITY		56
+#define HLES_SPECTATOR		57
+#define HLES_SLOTS			58
+
+#define HLCD_TIMESTEPSOUND	0
+#define HLCD_ORIGIN			1	//+0..2
+#define HLCD_VELOCITY		4	//+0..2
+#define HLCD_NEXTATTACK		7
+#define HLCD_AMMO_NAILS		8
+#define HLCD_AMMO_SHELLS	9
+#define HLCD_AMMO_CELLS		10
+#define HLCD_AMMO_ROCKETS	11
+#define HLCD_M_IID			12
+#define HLCD_PUNCHANGLE		13	//+0..2
+#define HLCD_FLAGS			16
+#define HLCD_WEAPONANIM		17
+#define HLCD_HEALTH			18
+#define HLCD_MAXSPEED		19
+#define HLCD_DUCKTIME		20
+#define HLCD_VIEW_OFS		21	//+0..2, only [2] is delta'd
+#define HLCD_VIEWMODEL		24
+#define HLCD_WEAPONS		25
+#define HLCD_PUSHMSEC		26
+#define HLCD_DEADFLAG		27
+#define HLCD_FOV			28
+#define HLCD_PHYSINFO		29
+#define HLCD_INDUCK			30
+#define HLCD_SWIMTIME		31
+#define HLCD_WATERJUMPTIME	32
+#define HLCD_WATERLEVEL		33
+#define HLCD_IUSER1			34
+#define HLCD_IUSER2			35
+#define HLCD_VUSER1			36	//+0..2
+#define HLCD_VUSER2			39	//+0..2
+#define HLCD_VUSER3			42	//+0..2
+#define HLCD_VUSER4			45	//+0..2
+#define HLCD_FUSER1			48
+#define HLCD_FUSER2			49
+#define HLCD_FUSER3			50
+#define HLCD_FUSER4			51
+#define HLCD_SLOTS			52
+
+#define HLWD_TIMEWEAPONIDLE	0
+#define HLWD_NEXTPRIMARY	1
+#define HLWD_NEXTRELOAD		2
+#define HLWD_NEXTAIMBONUS	3
+#define HLWD_NEXTSECONDARY	4
+#define HLWD_CLIP			5
+#define HLWD_PUMPTIME		6
+#define HLWD_SPECIALRELOAD	7
+#define HLWD_RELOADTIME		8
+#define HLWD_INRELOAD		9
+#define HLWD_AIMEDDAMAGE	10
+#define HLWD_INZOOM			11
+#define HLWD_WEAPONSTATE	12
+#define HLWD_ID				13
+#define HLWD_IUSER1			14
+#define HLWD_IUSER2			15
+#define HLWD_IUSER3			16
+#define HLWD_FUSER1			17
+#define HLWD_FUSER2			18
+#define HLWD_FUSER3			19
+#define HLWD_SLOTS			20
+
+#define HLUC_LERP_MSEC		0
+#define HLUC_MSEC			1
+#define HLUC_VIEWANGLES		2	//+0..2
+#define HLUC_BUTTONS		5
+#define HLUC_FORWARDMOVE	6
+#define HLUC_LIGHTLEVEL		7
+#define HLUC_SIDEMOVE		8
+#define HLUC_UPMOVE			9
+#define HLUC_IMPULSE		10
+#define HLUC_IMPACT_INDEX	11
+#define HLUC_IMPACT_POS		12	//+0..2
+#define HLUC_SLOTS			15
+
+#define HLEV_ENTINDEX		0
+#define HLEV_BPARAM1		1
+#define HLEV_BPARAM2		2
+#define HLEV_ORIGIN			3	//+0..2
+#define HLEV_FPARAM1		6
+#define HLEV_FPARAM2		7
+#define HLEV_IPARAM1		8
+#define HLEV_IPARAM2		9
+#define HLEV_ANGLES			10	//+0..2
+#define HLEV_DUCKING		13
+#define HLEV_SLOTS			14
+
+U0 HLDeltaAdd(CHLDelta *d, I64 slot, I64 type, I64 bits, F64 scale,
+	F64 post, U8 *name)
+{
+	CHLDeltaField *f;
+
+	if (!d || d->count >= HLDELTA_MAX_FIELDS)
+		return;
+
+	f = &d->f[d->count];
+	f->slot  = slot;
+	f->type  = type;
+	f->bits  = bits;
+	f->scale = scale;
+	f->post  = post;
+	HLStrCopy(f->name, name, 24);
+
+	d->count++;
+}
+
+U0 HLDeltaClear(CHLDelta *d, U8 *name)
+{
+	d->count = 0;
+	HLStrCopy(d->name, name, 24);
+}
+
+U0 HLDeltaInitClientData()
+{
+	CHLDelta *d = &hl_delta_clientdata;
+
+	HLDeltaClear(d, "clientdata_t");
+
+	HLDeltaAdd(d, HLCD_TIMESTEPSOUND, HLDT_INTEGER, 10, 1.0, 0.0,
+		"flTimeStepSound");
+	HLDeltaAdd(d, HLCD_ORIGIN + 0, HLDT_SIGNED | HLDT_FLOAT, 21, 128.0, 0.0,
+		"origin[0]");
+	HLDeltaAdd(d, HLCD_ORIGIN + 1, HLDT_SIGNED | HLDT_FLOAT, 21, 128.0, 0.0,
+		"origin[1]");
+	HLDeltaAdd(d, HLCD_VELOCITY + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"velocity[0]");
+	HLDeltaAdd(d, HLCD_VELOCITY + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"velocity[1]");
+	HLDeltaAdd(d, HLCD_NEXTATTACK, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_flNextAttack");
+	HLDeltaAdd(d, HLCD_ORIGIN + 2, HLDT_SIGNED | HLDT_FLOAT, 21, 128.0, 0.0,
+		"origin[2]");
+	HLDeltaAdd(d, HLCD_VELOCITY + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"velocity[2]");
+	HLDeltaAdd(d, HLCD_AMMO_NAILS, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"ammo_nails");
+	HLDeltaAdd(d, HLCD_AMMO_SHELLS, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"ammo_shells");
+	HLDeltaAdd(d, HLCD_AMMO_CELLS, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"ammo_cells");
+	HLDeltaAdd(d, HLCD_AMMO_ROCKETS, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"ammo_rockets");
+	HLDeltaAdd(d, HLCD_M_IID, HLDT_INTEGER, 5, 1.0, 0.0, "m_iId");
+	HLDeltaAdd(d, HLCD_PUNCHANGLE + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"punchangle[2]");
+	HLDeltaAdd(d, HLCD_FLAGS, HLDT_INTEGER, 32, 1.0, 0.0, "flags");
+	HLDeltaAdd(d, HLCD_WEAPONANIM, HLDT_INTEGER, 8, 1.0, 0.0, "weaponanim");
+	HLDeltaAdd(d, HLCD_HEALTH, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0, "health");
+	HLDeltaAdd(d, HLCD_MAXSPEED, HLDT_FLOAT, 16, 10.0, 0.0, "maxspeed");
+	HLDeltaAdd(d, HLCD_DUCKTIME, HLDT_INTEGER, 10, 1.0, 0.0, "flDuckTime");
+	HLDeltaAdd(d, HLCD_VIEW_OFS + 2, HLDT_SIGNED | HLDT_FLOAT, 10, 4.0, 0.0,
+		"view_ofs[2]");
+	HLDeltaAdd(d, HLCD_PUNCHANGLE + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"punchangle[0]");
+	HLDeltaAdd(d, HLCD_PUNCHANGLE + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"punchangle[1]");
+	HLDeltaAdd(d, HLCD_VIEWMODEL, HLDT_INTEGER, 10, 1.0, 0.0, "viewmodel");
+	HLDeltaAdd(d, HLCD_WEAPONS, HLDT_INTEGER, 32, 1.0, 0.0, "weapons");
+	HLDeltaAdd(d, HLCD_PUSHMSEC, HLDT_INTEGER, 11, 1.0, 0.0, "pushmsec");
+	HLDeltaAdd(d, HLCD_DEADFLAG, HLDT_INTEGER, 3, 1.0, 0.0, "deadflag");
+	HLDeltaAdd(d, HLCD_FOV, HLDT_FLOAT, 8, 1.0, 0.0, "fov");
+	HLDeltaAdd(d, HLCD_PHYSINFO, HLDT_STRING, 1, 1.0, 0.0, "physinfo");
+	HLDeltaAdd(d, HLCD_INDUCK, HLDT_INTEGER, 1, 1.0, 0.0, "bInDuck");
+	HLDeltaAdd(d, HLCD_SWIMTIME, HLDT_INTEGER, 10, 1.0, 0.0, "flSwimTime");
+	HLDeltaAdd(d, HLCD_WATERJUMPTIME, HLDT_INTEGER, 15, 1.0, 0.0,
+		"waterjumptime");
+	HLDeltaAdd(d, HLCD_WATERLEVEL, HLDT_INTEGER, 2, 1.0, 0.0, "waterlevel");
+	HLDeltaAdd(d, HLCD_IUSER1, HLDT_INTEGER, 3, 1.0, 0.0, "iuser1");
+	HLDeltaAdd(d, HLCD_IUSER2, HLDT_INTEGER, 5, 1.0, 0.0, "iuser2");
+	HLDeltaAdd(d, HLCD_VUSER1 + 0, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser1[0]");
+	HLDeltaAdd(d, HLCD_VUSER1 + 1, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser1[1]");
+	HLDeltaAdd(d, HLCD_VUSER1 + 2, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser1[2]");
+	HLDeltaAdd(d, HLCD_VUSER2 + 0, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser2[0]");
+	HLDeltaAdd(d, HLCD_VUSER2 + 1, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser2[1]");
+	HLDeltaAdd(d, HLCD_VUSER2 + 2, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser2[2]");
+	HLDeltaAdd(d, HLCD_VUSER3 + 0, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser3[0]");
+	HLDeltaAdd(d, HLCD_VUSER3 + 1, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser3[1]");
+	HLDeltaAdd(d, HLCD_VUSER3 + 2, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser3[2]");
+	HLDeltaAdd(d, HLCD_VUSER4 + 0, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser4[0]");
+	HLDeltaAdd(d, HLCD_VUSER4 + 1, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser4[1]");
+	HLDeltaAdd(d, HLCD_VUSER4 + 2, HLDT_SIGNED | HLDT_FLOAT, 10, 1.0, 0.0,
+		"vuser4[2]");
+	HLDeltaAdd(d, HLCD_FUSER1, HLDT_SIGNED | HLDT_FLOAT, 22, 128.0, 0.0,
+		"fuser1");
+	HLDeltaAdd(d, HLCD_FUSER2, HLDT_SIGNED | HLDT_FLOAT, 10, 128.0, 0.0,
+		"fuser2");
+	HLDeltaAdd(d, HLCD_FUSER3, HLDT_SIGNED | HLDT_FLOAT, 10, 128.0, 0.0,
+		"fuser3");
+	HLDeltaAdd(d, HLCD_FUSER4, HLDT_SIGNED | HLDT_FLOAT, 2, 128.0, 0.0,
+		"fuser4");
+}
+
+U0 HLDeltaInitEntity()
+{
+	CHLDelta *d = &hl_delta_entity;
+
+	HLDeltaClear(d, "entity_state_t");
+
+	HLDeltaAdd(d, HLES_ANIMTIME, HLDT_TIMEWINDOW_8, 8, 1.0, 0.0, "animtime");
+	HLDeltaAdd(d, HLES_FRAME, HLDT_FLOAT, 10, 4.0, 0.0, "frame");
+	HLDeltaAdd(d, HLES_ORIGIN + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[0]");
+	HLDeltaAdd(d, HLES_ANGLES + 0, HLDT_ANGLE, 16, 1.0, 0.0, "angles[0]");
+	HLDeltaAdd(d, HLES_ANGLES + 1, HLDT_ANGLE, 16, 1.0, 0.0, "angles[1]");
+	HLDeltaAdd(d, HLES_ORIGIN + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[1]");
+	HLDeltaAdd(d, HLES_ORIGIN + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[2]");
+	HLDeltaAdd(d, HLES_SEQUENCE, HLDT_INTEGER, 8, 1.0, 0.0, "sequence");
+	HLDeltaAdd(d, HLES_MODELINDEX, HLDT_INTEGER, 10, 1.0, 0.0, "modelindex");
+	HLDeltaAdd(d, HLES_MOVETYPE, HLDT_INTEGER, 4, 1.0, 0.0, "movetype");
+	HLDeltaAdd(d, HLES_SOLID, HLDT_SHORT, 3, 1.0, 0.0, "solid");
+	HLDeltaAdd(d, HLES_MINS + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[0]");
+	HLDeltaAdd(d, HLES_MINS + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[1]");
+	HLDeltaAdd(d, HLES_MINS + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[2]");
+	HLDeltaAdd(d, HLES_MAXS + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[0]");
+	HLDeltaAdd(d, HLES_MAXS + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[1]");
+	HLDeltaAdd(d, HLES_MAXS + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[2]");
+	HLDeltaAdd(d, HLES_ENDPOS + 0, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"endpos[0]");
+	HLDeltaAdd(d, HLES_ENDPOS + 1, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"endpos[1]");
+	HLDeltaAdd(d, HLES_ENDPOS + 2, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"endpos[2]");
+	HLDeltaAdd(d, HLES_STARTPOS + 0, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"startpos[0]");
+	HLDeltaAdd(d, HLES_STARTPOS + 1, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"startpos[1]");
+	HLDeltaAdd(d, HLES_STARTPOS + 2, HLDT_SIGNED | HLDT_FLOAT, 13, 1.0, 0.0,
+		"startpos[2]");
+	HLDeltaAdd(d, HLES_IMPACTTIME, HLDT_TIMEWINDOW_BIG, 13, 100.0, 0.0,
+		"impacttime");
+	HLDeltaAdd(d, HLES_STARTTIME, HLDT_TIMEWINDOW_BIG, 13, 100.0, 0.0,
+		"starttime");
+	HLDeltaAdd(d, HLES_WEAPONMODEL, HLDT_INTEGER, 10, 1.0, 0.0, "weaponmodel");
+	HLDeltaAdd(d, HLES_OWNER, HLDT_INTEGER, 5, 1.0, 0.0, "owner");
+	HLDeltaAdd(d, HLES_EFFECTS, HLDT_INTEGER, 8, 1.0, 0.0, "effects");
+	HLDeltaAdd(d, HLES_EFLAGS, HLDT_INTEGER, 2, 1.0, 0.0, "eflags");
+	HLDeltaAdd(d, HLES_ANGLES + 2, HLDT_ANGLE, 16, 1.0, 0.0, "angles[2]");
+	HLDeltaAdd(d, HLES_COLORMAP, HLDT_INTEGER, 16, 1.0, 0.0, "colormap");
+	HLDeltaAdd(d, HLES_FRAMERATE, HLDT_SIGNED | HLDT_FLOAT, 8, 16.0, 0.0,
+		"framerate");
+	HLDeltaAdd(d, HLES_SKIN, HLDT_SHORT | HLDT_SIGNED, 9, 1.0, 0.0, "skin");
+	HLDeltaAdd(d, HLES_CONTROLLER + 0, HLDT_BYTE, 8, 1.0, 0.0, "controller[0]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 1, HLDT_BYTE, 8, 1.0, 0.0, "controller[1]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 2, HLDT_BYTE, 8, 1.0, 0.0, "controller[2]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 3, HLDT_BYTE, 8, 1.0, 0.0, "controller[3]");
+	HLDeltaAdd(d, HLES_BLENDING + 0, HLDT_BYTE, 8, 1.0, 0.0, "blending[0]");
+	HLDeltaAdd(d, HLES_BLENDING + 1, HLDT_BYTE, 8, 1.0, 0.0, "blending[1]");
+	HLDeltaAdd(d, HLES_BODY, HLDT_INTEGER, 8, 1.0, 0.0, "body");
+	HLDeltaAdd(d, HLES_RENDERMODE, HLDT_INTEGER, 8, 1.0, 0.0, "rendermode");
+	HLDeltaAdd(d, HLES_RENDERAMT, HLDT_INTEGER, 8, 1.0, 0.0, "renderamt");
+	HLDeltaAdd(d, HLES_RENDERFX, HLDT_INTEGER, 8, 1.0, 0.0, "renderfx");
+	HLDeltaAdd(d, HLES_SCALE, HLDT_FLOAT, 16, 256.0, 0.0, "scale");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 0, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.r");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 1, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.g");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 2, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.b");
+	HLDeltaAdd(d, HLES_AIMENT, HLDT_INTEGER, 11, 1.0, 0.0, "aiment");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[0]");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[1]");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[2]");
+	HLDeltaAdd(d, HLES_PLAYERCLASS, HLDT_INTEGER, 1, 1.0, 0.0, "playerclass");
+}
+
+U0 HLDeltaInitPlayer()
+{
+	CHLDelta *d = &hl_delta_player;
+
+	HLDeltaClear(d, "entity_state_player_t");
+
+	HLDeltaAdd(d, HLES_ANIMTIME, HLDT_TIMEWINDOW_8, 8, 1.0, 0.0, "animtime");
+	HLDeltaAdd(d, HLES_FRAME, HLDT_FLOAT, 8, 1.0, 0.0, "frame");
+	HLDeltaAdd(d, HLES_ORIGIN + 0, HLDT_SIGNED | HLDT_FLOAT, 18, 32.0, 0.0,
+		"origin[0]");
+	HLDeltaAdd(d, HLES_ANGLES + 0, HLDT_ANGLE, 16, 1.0, 0.0, "angles[0]");
+	HLDeltaAdd(d, HLES_ANGLES + 1, HLDT_ANGLE, 16, 1.0, 0.0, "angles[1]");
+	HLDeltaAdd(d, HLES_ORIGIN + 1, HLDT_SIGNED | HLDT_FLOAT, 18, 32.0, 0.0,
+		"origin[1]");
+	HLDeltaAdd(d, HLES_ORIGIN + 2, HLDT_SIGNED | HLDT_FLOAT, 18, 32.0, 0.0,
+		"origin[2]");
+	HLDeltaAdd(d, HLES_GAITSEQUENCE, HLDT_INTEGER, 8, 1.0, 0.0, "gaitsequence");
+	HLDeltaAdd(d, HLES_SEQUENCE, HLDT_INTEGER, 8, 1.0, 0.0, "sequence");
+	HLDeltaAdd(d, HLES_MODELINDEX, HLDT_INTEGER, 10, 1.0, 0.0, "modelindex");
+	HLDeltaAdd(d, HLES_MOVETYPE, HLDT_INTEGER, 4, 1.0, 0.0, "movetype");
+	HLDeltaAdd(d, HLES_SOLID, HLDT_SHORT, 3, 1.0, 0.0, "solid");
+	HLDeltaAdd(d, HLES_MINS + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[0]");
+	HLDeltaAdd(d, HLES_MINS + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[1]");
+	HLDeltaAdd(d, HLES_MINS + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"mins[2]");
+	HLDeltaAdd(d, HLES_MAXS + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[0]");
+	HLDeltaAdd(d, HLES_MAXS + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[1]");
+	HLDeltaAdd(d, HLES_MAXS + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"maxs[2]");
+	HLDeltaAdd(d, HLES_WEAPONMODEL, HLDT_INTEGER, 10, 1.0, 0.0, "weaponmodel");
+	HLDeltaAdd(d, HLES_TEAM, HLDT_INTEGER, 4, 1.0, 0.0, "team");
+	HLDeltaAdd(d, HLES_PLAYERCLASS, HLDT_INTEGER, 4, 1.0, 0.0, "playerclass");
+	HLDeltaAdd(d, HLES_OWNER, HLDT_INTEGER, 5, 1.0, 0.0, "owner");
+	HLDeltaAdd(d, HLES_EFFECTS, HLDT_INTEGER, 8, 1.0, 0.0, "effects");
+	HLDeltaAdd(d, HLES_ANGLES + 2, HLDT_ANGLE, 16, 1.0, 0.0, "angles[2]");
+	HLDeltaAdd(d, HLES_COLORMAP, HLDT_INTEGER, 16, 1.0, 0.0, "colormap");
+	HLDeltaAdd(d, HLES_FRAMERATE, HLDT_SIGNED | HLDT_FLOAT, 8, 16.0, 0.0,
+		"framerate");
+	HLDeltaAdd(d, HLES_SKIN, HLDT_SHORT | HLDT_SIGNED, 9, 1.0, 0.0, "skin");
+	HLDeltaAdd(d, HLES_CONTROLLER + 0, HLDT_BYTE, 8, 1.0, 0.0, "controller[0]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 1, HLDT_BYTE, 8, 1.0, 0.0, "controller[1]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 2, HLDT_BYTE, 8, 1.0, 0.0, "controller[2]");
+	HLDeltaAdd(d, HLES_CONTROLLER + 3, HLDT_BYTE, 8, 1.0, 0.0, "controller[3]");
+	HLDeltaAdd(d, HLES_BLENDING + 0, HLDT_BYTE, 8, 1.0, 0.0, "blending[0]");
+	HLDeltaAdd(d, HLES_BLENDING + 1, HLDT_BYTE, 8, 1.0, 0.0, "blending[1]");
+	HLDeltaAdd(d, HLES_BODY, HLDT_INTEGER, 8, 1.0, 0.0, "body");
+	HLDeltaAdd(d, HLES_RENDERMODE, HLDT_INTEGER, 8, 1.0, 0.0, "rendermode");
+	HLDeltaAdd(d, HLES_RENDERAMT, HLDT_INTEGER, 8, 1.0, 0.0, "renderamt");
+	HLDeltaAdd(d, HLES_RENDERFX, HLDT_INTEGER, 8, 1.0, 0.0, "renderfx");
+	HLDeltaAdd(d, HLES_SCALE, HLDT_FLOAT, 16, 256.0, 0.0, "scale");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 0, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.r");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 1, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.g");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 2, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.b");
+	HLDeltaAdd(d, HLES_FRICTION, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"friction");
+	HLDeltaAdd(d, HLES_USEHULL, HLDT_INTEGER, 1, 1.0, 0.0, "usehull");
+	HLDeltaAdd(d, HLES_GRAVITY, HLDT_SIGNED | HLDT_FLOAT, 16, 32.0, 0.0,
+		"gravity");
+	HLDeltaAdd(d, HLES_AIMENT, HLDT_INTEGER, 11, 1.0, 0.0, "aiment");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[0]");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[1]");
+	HLDeltaAdd(d, HLES_BASEVELOCITY + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"basevelocity[2]");
+	HLDeltaAdd(d, HLES_SPECTATOR, HLDT_INTEGER, 1, 1.0, 0.0, "spectator");
+}
+
+U0 HLDeltaInitCustom()
+{
+	CHLDelta *d = &hl_delta_custom;
+
+	HLDeltaClear(d, "custom_entity_state_t");
+
+	HLDeltaAdd(d, HLES_RENDERMODE, HLDT_INTEGER, 8, 1.0, 0.0, "rendermode");
+	HLDeltaAdd(d, HLES_ORIGIN + 0, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"origin[0]");
+	HLDeltaAdd(d, HLES_ORIGIN + 1, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"origin[1]");
+	HLDeltaAdd(d, HLES_ORIGIN + 2, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"origin[2]");
+	HLDeltaAdd(d, HLES_ANGLES + 0, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"angles[0]");
+	HLDeltaAdd(d, HLES_ANGLES + 1, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"angles[1]");
+	HLDeltaAdd(d, HLES_ANGLES + 2, HLDT_SIGNED | HLDT_FLOAT, 17, 8.0, 0.0,
+		"angles[2]");
+	HLDeltaAdd(d, HLES_SEQUENCE, HLDT_INTEGER, 16, 1.0, 0.0, "sequence");
+	HLDeltaAdd(d, HLES_SKIN, HLDT_INTEGER, 16, 1.0, 0.0, "skin");
+	HLDeltaAdd(d, HLES_MODELINDEX, HLDT_INTEGER, 16, 1.0, 0.0, "modelindex");
+	HLDeltaAdd(d, HLES_SCALE, HLDT_FLOAT, 8, 1.0, 0.1, "scale");
+	HLDeltaAdd(d, HLES_BODY, HLDT_INTEGER, 8, 1.0, 0.0, "body");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 0, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.r");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 1, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.g");
+	HLDeltaAdd(d, HLES_RENDERCOLOR + 2, HLDT_BYTE, 8, 1.0, 0.0, "rendercolor.b");
+	HLDeltaAdd(d, HLES_RENDERFX, HLDT_INTEGER, 8, 1.0, 0.0, "renderfx");
+	HLDeltaAdd(d, HLES_RENDERAMT, HLDT_INTEGER, 8, 1.0, 0.0, "renderamt");
+	HLDeltaAdd(d, HLES_FRAME, HLDT_FLOAT, 8, 1.0, 0.0, "frame");
+	HLDeltaAdd(d, HLES_ANIMTIME, HLDT_FLOAT, 8, 1.0, 0.1, "animtime");
+}
+
+U0 HLDeltaInitWeapon()
+{
+	CHLDelta *d = &hl_delta_weapon;
+
+	HLDeltaClear(d, "weapon_data_t");
+
+	HLDeltaAdd(d, HLWD_TIMEWEAPONIDLE, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0,
+		0.0, "m_flTimeWeaponIdle");
+	HLDeltaAdd(d, HLWD_NEXTPRIMARY, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_flNextPrimaryAttack");
+	HLDeltaAdd(d, HLWD_NEXTRELOAD, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_flNextReload");
+	HLDeltaAdd(d, HLWD_NEXTAIMBONUS, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_fNextAimBonus");
+	HLDeltaAdd(d, HLWD_NEXTSECONDARY, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_flNextSecondAttack");
+	HLDeltaAdd(d, HLWD_CLIP, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"m_iClip");
+	HLDeltaAdd(d, HLWD_PUMPTIME, HLDT_FLOAT | HLDT_SIGNED, 22, 1000.0, 0.0,
+		"m_flPumpTime");
+	HLDeltaAdd(d, HLWD_SPECIALRELOAD, HLDT_INTEGER, 2, 1.0, 0.0,
+		"m_fInSpecialReload");
+	HLDeltaAdd(d, HLWD_RELOADTIME, HLDT_FLOAT, 16, 100.0, 0.0, "m_fReloadTime");
+	HLDeltaAdd(d, HLWD_INRELOAD, HLDT_INTEGER, 1, 1.0, 0.0, "m_fInReload");
+	HLDeltaAdd(d, HLWD_AIMEDDAMAGE, HLDT_FLOAT, 6, 0.1, 0.0, "m_fAimedDamage");
+	HLDeltaAdd(d, HLWD_INZOOM, HLDT_INTEGER, 1, 1.0, 0.0, "m_fInZoom");
+	HLDeltaAdd(d, HLWD_WEAPONSTATE, HLDT_INTEGER, 2, 1.0, 0.0,
+		"m_iWeaponState");
+	HLDeltaAdd(d, HLWD_ID, HLDT_INTEGER, 5, 1.0, 0.0, "m_iId");
+	HLDeltaAdd(d, HLWD_IUSER1, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"iuser1");
+	HLDeltaAdd(d, HLWD_IUSER2, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"iuser2");
+	HLDeltaAdd(d, HLWD_IUSER3, HLDT_SIGNED | HLDT_INTEGER, 10, 1.0, 0.0,
+		"iuser3");
+	HLDeltaAdd(d, HLWD_FUSER1, HLDT_SIGNED | HLDT_FLOAT, 22, 1000.0, 0.0,
+		"fuser1");
+	HLDeltaAdd(d, HLWD_FUSER2, HLDT_SIGNED | HLDT_FLOAT, 22, 128.0, 0.0,
+		"fuser2");
+	HLDeltaAdd(d, HLWD_FUSER3, HLDT_SIGNED | HLDT_FLOAT, 22, 128.0, 0.0,
+		"fuser3");
+}
+
+U0 HLDeltaInitUserCmd()
+{
+	CHLDelta *d = &hl_delta_usercmd;
+
+	HLDeltaClear(d, "usercmd_t");
+
+	HLDeltaAdd(d, HLUC_LERP_MSEC, HLDT_SHORT, 9, 1.0, 0.0, "lerp_msec");
+	HLDeltaAdd(d, HLUC_MSEC, HLDT_BYTE, 8, 1.0, 0.0, "msec");
+	HLDeltaAdd(d, HLUC_VIEWANGLES + 1, HLDT_ANGLE, 16, 1.0, 0.0,
+		"viewangles[1]");
+	HLDeltaAdd(d, HLUC_VIEWANGLES + 0, HLDT_ANGLE, 16, 1.0, 0.0,
+		"viewangles[0]");
+	HLDeltaAdd(d, HLUC_BUTTONS, HLDT_SHORT, 16, 1.0, 0.0, "buttons");
+	HLDeltaAdd(d, HLUC_FORWARDMOVE, HLDT_SIGNED | HLDT_FLOAT, 12, 1.0, 0.0,
+		"forwardmove");
+	HLDeltaAdd(d, HLUC_LIGHTLEVEL, HLDT_BYTE, 8, 1.0, 0.0, "lightlevel");
+	HLDeltaAdd(d, HLUC_SIDEMOVE, HLDT_SIGNED | HLDT_FLOAT, 12, 1.0, 0.0,
+		"sidemove");
+	HLDeltaAdd(d, HLUC_UPMOVE, HLDT_SIGNED | HLDT_FLOAT, 12, 1.0, 0.0,
+		"upmove");
+	HLDeltaAdd(d, HLUC_IMPULSE, HLDT_BYTE, 8, 1.0, 0.0, "impulse");
+	HLDeltaAdd(d, HLUC_VIEWANGLES + 2, HLDT_ANGLE, 16, 1.0, 0.0,
+		"viewangles[2]");
+	HLDeltaAdd(d, HLUC_IMPACT_INDEX, HLDT_INTEGER, 6, 1.0, 0.0, "impact_index");
+	HLDeltaAdd(d, HLUC_IMPACT_POS + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"impact_position[0]");
+	HLDeltaAdd(d, HLUC_IMPACT_POS + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"impact_position[1]");
+	HLDeltaAdd(d, HLUC_IMPACT_POS + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"impact_position[2]");
+}
+
+U0 HLDeltaInitEvent()
+{
+	CHLDelta *d = &hl_delta_event;
+
+	HLDeltaClear(d, "event_t");
+
+	HLDeltaAdd(d, HLEV_ENTINDEX, HLDT_INTEGER, 10, 1.0, 0.0, "entindex");
+	HLDeltaAdd(d, HLEV_BPARAM1, HLDT_INTEGER, 1, 1.0, 0.0, "bparam1");
+	HLDeltaAdd(d, HLEV_BPARAM2, HLDT_INTEGER, 1, 1.0, 0.0, "bparam2");
+	HLDeltaAdd(d, HLEV_ORIGIN + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[0]");
+	HLDeltaAdd(d, HLEV_ORIGIN + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[1]");
+	HLDeltaAdd(d, HLEV_ORIGIN + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"origin[2]");
+	HLDeltaAdd(d, HLEV_FPARAM1, HLDT_FLOAT | HLDT_SIGNED, 20, 100.0, 0.0,
+		"fparam1");
+	HLDeltaAdd(d, HLEV_FPARAM2, HLDT_FLOAT | HLDT_SIGNED, 20, 100.0, 0.0,
+		"fparam2");
+	HLDeltaAdd(d, HLEV_IPARAM1, HLDT_INTEGER | HLDT_SIGNED, 16, 1.0, 0.0,
+		"iparam1");
+	HLDeltaAdd(d, HLEV_IPARAM2, HLDT_INTEGER | HLDT_SIGNED, 16, 1.0, 0.0,
+		"iparam2");
+	HLDeltaAdd(d, HLEV_ANGLES + 0, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"angles[0]");
+	HLDeltaAdd(d, HLEV_ANGLES + 1, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"angles[1]");
+	HLDeltaAdd(d, HLEV_ANGLES + 2, HLDT_SIGNED | HLDT_FLOAT, 16, 8.0, 0.0,
+		"angles[2]");
+	HLDeltaAdd(d, HLEV_DUCKING, HLDT_INTEGER, 1, 1.0, 0.0, "ducking");
+}
+
+U0 HLDeltaInit()
+{
+	HLDeltaInitClientData();
+	HLDeltaInitEntity();
+	HLDeltaInitPlayer();
+	HLDeltaInitCustom();
+	HLDeltaInitWeapon();
+	HLDeltaInitUserCmd();
+	HLDeltaInitEvent();
+}
+
+HLDeltaInit;
+
+
+I64 HLDeltaScaled(F64 v, F64 scale)
+{
+	return ToI64(v * scale);
+}
+
+Bool HLDeltaFieldDiffers(CHLDeltaField *f, F64 *from, F64 *to, U8 *from_str,
+	U8 *to_str)
+{
+	if ((f->type & HLDT_TYPEMASK) == HLDT_STRING)
+	{
+		if (!from_str || !to_str)
+			return FALSE;
+
+		//StrCompare returns 0 when equal
+		return ToBool(StrCompare(from_str, to_str) != 0);
+	}
+
+	return ToBool(from[f->slot] != to[f->slot]);
+}
+
+U0 HLDeltaWriteField(CHLMsg *m, CHLDeltaField *f, F64 v, U8 *str, F64 timebase)
+{
+	I64 base = f->type & HLDT_TYPEMASK;
+	I64 iv;
+
+	if (base == HLDT_STRING)
+	{
+		HLBitWriteBitString(m, str);
+		return;
+	}
+
+	if (base == HLDT_ANGLE)
+	{
+		HLBitWriteBitAngle(m, v, f->bits);
+		return;
+	}
+
+	if (base == HLDT_TIMEWINDOW_8)
+	{
+		HLBitWriteSBits(m, ToI64((timebase - v) * 100.0), f->bits);
+		return;
+	}
+
+	if (base == HLDT_TIMEWINDOW_BIG)
+	{
+		HLBitWriteSBits(m, ToI64((timebase - v) * f->scale), f->bits);
+		return;
+	}
+
+	iv = HLDeltaScaled(v, f->scale);
+
+	if (f->type & HLDT_SIGNED)
+		HLBitWriteSBits(m, iv, f->bits);
+	else
+		HLBitWriteBits(m, iv, f->bits);
+}
+
+F64 HLDeltaReadField(CHLMsg *m, CHLDeltaField *f, U8 *str, I64 str_max,
+	F64 timebase)
+{
+	I64	base = f->type & HLDT_TYPEMASK;
+	I64	iv;
+	F64	v;
+
+	if (base == HLDT_STRING)
+	{
+		HLBitReadBitString(m, str, str_max);
+		return 0.0;
+	}
+
+	if (base == HLDT_ANGLE)
+		return HLBitReadBitAngle(m, f->bits);
+
+	if (base == HLDT_TIMEWINDOW_8)
+		return timebase - ToF64(HLBitReadSBits(m, f->bits)) / 100.0;
+
+	if (base == HLDT_TIMEWINDOW_BIG)
+		return timebase - ToF64(HLBitReadSBits(m, f->bits)) / f->scale;
+
+	if (f->type & HLDT_SIGNED)
+		iv = HLBitReadSBits(m, f->bits);
+	else
+		iv = HLBitReadBits(m, f->bits);
+
+	v = ToF64(iv) / f->scale;
+
+	if (f->post != 0.0)
+		v = v * f->post;
+
+	return v;
+}
+
+//mask bytes the widest table can need.
+#define HLDELTA_MAX_MASK	8
+
+Bool HLDeltaAnyChange(CHLDelta *d, F64 *from, F64 *to, U8 *from_str, U8 *to_str)
+{
+	I64 i;
+
+	if (!d)
+		return FALSE;
+
+	for (i = 0; i < d->count && i < HLDELTA_MAX_MASK * 8; i++)
+	{
+		if (HLDeltaFieldDiffers(&d->f[i], from, to, from_str, to_str))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+U0 HLDeltaWrite(CHLMsg *m, CHLDelta *d, F64 *from, F64 *to, U8 *from_str,
+	U8 *to_str, F64 timebase)
+{
+	U8	mask[HLDELTA_MAX_MASK];
+	I64	i;
+	I64	last;
+	I64	bytecount;
+
+	if (!m || !d)
+		return;
+
+	MemSet(mask, 0, HLDELTA_MAX_MASK);
+	last = -1;
+
+	for (i = 0; i < d->count && i < HLDELTA_MAX_MASK * 8; i++)
+	{
+		if (!HLDeltaFieldDiffers(&d->f[i], from, to, from_str, to_str))
+			goto qdw_next;
+
+		mask[i >> 3] = mask[i >> 3] | (1 << (i & 7));
+		last = i;
+
+qdw_next:
+	}
+
+	if (last < 0)
+		bytecount = 0;
+	else
+		bytecount = (last >> 3) + 1;
+
+	if (bytecount > 7)
+	{
+		HLLog("net: delta mask over 7 bytes - table too wide for protocol 48\n");
+		HLLogFlush;
+		bytecount = 7;
+	}
+
+	HLBitWriteBits(m, bytecount, 3);
+
+	for (i = 0; i < bytecount; i++)
+		HLBitWriteBits(m, mask[i], 8);
+
+	for (i = 0; i < d->count && i < bytecount * 8; i++)
+	{
+		if (!(mask[i >> 3] & (1 << (i & 7))))
+			goto qdw_next2;
+
+		HLDeltaWriteField(m, &d->f[i], to[d->f[i].slot], to_str, timebase);
+
+qdw_next2:
+	}
+}
+
+Bool HLDeltaRead(CHLMsg *m, CHLDelta *d, F64 *to, U8 *to_str, I64 str_max,
+	F64 timebase)
+{
+	U8	mask[HLDELTA_MAX_MASK];
+	I64	i;
+	I64	bytecount;
+	I64	slot;
+
+	if (!m || !d)
+		return FALSE;
+
+	MemSet(mask, 0, HLDELTA_MAX_MASK);
+
+	bytecount = HLBitReadBits(m, 3);
+
+	for (i = 0; i < bytecount; i++)
+		mask[i] = HLBitReadBits(m, 8);
+
+	if (m->badread)
+		return FALSE;
+
+	for (i = 0; i < bytecount * 8; i++)
+	{
+		if (!(mask[i >> 3] & (1 << (i & 7))))
+			goto qdr_next;
+
+		if (i >= d->count)
+		{
+			HLLog("net: delta field past end of table - delta.lst mismatch\n");
+			HLLogFlush;
+			return FALSE;
+		}
+
+		slot = d->f[i].slot;
+		to[slot] = HLDeltaReadField(m, &d->f[i], to_str, str_max, timebase);
+
+qdr_next:
+	}
+
+	return ToBool(!m->badread);
+}
+
+
+class CHLEntState48
+{
+	F64	 v[HLDELTA_MAX_SLOTS];
+	Bool player;
+	Bool custom;
+	Bool active;
+	F64	 msgtime;
+};
+
+class CHLClData48
+{
+	F64	 v[HLDELTA_MAX_SLOTS];
+	U8	 physinfo[256];
+};
+
+U0 HLState48Clear(CHLEntState48 *e)
+{
+	I64 i;
+
+	if (!e)
+		return;
+
+	for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+		e->v[i] = 0.0;
+
+	e->player  = FALSE;
+	e->custom  = FALSE;
+	e->active  = FALSE;
+	e->msgtime = 0.0;
+}
+
+U0 HLClData48Clear(CHLClData48 *c)
+{
+	I64 i;
+
+	if (!c)
+		return;
+
+	for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+		c->v[i] = 0.0;
+
+	c->physinfo[0] = 0;
+}
+
+CHLEntState48	hl_net_bl48[HLNET_MAX_ENTS];
+CHLEntState48	hl_net_cl48[HLNET_MAX_ENTS];
+CHLClData48		hl_cl_data48;
+CHLClData48		hl_cl_data48_prev;
+
+U0 HLNetStates48Clear()
+{
+	I64 i;
+
+	for (i = 0; i < HLNET_MAX_ENTS; i++)
+	{
+		HLState48Clear(&hl_net_bl48[i]);
+		HLState48Clear(&hl_net_cl48[i]);
+	}
+
+	HLClData48Clear(&hl_cl_data48);
+	HLClData48Clear(&hl_cl_data48_prev);
+}
+
+HLNetStates48Clear;
+
+CHLDelta *HLDeltaForEnt(CHLEntState48 *e)
+{
+	if (!e)
+		return &hl_delta_entity;
+
+	if (e->custom)
+		return &hl_delta_custom;
+
+	if (e->player)
+		return &hl_delta_player;
+
+	return &hl_delta_entity;
+}
+
+Bool HLDeltaWriteEntState(CHLMsg *m, CHLEntState48 *from, CHLEntState48 *to,
+	F64 timebase)
+{
+	if (!m || !from || !to)
+		return FALSE;
+
+	HLDeltaWrite(m, HLDeltaForEnt(to), from->v, to->v, NULL, NULL, timebase);
+
+	return ToBool(!m->overflowed);
+}
+
+Bool HLDeltaReadEntState(CHLMsg *m, CHLEntState48 *from, CHLEntState48 *to,
+	F64 timebase)
+{
+	I64 i;
+
+	if (!m || !from || !to)
+		return FALSE;
+
+	if (from != to)
+	{
+		for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+			to->v[i] = from->v[i];
+
+		to->player = from->player;
+		to->custom = from->custom;
+	}
+
+	return HLDeltaRead(m, HLDeltaForEnt(to), to->v, NULL, 0, timebase);
+}
+
+
+#define HLPE_OFF_BITS	6
+#define HLPE_NUM_BITS	11
+#define HLPE_OFF_MAX	62		//widest gap the offset form expresses
+#define HLPE_OFF_END	63
+#define HLPE_MAX_NUM	2048	//1 << HLPE_NUM_BITS
+
+#define HLPE_MAX_ENTS	256
+
+#define HLPE_FRAMES		8
+#define HLPE_FRAME_MASK	7
+
+class CHLFrame48
+{
+	I64				seq;
+	Bool			valid;
+	F64				msgtime;
+	I64				count;
+	I64				num[HLPE_MAX_ENTS];
+	CHLEntState48	ent[HLPE_MAX_ENTS];
+};
+
+CHLFrame48		hl_pe_cl[HLPE_FRAMES];
+CHLFrame48		hl_pe_sv[HLPE_FRAMES];
+CHLEntState48	hl_pe_zero;
+
+CHLEntState48	hl_pe_tmp;
+CHLEntState48	hl_pe_scratch;
+
+CHLFrame48		hl_pe_stage;
+
+CHLFrame48		hl_pe_sv_stage;
+
+I64	hl_net48_players = 0;
+
+U0 HLState48Copy(CHLEntState48 *dst, CHLEntState48 *src)
+{
+	if (!dst || !src)
+		return;
+
+	MemCopy(dst, src, sizeof(CHLEntState48));
+}
+
+U0 HLPEFrameClear(CHLFrame48 *f)
+{
+	if (!f)
+		return;
+
+	f->seq     = -1;
+	f->valid   = FALSE;
+	f->msgtime = 0.0;
+	f->count   = 0;
+}
+
+U0 HLPEFramesClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLPE_FRAMES; i++)
+	{
+		HLPEFrameClear(&hl_pe_cl[i]);
+		HLPEFrameClear(&hl_pe_sv[i]);
+	}
+
+	HLPEFrameClear(&hl_pe_stage);
+	HLPEFrameClear(&hl_pe_sv_stage);
+	HLState48Clear(&hl_pe_zero);
+	HLState48Clear(&hl_pe_tmp);
+	HLState48Clear(&hl_pe_scratch);
+	hl_net48_players = 0;
+}
+
+HLPEFramesClear;
+
+CHLFrame48 *HLPEFrameSlot(CHLFrame48 *ring, I64 seq)
+{
+	if (!ring)
+		return NULL;
+
+	return &ring[seq & HLPE_FRAME_MASK];
+}
+
+CHLFrame48 *HLPEFrameByLowByte(CHLFrame48 *ring, I64 low)
+{
+	I64 i;
+
+	if (!ring)
+		return NULL;
+
+	for (i = 0; i < HLPE_FRAMES; i++)
+	{
+		if (ring[i].valid && (ring[i].seq & 0xFF) == (low & 0xFF))
+			return &ring[i];
+	}
+
+	return NULL;
+}
+
+CHLFrame48 *HLPEFrameBySeq(CHLFrame48 *ring, I64 seq)
+{
+	I64 i;
+
+	if (!ring || seq < 0)
+		return NULL;
+
+	for (i = 0; i < HLPE_FRAMES; i++)
+	{
+		if (ring[i].valid && ring[i].seq == seq)
+			return &ring[i];
+	}
+
+	return NULL;
+}
+
+U0 HLPEFrameCopy(CHLFrame48 *dst, CHLFrame48 *src)
+{
+	I64 i;
+
+	if (!dst || !src)
+		return;
+
+	dst->seq     = src->seq;
+	dst->valid   = src->valid;
+	dst->msgtime = src->msgtime;
+	dst->count   = src->count;
+
+	for (i = 0; i < src->count; i++)
+	{
+		dst->num[i] = src->num[i];
+		HLState48Copy(&dst->ent[i], &src->ent[i]);
+	}
+}
+
+U0 HLPEFrameStore(CHLFrame48 *ring, CHLFrame48 *src, I64 seq, F64 msgtime)
+{
+	CHLFrame48 *dst;
+
+	if (!ring || !src || seq < 0)
+		return;
+
+	src->seq     = seq;
+	src->valid   = TRUE;
+	src->msgtime = msgtime;
+
+	dst = HLPEFrameSlot(ring, seq);
+	HLPEFrameCopy(dst, src);
+}
+
+CHLEntState48 *HLPEBaseline(I64 num)
+{
+	if (num < 0 || num >= HLNET_MAX_ENTS)
+		return &hl_pe_zero;
+
+	return &hl_net_bl48[num];
+}
+
+Bool HLPEIsPlayer(I64 num)
+{
+	if (hl_net48_players < 1)
+		return FALSE;
+
+	return ToBool(num >= 1 && num <= hl_net48_players);
+}
+
+Bool HLPEFrameAppend(CHLFrame48 *f, I64 num, CHLEntState48 *e)
+{
+	if (!f || !e || f->count >= HLPE_MAX_ENTS)
+		return FALSE;
+
+	f->num[f->count] = num;
+	HLState48Copy(&f->ent[f->count], e);
+	f->count++;
+
+	return TRUE;
+}
+
+U0 HLPEWriteHeader(CHLMsg *m, I64 num, I64 *numbase, Bool remove, Bool custom,
+	Bool full)
+{
+	I64 off;
+
+	if (!m || !numbase)
+		return;
+
+	off = num - *numbase;
+
+	if (off >= 1 && off <= HLPE_OFF_MAX)
+	{
+		HLBitWriteBits(m, 1, 1);
+		HLBitWriteBits(m, off, HLPE_OFF_BITS);
+	}
+	else
+	{
+		HLBitWriteBits(m, 0, 1);
+		HLBitWriteBits(m, num, HLPE_NUM_BITS);
+	}
+
+	*numbase = num;
+
+	if (remove)
+	{
+		HLBitWriteBits(m, 1, 1);
+		return;
+	}
+
+	HLBitWriteBits(m, 0, 1);
+
+	if (custom)
+		HLBitWriteBits(m, 1, 1);
+	else
+		HLBitWriteBits(m, 0, 1);
+
+	if (full)
+		HLBitWriteBits(m, 0, 1);
+}
+
+U0 HLPEWriteEnd(CHLMsg *m, Bool zero_end)
+{
+	if (!m)
+		return;
+
+	if (zero_end)
+	{
+		HLBitWriteBits(m, 0, 16);
+		return;
+	}
+
+	HLBitWriteBits(m, 1, 1);
+	HLBitWriteBits(m, HLPE_OFF_END, HLPE_OFF_BITS);
+}
+
+I64 HLPEReadHeader(CHLMsg *m, I64 *numbase, I64 *_num, Bool *_remove,
+	Bool *_custom, Bool full, Bool zero_end)
+{//1 a header was decoded, 0 end of block, -1 malformed
+	I64	 form;
+	I64	 off;
+	I64	 num;
+	I64	 save;
+	I64	 peek;
+	Bool rem;
+
+	if (!m || !numbase || !_num || !_remove || !_custom)
+		return -1;
+
+	*_num    = 0;
+	*_remove = FALSE;
+	*_custom = FALSE;
+
+	if (zero_end)
+	{
+		save = m->rbit;
+		peek = HLBitReadBits(m, 16);
+		m->rbit = save;
+
+		if (m->badread)
+			return -1;
+
+		if (!peek)
+		{
+			HLBitReadBits(m, 16);
+			return 0;
+		}
+	}
+
+	form = HLBitReadBits(m, 1);
+
+	if (form)
+	{
+		off = HLBitReadBits(m, HLPE_OFF_BITS);
+
+		if (m->badread)
+			return -1;
+
+		if (off == HLPE_OFF_END)
+			return 0;
+
+		num = *numbase + off;
+	}
+	else
+	{
+		num = HLBitReadBits(m, HLPE_NUM_BITS);
+
+		if (m->badread)
+			return -1;
+	}
+
+	if (num < 0 || num >= HLPE_MAX_NUM)
+		return -1;
+
+	*numbase = num;
+	*_num    = num;
+
+	rem = ToBool(HLBitReadBits(m, 1) != 0);
+	*_remove = rem;
+
+	if (!rem)
+	{
+		*_custom = ToBool(HLBitReadBits(m, 1) != 0);
+
+		if (full)
+		{
+			if (HLBitReadBits(m, 1))
+				HLBitReadBits(m, 6);
+		}
+	}
+
+	if (m->badread)
+		return -1;
+
+	return 1;
+}
+
+Bool HLNetWritePacketEntities(CHLMsg *m, CHLFrame48 *from, CHLFrame48 *to,
+	I64 delta_seq, F64 timebase)
+{
+	I64				oldi;
+	I64				newi;
+	I64				numbase;
+	I64				newnum;
+	I64				oldnum;
+	Bool			full;
+	CHLEntState48	*base;
+	CHLEntState48	*cur;
+
+	if (!m || !to)
+		return FALSE;
+
+	full = ToBool(from == NULL);
+
+	if (to->count > 0 && to->num[0] == 0)
+	{
+		HLLog("net: entity 0 in a packet entities frame\n");
+		HLLogFlush;
+		return FALSE;
+	}
+
+	if (!full && from->count > 0 && from->num[0] == 0)
+	{
+		HLLog("net: entity 0 in the reference frame\n");
+		HLLogFlush;
+		return FALSE;
+	}
+
+	if (full)
+		HLMsgWriteByte(m, HLSVC_PACKETENTITIES);
+	else
+		HLMsgWriteByte(m, HLSVC_DELTAPACKETENTITIES);
+
+	HLMsgWriteShort(m, to->count);
+
+	if (!full)
+		HLMsgWriteByte(m, delta_seq & 0xFF);
+
+	HLBitWriteStart(m);
+
+	oldi    = 0;
+	newi    = 0;
+	numbase = 0;
+
+	while (TRUE)
+	{
+		newnum = HLPE_MAX_NUM;
+		oldnum = HLPE_MAX_NUM;
+
+		if (newi < to->count)
+			newnum = to->num[newi];
+
+		if (!full && oldi < from->count)
+			oldnum = from->num[oldi];
+
+		if (newnum >= HLPE_MAX_NUM && oldnum >= HLPE_MAX_NUM)
+			break;
+
+		if (newnum == oldnum)
+		{
+			base = &from->ent[oldi];
+			cur  = &to->ent[newi];
+
+			if (HLDeltaAnyChange(HLDeltaForEnt(cur), base->v, cur->v, NULL,
+				NULL))
+			{
+				HLPEWriteHeader(m, newnum, &numbase, FALSE, cur->custom, full);
+				HLDeltaWrite(m, HLDeltaForEnt(cur), base->v, cur->v, NULL, NULL,
+					timebase);
+			}
+
+			oldi++;
+			newi++;
+		}
+		else if (newnum < oldnum)
+		{
+			cur  = &to->ent[newi];
+			base = HLPEBaseline(newnum);
+
+			HLPEWriteHeader(m, newnum, &numbase, FALSE, cur->custom, full);
+			HLDeltaWrite(m, HLDeltaForEnt(cur), base->v, cur->v, NULL, NULL,
+				timebase);
+
+			newi++;
+		}
+		else
+		{
+			HLPEWriteHeader(m, oldnum, &numbase, TRUE, FALSE, full);
+			oldi++;
+		}
+
+		if (m->overflowed)
+			return FALSE;
+	}
+
+	HLPEWriteEnd(m, TRUE);
+	HLBitWriteEnd(m);
+
+	return ToBool(!m->overflowed);
+}
+
+Bool HLNetReadPacketEntities(CHLMsg *m, CHLFrame48 *from, CHLFrame48 *to,
+	Bool full, F64 timebase)
+{
+	I64				oldi;
+	I64				numbase;
+	I64				num;
+	I64				prev;
+	I64				declared;
+	I64				r;
+	Bool			remove;
+	Bool			custom;
+	CHLEntState48	*base;
+	CHLEntState48	*tmp;
+
+	if (!m || !to)
+		return FALSE;
+
+	tmp = &hl_pe_tmp;
+
+	declared = HLMsgReadShort(m);
+
+	if (!full)
+		HLMsgReadByte(m);
+
+	if (m->badread)
+		return FALSE;
+
+	to->count = 0;
+	oldi      = 0;
+	numbase   = 0;
+	prev      = -1;
+
+	HLBitReadStart(m);
+
+	while (TRUE)
+	{
+		r = HLPEReadHeader(m, &numbase, &num, &remove, &custom, full, TRUE);
+
+		if (r < 0)
+			return FALSE;
+
+		if (!r)
+			break;
+
+		if (num <= prev)
+		{
+			HLLog("net: packet entities out of order\n");
+			HLLogFlush;
+			return FALSE;
+		}
+
+		prev = num;
+
+		if (from)
+		{
+			while (oldi < from->count && from->num[oldi] < num)
+			{
+				if (!HLPEFrameAppend(to, from->num[oldi], &from->ent[oldi]))
+					return FALSE;
+
+				oldi++;
+			}
+		}
+
+		base = NULL;
+
+		if (from && oldi < from->count && from->num[oldi] == num)
+		{
+			base = &from->ent[oldi];
+			oldi++;
+		}
+
+		if (!base)
+			base = HLPEBaseline(num);
+
+		if (remove)
+			goto qpe_next;
+
+		HLState48Copy(tmp, base);
+		tmp->custom  = custom;
+		tmp->player  = HLPEIsPlayer(num);
+		tmp->active  = TRUE;
+		tmp->msgtime = timebase;
+
+		if (!HLDeltaRead(m, HLDeltaForEnt(tmp), tmp->v, NULL, 0, timebase))
+			return FALSE;
+
+		if (!HLPEFrameAppend(to, num, tmp))
+			return FALSE;
+
+qpe_next:
+	}
+
+	if (from)
+	{
+		while (oldi < from->count)
+		{
+			if (!HLPEFrameAppend(to, from->num[oldi], &from->ent[oldi]))
+				return FALSE;
+
+			oldi++;
+		}
+	}
+
+	HLBitReadEnd(m);
+
+	to->msgtime = timebase;
+
+	if (declared != to->count)
+	{
+		HLLog("net: packet entities count disagrees with the stream\n");
+		HLLogFlush;
+	}
+
+	return ToBool(!m->badread);
+}
+
+U0 HLPEFrameToEntTable(CHLFrame48 *f)
+{
+	I64 i;
+	I64 num;
+
+	for (i = 0; i < HLNET_MAX_ENTS; i++)
+		hl_net_cl48[i].active = FALSE;
+
+	if (!f)
+		return;
+
+	for (i = 0; i < f->count; i++)
+	{
+		num = f->num[i];
+
+		if (num < 0 || num >= HLNET_MAX_ENTS)
+			goto qpt_next;
+
+		HLState48Copy(&hl_net_cl48[num], &f->ent[i]);
+
+qpt_next:
+	}
+}
+
+Bool HLNetParsePacketEntities48(CHLMsg *m, Bool is_delta, I64 seq, F64 timebase)
+{
+	CHLFrame48	*from;
+	CHLFrame48	*slot;
+	I64			 dseq;
+
+	if (!m)
+		return FALSE;
+
+	from = NULL;
+
+	if (is_delta)
+	{
+		if (m->read + 3 > m->len)
+		{
+			m->badread = TRUE;
+			return FALSE;
+		}
+
+		dseq = m->data[m->read + 2];
+		from = HLPEFrameByLowByte(hl_pe_cl, dseq);
+
+		if (!from)
+		{
+			HLLog("net: delta packet entities against a frame that is gone\n");
+			HLLogFlush;
+			return FALSE;
+		}
+	}
+
+	HLPEFrameClear(&hl_pe_stage);
+
+	if (!HLNetReadPacketEntities(m, from, &hl_pe_stage, ToBool(!is_delta),
+		timebase))
+		return FALSE;
+
+	hl_pe_stage.seq   = seq;
+	hl_pe_stage.valid = TRUE;
+
+	slot = HLPEFrameSlot(hl_pe_cl, seq);
+	HLPEFrameCopy(slot, &hl_pe_stage);
+	HLPEFrameToEntTable(slot);
+
+	return TRUE;
+}
+
+Bool HLNetWriteSpawnBaseline(CHLMsg *m, CHLEntState48 *tbl, I64 count,
+	F64 timebase)
+{
+	I64	i;
+	I64	numbase;
+
+	if (!m || !tbl)
+		return FALSE;
+
+	if (count > HLNET_MAX_ENTS)
+		count = HLNET_MAX_ENTS;
+
+	HLMsgWriteByte(m, HLSVC_SPAWNBASELINE);
+	HLBitWriteStart(m);
+
+	numbase = 0;
+
+	for (i = 0; i < count; i++)
+	{
+		if (!tbl[i].active)
+			goto qbl_next;
+
+		HLPEWriteHeader(m, i, &numbase, FALSE, tbl[i].custom, FALSE);
+		HLDeltaWrite(m, HLDeltaForEnt(&tbl[i]), hl_pe_zero.v, tbl[i].v, NULL,
+			NULL, timebase);
+
+		if (m->overflowed)
+			return FALSE;
+
+qbl_next:
+	}
+
+	HLPEWriteEnd(m, FALSE);
+	HLBitWriteEnd(m);
+
+	return ToBool(!m->overflowed);
+}
+
+Bool HLNetReadSpawnBaseline(CHLMsg *m, F64 timebase)
+{
+	I64				numbase;
+	I64				num;
+	I64				prev;
+	I64				r;
+	Bool			remove;
+	Bool			custom;
+	CHLEntState48	*e;
+
+	if (!m)
+		return FALSE;
+
+	numbase = 0;
+	prev    = -1;
+
+	HLBitReadStart(m);
+
+	while (TRUE)
+	{
+		r = HLPEReadHeader(m, &numbase, &num, &remove, &custom, FALSE, FALSE);
+
+		if (r < 0)
+			return FALSE;
+
+		if (!r)
+			break;
+
+		if (num <= prev)
+		{
+			HLLog("net: spawnbaseline out of order\n");
+			HLLogFlush;
+			return FALSE;
+		}
+
+		prev = num;
+
+		if (remove)
+		{
+			HLLog("net: removal bit in spawnbaseline\n");
+			HLLogFlush;
+			return FALSE;
+		}
+
+		if (num < HLNET_MAX_ENTS)
+			e = &hl_net_bl48[num];
+		else
+			e = &hl_pe_scratch;
+
+		HLState48Clear(e);
+		e->custom  = custom;
+		e->player  = HLPEIsPlayer(num);
+		e->active  = TRUE;
+		e->msgtime = timebase;
+
+		if (!HLDeltaRead(m, HLDeltaForEnt(e), e->v, NULL, 0, timebase))
+			return FALSE;
+	}
+
+	HLBitReadEnd(m);
+
+	return ToBool(!m->badread);
+}
+
+
+#define HLMV_FLOATS			24
+#define HLMV_PRE_FLOATS		16
+
+#define HLMV_GRAVITY		0
+#define HLMV_STOPSPEED		1
+#define HLMV_MAXSPEED		2
+#define HLMV_SPECTATORMAX	3
+#define HLMV_ACCELERATE		4
+#define HLMV_AIRACCELERATE	5
+#define HLMV_WATERACCEL		6
+#define HLMV_FRICTION		7
+#define HLMV_EDGEFRICTION	8
+#define HLMV_WATERFRICTION	9
+#define HLMV_ENTGRAVITY		10
+#define HLMV_BOUNCE			11
+#define HLMV_STEPSIZE		12
+#define HLMV_MAXVELOCITY	13
+#define HLMV_ZMAX			14
+#define HLMV_WAVEHEIGHT		15
+#define HLMV_ROLLANGLE		16
+#define HLMV_ROLLSPEED		17
+#define HLMV_SKYCOLOR_R		18
+#define HLMV_SKYCOLOR_G		19
+#define HLMV_SKYCOLOR_B		20
+#define HLMV_SKYVEC_X		21
+#define HLMV_SKYVEC_Y		22
+#define HLMV_SKYVEC_Z		23
+
+#define HLMV_SKYNAME_LEN	32		//char skyName[32], pm_movevars.h:34
+
+class CHLMoveVars48
+{
+	F64		v[HLMV_FLOATS];
+	Bool	footsteps;
+	U8		skyname[HLMV_SKYNAME_LEN];
+};
+
+CHLMoveVars48	hl_movevars48;
+
+U0 HLMoveVars48Clear(CHLMoveVars48 *mv)
+{
+	I64 i;
+
+	if (!mv)
+		return;
+
+	for (i = 0; i < HLMV_FLOATS; i++)
+		mv->v[i] = 0.0;
+
+	mv->footsteps  = FALSE;
+	mv->skyname[0] = 0;
+}
+
+U0 HLMoveVars48Defaults(CHLMoveVars48 *mv)
+{
+	if (!mv)
+		return;
+
+	HLMoveVars48Clear(mv);
+
+	mv->v[HLMV_GRAVITY]      = 800.0;
+	mv->v[HLMV_STOPSPEED]    = 100.0;
+	mv->v[HLMV_MAXSPEED]     = 320.0;
+	mv->v[HLMV_SPECTATORMAX] = 500.0;
+	mv->v[HLMV_ACCELERATE]   = 10.0;
+	mv->v[HLMV_AIRACCELERATE] = 10.0;
+	mv->v[HLMV_WATERACCEL]   = 10.0;
+	mv->v[HLMV_FRICTION]     = 4.0;
+	mv->v[HLMV_EDGEFRICTION] = 2.0;
+	mv->v[HLMV_WATERFRICTION] = 1.0;
+	mv->v[HLMV_ENTGRAVITY]   = 1.0;
+	mv->v[HLMV_BOUNCE]       = 1.0;
+	mv->v[HLMV_STEPSIZE]     = 18.0;
+	mv->v[HLMV_MAXVELOCITY]  = 2000.0;
+	mv->v[HLMV_ZMAX]         = 4096.0;
+	mv->v[HLMV_ROLLANGLE]    = 2.0;
+	mv->v[HLMV_ROLLSPEED]    = 200.0;
+	mv->v[HLMV_SKYCOLOR_R]   = 0.0;
+	mv->v[HLMV_SKYCOLOR_G]   = 0.0;
+	mv->v[HLMV_SKYCOLOR_B]   = 0.0;
+	mv->v[HLMV_SKYVEC_X]     = 0.0;
+	mv->v[HLMV_SKYVEC_Y]     = 0.0;
+	mv->v[HLMV_SKYVEC_Z]     = 0.0;
+	mv->footsteps            = TRUE;
+	mv->skyname[0]           = 0;
+}
+
+U0 HLMoveVars48Init()
+{
+	HLMoveVars48Defaults(&hl_movevars48);
+}
+
+HLMoveVars48Init;
+
+U0 HLNetWriteMoveVars48(CHLMsg *m, CHLMoveVars48 *mv)
+{
+	I64 i;
+
+	if (!m || !mv)
+		return;
+
+	HLMsgWriteByte(m, HLSVC_NEWMOVEVARS);
+
+	for (i = 0; i < HLMV_PRE_FLOATS; i++)
+		HLMsgWriteFloat(m, mv->v[i]);
+
+	if (mv->footsteps)
+		HLMsgWriteByte(m, 1);
+	else
+		HLMsgWriteByte(m, 0);
+
+	HLMsgWriteString(m, mv->skyname);
+
+	for (i = HLMV_PRE_FLOATS; i < HLMV_FLOATS; i++)
+		HLMsgWriteFloat(m, mv->v[i]);
+}
+
+Bool HLNetReadMoveVars48(CHLMsg *m, CHLMoveVars48 *mv)
+{
+	I64 i;
+
+	if (!m || !mv)
+		return FALSE;
+
+	for (i = 0; i < HLMV_PRE_FLOATS; i++)
+		mv->v[i] = HLMsgReadFloat(m);
+
+	mv->footsteps = ToBool(HLMsgReadByte(m) != 0);
+
+	HLMsgReadString(m, mv->skyname, HLMV_SKYNAME_LEN);
+
+	for (i = HLMV_PRE_FLOATS; i < HLMV_FLOATS; i++)
+		mv->v[i] = HLMsgReadFloat(m);
+
+	return ToBool(!m->badread);
+}
+
+
+#define HLUSERMSG_MAX		192		//64..255
+#define HLUSERMSG_NAME		20		//svc_newusermsg carries 16, plus NUL
+#define HLUSERMSG_MAX_BODY	192
+
+class CHLUserMsg
+{
+	U8	 name[HLUSERMSG_NAME];
+	I64	 size;			//-1 = variable length, leading byte
+	Bool used;
+	I64	 count;
+	I64	 body_len;
+	U8	 body[HLUSERMSG_MAX_BODY];
+};
+
+CHLUserMsg	hl_usermsg[HLUSERMSG_MAX];
+I64			hl_usermsg_count = 0;
+I64			hl_usermsg_unknown = 0;
+
+U0 HLUserMsgClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLUSERMSG_MAX; i++)
+	{
+		hl_usermsg[i].name[0]  = 0;
+		hl_usermsg[i].size     = -1;
+		hl_usermsg[i].used     = FALSE;
+		hl_usermsg[i].count    = 0;
+		hl_usermsg[i].body_len = 0;
+	}
+
+	hl_usermsg_count   = 0;
+	hl_usermsg_unknown = 0;
+}
+
+HLUserMsgClear;
+
+Bool HLUserMsgRegister(I64 num, I64 size, U8 *name)
+{
+	I64 idx;
+
+	if (num < HLUSERMSG_FIRST || num > 255)
+		return FALSE;
+
+	idx = num - HLUSERMSG_FIRST;
+
+	if (!hl_usermsg[idx].used)
+		hl_usermsg_count++;
+
+	HLStrCopy(hl_usermsg[idx].name, name, HLUSERMSG_NAME);
+
+	//0xFF on the wire means variable length
+	if (size == 255)
+		size = -1;
+
+	hl_usermsg[idx].size = size;
+	hl_usermsg[idx].used = TRUE;
+
+	return TRUE;
+}
+
+I64 HLUserMsgFind(U8 *name)
+{
+	I64 i;
+
+	if (!name || !name[0])
+		return -1;
+
+	for (i = 0; i < HLUSERMSG_MAX; i++)
+	{
+		if (hl_usermsg[i].used && !StrCompare(hl_usermsg[i].name, name))
+			return i + HLUSERMSG_FIRST;
+	}
+
+	return -1;
+}
+
+CHLUserMsg *HLUserMsgGet(I64 num)
+{
+	if (num < HLUSERMSG_FIRST || num > 255)
+		return NULL;
+
+	if (!hl_usermsg[num - HLUSERMSG_FIRST].used)
+		return NULL;
+
+	return &hl_usermsg[num - HLUSERMSG_FIRST];
+}

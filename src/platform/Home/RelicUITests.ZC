@@ -1,0 +1,50 @@
+I64 relic_ui_passed, relic_ui_failed;
+U0 RelicUICheck(Bool ok, U8 *name)
+{
+ if (ok) { relic_ui_passed++; "PASS %s\n", name; }
+ else { relic_ui_failed++; "FAIL %s\n", name; }
+}
+
+U0 RelicUITests()
+{
+ CDC *src = DCNew(4, 2), *cover, *wall;
+ CDECalcState saved;
+ CDEWidget display, operation;
+ I64 x, y, n;
+ U8 *body;
+ DocClear;
+ relic_ui_passed = relic_ui_failed = 0;
+ for (y = 0; y < 2; y++)
+  for (x = 0; x < 4; x++)
+   src->body[y * src->width_internal + x] = 0x101010 * (x + 1);
+ cover = DEWallpaperCover(src, 4, 4);
+ RelicUICheck(cover->body[0] == 0x202020 && cover->body[3] == 0x303030,
+  "wallpaper center crop preserves aspect");
+ RelicUICheck(cover->body[3 * cover->width_internal] == 0x202020,
+  "wallpaper crop covers destination height");
+ DCDel(cover);
+ DCDel(src);
+ wall = PNGRead("::/DE/RelicReaper.PNG");
+ RelicUICheck(wall && wall->width == 1920 && wall->height == 1080,
+  "original wave wallpaper decodes at 1080p");
+ if (wall) DCDel(wall);
+ MemCopy(&saved, &de_calc, sizeof(CDECalcState));
+ MemSet(&de_calc, 0, sizeof(CDECalcState));
+ MemSet(&display, 0, sizeof(CDEWidget));
+ MemSet(&operation, 0, sizeof(CDEWidget));
+ de_calc.display = &display;
+ de_calc.op_lbl = &operation;
+ DECalcDo('1'); DECalcDo('2'); DECalcDo('+'); DECalcDo('3'); DECalcDo('0'); DECalcDo('=');
+ RelicUICheck(!StrCompare(display.text, "42"), "calculator 12 + 30 = 42");
+ DECalcDo('/'); DECalcDo('0'); DECalcDo('=');
+ RelicUICheck(!StrCompare(display.text, "Divide by zero") && !operation.text[0],
+  "division by zero clears pending operation");
+ DECalcDo('7'); DECalcDo('=');
+ RelicUICheck(!StrCompare(display.text, "7"), "calculator recovers after error");
+ MemCopy(&de_calc, &saved, sizeof(CDECalcState));
+ "RESULT %d passed, %d failed\n", relic_ui_passed, relic_ui_failed;
+ body = DocSave(DocPut, &n);
+ FileWrite("::/Tmp/RelicUITests.DD", body, n);
+ Free(body);
+}
+RelicUITests;

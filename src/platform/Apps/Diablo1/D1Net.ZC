@@ -1,0 +1,1316 @@
+// Zeal-to-Zeal LAN multiplayer: transport, session, lockstep turns
+//
+// transport copies the Quake port's ZealOS UDP use: UDPSocket / UDPSocketBind /
+// UDPPacketAllocate / UDPSocketReceiveFrom, INADDR_ANY bind,
+// receive_timeout_ms = 0, ARPCacheFind gate before a unicast send. rtl8139
+// under QEMU drops multi-kB UDP blobs (QNet.ZC:14), so no datagram here exceeds
+// 544 bytes and the character pack is fragmented.
+//
+// peer-to-peer lockstep, devilution nthread.cpp / msg.cpp / multi.cpp: the
+// dungeon is regenerated from shared seeds, not transmitted.
+//   game tick     50 ms, 20 Hz          diablo.cpp nthread_recv_turns
+//   turn period   4 game ticks, 5 Hz    sgbNetUpdateRate = 20 / defaultturnssec,
+//                                       retail TCP/IPX report defaultturnssec 5
+//   turn delay    2 turns, 400 ms       gdwTurnsInTransit
+//   redundancy    3 records per packet: the current turn and the two before it
+//
+// packet layout. every field little endian. header, 12 bytes:
+//    0   4  magic "D1NP"
+//    4   1  type, D1NP_*
+//    5   1  sender peer id, 0xFF while unassigned
+//    6   1  protocol version, 1
+//    7   1  zero
+//    8   4  turn number
+// bodies, from offset 12:
+//   QUERY   -                                              12 bytes
+//   INFO    +0 1 peers used, +1 1 peers max, +2 32 name    46
+//   JOIN    +0 32 character name                           44
+//   ACCEPT  +0 1 assigned id, +1 1 peer count, +2 2 zero,
+//           +4 4 game seed, +8 68 the 17 level seeds       88
+//   REJECT  +0 4 reason                                    16
+//   PACK    +0 4 total length, +4 4 fragment offset,
+//           +8 2 fragment length, +10 2 zero, +12 N bytes  <= 536
+//   PACKACK +0 4 bytes received                            16
+//   TURN    +0 1 record count, +1 3 zero, then count
+//           records of 20 bytes: turn, cmd, a, b, c        <= 76
+//   LEAVE   -                                              12
+//
+// the character pack body is the D1Save version 6 slot image byte for byte,
+// 3812 bytes, plus a 16 byte combat trailer holding AC and weapon damage:
+// 3828 bytes, eight fragments.
+//
+// every peer must consume D1Rnd in the same order; D1NetSimEnter/D1NetSimLeave
+// swap d1_seed for a shared stream so local-only rolls cannot perturb it.
+
+#define D1_MAXPEER		4
+#define D1NET_PORT		26010		//Quake holds 26000 on the same wire
+#define D1NET_VER		1
+#define D1NET_HDR		12
+#define D1NET_MTU		544
+#define D1NET_FRAG		512
+#define D1NET_NSEED		17
+#define D1NET_PACKMAX	4096
+
+#define D1NET_TICKS		4
+#define D1NET_DELAY		2
+#define D1NET_REDUN		3
+#define D1NET_RING		64
+#define D1NET_STALLMAX	50
+
+#define D1NP_QUERY		1
+#define D1NP_INFO		2
+#define D1NP_JOIN		3
+#define D1NP_ACCEPT		4
+#define D1NP_REJECT		5
+#define D1NP_PACK		6
+#define D1NP_PACKACK	7
+#define D1NP_TURN		8
+#define D1NP_LEAVE		9
+
+#define D1NR_FULL		1
+#define D1NR_VERSION	2
+
+//per-turn commands. one per peer per turn, msg.cpp CMD_* reduced.
+#define D1NC_NONE		0
+#define D1NC_WALK		1
+#define D1NC_ATTACK		2
+#define D1NC_STAND		3
+#define D1NC_PICKUP		4
+#define D1NC_OPEN		5
+#define D1NC_BELT		6
+#define D1NC_WARP		7
+
+#define D1NS_OFF		0
+#define D1NS_HOSTING	1
+#define D1NS_JOINING	2
+#define D1NS_PACKING	3
+#define D1NS_PLAY		4
+#define D1NS_ERROR		5
+
+#define D1NET_PATHMAX	96
+
+class CD1Peer
+{
+	Bool used;
+	Bool local;
+	Bool dead;
+	U32	 ip;
+	U8	 name[32];
+	I64	 cls;
+	I64	 lvl;
+	I64	 str;
+	I64	 dex;
+	I64	 ac;
+	I64	 dmin;
+	I64	 dmax;
+	I64	 hp;					//64ths
+	I64	 maxhp;
+	I64	 mana;
+	I64	 maxmana;
+	I64	 dlvl;
+	I64	 x;
+	I64	 y;
+	I64	 dir;
+	I64	 mode;
+	I64	 frame;
+	I64	 animcnt;
+	I64	 step;
+	I64	 xoff;
+	I64	 yoff;
+	I64	 target;				//monster index under attack, -1 none
+	I64	 path[D1NET_PATHMAX];
+	I64	 pathlen;
+	I64	 pathpos;
+	I64	 stall;
+};
+
+class CD1TurnRec
+{
+	Bool have;
+	I64	 turn;
+	I64	 cmd;
+	I64	 a;
+	I64	 b;
+	I64	 c;
+};
+
+CD1Peer		d1_peers[D1_MAXPEER];
+CD1TurnRec	d1_net_ring[D1_MAXPEER * D1NET_RING];
+
+Bool	d1_net_on		= FALSE;
+Bool	d1_net_host		= FALSE;
+I64		d1_net_state	= D1NS_OFF;
+I64		d1_net_self		= 0;
+I64		d1_net_npeers	= 1;
+I64		d1_net_turn		= 0;
+I64		d1_net_tick		= 0;
+U8		d1_net_status[96];
+U8		d1_net_gname[32];
+
+I64		d1_net_gameseed	= 0;
+I64		d1_net_seeds[D1NET_NSEED];
+
+I64		d1_net_cmd		= D1NC_NONE;
+I64		d1_net_arg_a	= 0;
+I64		d1_net_arg_b	= 0;
+I64		d1_net_arg_c	= 0;
+
+I64		d1_net_simseed	= 0;
+I64		d1_net_locseed	= 0;
+Bool	d1_net_insim	= FALSE;
+
+I64		d1_net_sent		= 0;
+I64		d1_net_recvd	= 0;
+I64		d1_net_dups		= 0;
+I64		d1_net_late		= 0;
+I64		d1_net_stalls	= 0;
+I64		d1_net_errors	= 0;
+I64		d1_net_unres	= 0;
+I64		d1_net_packs	= 0;
+
+U8		d1_net_packbuf[D1NET_PACKMAX];
+U8		d1_net_rxpack[D1NET_PACKMAX];
+I64		d1_net_packlen	= 0;
+I64		d1_net_packgot	= 0;
+I64		d1_net_packwant	= 0;
+I64		d1_net_packfrom	= -1;
+
+I64	(*d1_net_pack_build)(U8 *dst, I64 max)   = NULL;
+Bool(*d1_net_pack_apply)(I64 pidx, U8 *src, I64 len) = NULL;
+
+U8	d1_net_txbuf[D1NET_MTU];
+U8	d1_net_rxbuf[D1NET_MTU];
+
+
+U0 D1NetWrU16(U8 *p, I64 off, I64 v)
+{
+	p[off]     = v & 0xFF;
+	p[off + 1] = (v >> 8) & 0xFF;
+}
+
+U0 D1NetWrU32(U8 *p, I64 off, I64 v)
+{
+	p[off]     = v & 0xFF;
+	p[off + 1] = (v >> 8) & 0xFF;
+	p[off + 2] = (v >> 16) & 0xFF;
+	p[off + 3] = (v >> 24) & 0xFF;
+}
+
+I64 D1NetRdU16(U8 *p, I64 off)
+{
+	return p[off] | (p[off + 1] << 8);
+}
+
+I64 D1NetRdI32(U8 *p, I64 off)
+{
+	return D1RdI32(p + off);
+}
+
+
+U0 D1PeerClear(I64 pidx)
+{
+	CD1Peer *p = &d1_peers[pidx];
+	I64 i;
+
+	p->used    = FALSE;
+	p->local   = FALSE;
+	p->dead    = FALSE;
+	p->ip      = 0;
+	p->name[0] = 0;
+	p->cls     = 0;
+	p->lvl     = 1;
+	p->str     = 30;
+	p->dex     = 20;
+	p->ac      = 0;
+	p->dmin    = 1;
+	p->dmax    = 6;
+	p->hp      = 70 << 6;
+	p->maxhp   = 70 << 6;
+	p->mana    = 0;
+	p->maxmana = 0;
+	p->dlvl    = 0;
+	p->x       = 75;
+	p->y       = 68;
+	p->dir     = 0;
+	p->mode    = 0;
+	p->frame   = 1;
+	p->animcnt = 0;
+	p->step    = 0;
+	p->xoff    = 0;
+	p->yoff    = 0;
+	p->target  = -1;
+	p->pathlen = 0;
+	p->pathpos = 0;
+	p->stall   = 0;
+	for (i = 0; i < D1NET_PATHMAX; i++)
+		p->path[i] = 0;
+}
+
+I64 D1PeerCount()
+{
+	I64 i;
+	I64 n = 0;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (d1_peers[i].used)
+			n++;
+	}
+	return n;
+}
+
+I64 D1PeerByIP(U32 ip)
+{//-1 when the address is not in the session
+	I64 i;
+	I64 r = -1;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (r < 0 && d1_peers[i].used && d1_peers[i].ip == ip)
+			r = i;
+	}
+	return r;
+}
+
+I64 D1PeerFree()
+{
+	I64 i;
+	I64 r = -1;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (r < 0 && !d1_peers[i].used)
+			r = i;
+	}
+	return r;
+}
+
+
+U0 D1NetSimEnter()
+{
+	if (!d1_net_on || d1_net_insim)
+		return;
+	d1_net_locseed = d1_seed;
+	d1_seed        = d1_net_simseed;
+	d1_net_insim   = TRUE;
+}
+
+U0 D1NetSimLeave()
+{
+	if (!d1_net_insim)
+		return;
+	d1_net_simseed = d1_seed;
+	d1_seed        = d1_net_locseed;
+	d1_net_insim   = FALSE;
+}
+
+Bool D1NetLocalIn()
+{
+	if (!d1_net_insim)
+		return FALSE;
+	d1_net_simseed = d1_seed;
+	d1_seed        = d1_net_locseed;
+	d1_net_insim   = FALSE;
+	return TRUE;
+}
+
+U0 D1NetLocalOut(Bool was_in)
+{
+	if (!was_in)
+		return;
+	d1_net_locseed = d1_seed;
+	d1_seed        = d1_net_simseed;
+	d1_net_insim   = TRUE;
+}
+
+
+I64 D1NetRingSlot(I64 pidx, I64 turn)
+{
+	return pidx * D1NET_RING + turn % D1NET_RING;
+}
+
+U0 D1NetRingClear()
+{
+	I64 i;
+
+	for (i = 0; i < D1_MAXPEER * D1NET_RING; i++)
+	{
+		d1_net_ring[i].have = FALSE;
+		d1_net_ring[i].turn = -1;
+		d1_net_ring[i].cmd  = D1NC_NONE;
+		d1_net_ring[i].a    = 0;
+		d1_net_ring[i].b    = 0;
+		d1_net_ring[i].c    = 0;
+	}
+}
+
+Bool D1NetPostCmd(I64 pidx, I64 turn, I64 cmd, I64 a, I64 b, I64 c)
+{
+	CD1TurnRec *r;
+
+	if (pidx < 0 || pidx >= D1_MAXPEER || turn < 0)
+		return FALSE;
+	if (turn < d1_net_turn)
+	{
+		d1_net_late++;
+		return FALSE;
+	}
+	if (turn >= d1_net_turn + D1NET_RING)
+		return FALSE;
+
+	r = &d1_net_ring[D1NetRingSlot(pidx, turn)];
+	if (r->have && r->turn == turn)
+	{
+		d1_net_dups++;
+		return FALSE;
+	}
+
+	r->have = TRUE;
+	r->turn = turn;
+	r->cmd  = cmd;
+	r->a    = a;
+	r->b    = b;
+	r->c    = c;
+	return TRUE;
+}
+
+Bool D1NetHaveTurn(I64 turn)
+{
+	I64 i;
+	CD1TurnRec *r;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (d1_peers[i].used)
+		{
+			r = &d1_net_ring[D1NetRingSlot(i, turn)];
+			if (!r->have || r->turn != turn)
+				return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+U0 D1NetTakeCmd(I64 pidx, I64 turn, I64 *cmd, I64 *a, I64 *b, I64 *c)
+{
+	CD1TurnRec *r = &d1_net_ring[D1NetRingSlot(pidx, turn)];
+
+	*cmd = D1NC_NONE;
+	*a   = 0;
+	*b   = 0;
+	*c   = 0;
+	if (!r->have || r->turn != turn)
+		return;
+	*cmd = r->cmd;
+	*a   = r->a;
+	*b   = r->b;
+	*c   = r->c;
+	r->have = FALSE;
+}
+
+U0 D1NetQueue(I64 cmd, I64 a, I64 b, I64 c)
+{
+	d1_net_cmd   = cmd;
+	d1_net_arg_a = a;
+	d1_net_arg_b = b;
+	d1_net_arg_c = c;
+}
+
+
+#ifdef UDP_MAX_PORT
+
+CUDPSocket			*d1_net_sock = NULL;
+CSocketAddressIPV4	*d1_net_bind = NULL;
+Bool				 d1_net_ready = FALSE;
+U32					 d1_net_fromip = 0;
+I64					 d1_net_fromport = D1NET_PORT;
+
+Bool D1NetOpen(I64 port)
+{
+	if (d1_net_ready)
+		return TRUE;
+
+	if (!ipv4_globals.local_ip)
+	{
+		D1StrCopy(d1_net_status, "set an IP first", 96);
+		return FALSE;
+	}
+
+	d1_net_sock = UDPSocket(AF_INET);
+	if (!d1_net_sock)
+	{
+		D1StrCopy(d1_net_status, "UDPSocket failed", 96);
+		return FALSE;
+	}
+
+	d1_net_bind = CAlloc(sizeof(CSocketAddressIPV4));
+
+	//ports go on the wire big endian; the socket layer does not swap
+	d1_net_bind->family = AF_INET;
+	d1_net_bind->port   = EndianU16(port);
+
+	d1_net_bind->address.address = INADDR_ANY;
+
+	if (UDPSocketBind(d1_net_sock, d1_net_bind) == -1)
+	{
+		D1StrCopy(d1_net_status, "UDPSocketBind failed", 96);
+		Free(d1_net_bind);
+		d1_net_bind = NULL;
+		UDPSocketClose(d1_net_sock);
+		d1_net_sock = NULL;
+		return FALSE;
+	}
+
+	d1_net_sock->receive_timeout_ms = 0;
+	d1_net_ready = TRUE;
+	StrPrint(d1_net_status, "bound to port %d", port);
+	return TRUE;
+}
+
+U0 D1NetClose()
+{
+	if (!d1_net_ready)
+		return;
+	if (d1_net_sock)
+		UDPSocketClose(d1_net_sock);
+	if (d1_net_bind)
+		Free(d1_net_bind);
+	d1_net_sock  = NULL;
+	d1_net_bind  = NULL;
+	d1_net_ready = FALSE;
+}
+
+Bool D1NetSendRawTo(U8 *data, I64 len, U32 dest_ip, I64 dest_port)
+{
+	U8	*payload;
+	I64	 de_index;
+	I64	 dport = dest_port;
+
+	if (!d1_net_ready || !dest_ip || !data || len < 1)
+		return FALSE;
+	if (len > D1NET_MTU)
+		return FALSE;
+	if (dport < 1 || dport > 65535)
+		dport = D1NET_PORT;
+
+	if (!ARPCacheFind(dest_ip))
+	{
+		d1_net_unres++;
+		return FALSE;
+	}
+
+	de_index = UDPPacketAllocate(&payload, ipv4_globals.local_ip, D1NET_PORT,
+		dest_ip, dport, len);
+	if (de_index < 0)
+	{
+		d1_net_errors++;
+		return FALSE;
+	}
+	MemCopy(payload, data, len);
+	UDPPacketFinish(de_index);
+	d1_net_sent++;
+	return TRUE;
+}
+
+Bool D1NetSendRawBroadcast(U8 *data, I64 len, I64 dest_port)
+{
+	U8	*payload;
+	I64	 de_index;
+	I64	 dport = dest_port;
+
+	if (!d1_net_ready || !data || len < 1)
+		return FALSE;
+	if (len > D1NET_MTU)
+		return FALSE;
+	if (dport < 1 || dport > 65535)
+		dport = D1NET_PORT;
+
+	de_index = UDPPacketAllocate(&payload, ipv4_globals.local_ip, D1NET_PORT,
+		0xFFFFFFFF, dport, len);
+	if (de_index < 0)
+	{
+		d1_net_errors++;
+		return FALSE;
+	}
+	MemCopy(payload, data, len);
+	UDPPacketFinish(de_index);
+	d1_net_sent++;
+	return TRUE;
+}
+
+Bool D1NetRecvRaw(U8 *buf, I64 max, I64 *out_len, U32 *from_ip)
+{
+	CSocketAddressStorage	from;
+	CSocketAddressIPV4		*v4;
+	I64						 got;
+
+	if (out_len)
+		*out_len = 0;
+	if (from_ip)
+		*from_ip = 0;
+	if (!d1_net_ready || !buf || max < 1)
+		return FALSE;
+
+	MemSet(&from, 0, sizeof(CSocketAddressStorage));
+	got = UDPSocketReceiveFrom(d1_net_sock, buf, max, &from);
+	if (got < 1)
+		return FALSE;
+	if (out_len)
+		*out_len = got;
+
+	if (from.family == AF_INET)
+	{
+		v4 = &from;
+		d1_net_fromip   = EndianU32(v4->address.address);
+		d1_net_fromport = EndianU16(v4->port);
+		if (d1_net_fromport < 1)
+			d1_net_fromport = D1NET_PORT;
+	}
+	else
+	{
+		d1_net_fromip   = 0;
+		d1_net_fromport = D1NET_PORT;
+	}
+	if (from_ip)
+		*from_ip = d1_net_fromip;
+	d1_net_recvd++;
+	return TRUE;
+}
+
+Bool D1NetAvailable()
+{
+	return TRUE;
+}
+
+Bool D1NetSetLocalIP(U32 ip)
+{
+	U32 got;
+
+	if (!ip)
+		return FALSE;
+	IPV4AddressSet(ip);
+	//a /24 with no router: everything on-link, nothing forwarded
+	IPV4SubnetSet(0, 0x00FFFFFF);
+	got = ipv4_globals.local_ip;
+	StrPrint(d1_net_status, "ip %d.%d.%d.%d",
+		got & 255, (got >> 8) & 255, (got >> 16) & 255, (got >> 24) & 255);
+	return ToBool(got == ip);
+}
+
+U32 D1NetLocalIP()
+{
+	return ipv4_globals.local_ip_be;
+}
+
+Bool D1NetResolve(U32 ip)
+{
+	U8 *mac = NULL;
+
+	if (!ip)
+		return FALSE;
+	if (ARPCacheFind(ip))
+		return TRUE;
+	IPV4AddressMACGet(ip, &mac);
+	return ToBool(ARPCacheFind(ip) != NULL);
+}
+
+#else
+
+
+Bool D1NetOpen(I64 port)
+{
+	no_warn port;
+	D1StrCopy(d1_net_status, "no net stack - run ::/Home/Net/Start", 96);
+	return FALSE;
+}
+
+U0 D1NetClose()
+{
+}
+
+Bool D1NetSendRawTo(U8 *data, I64 len, U32 dest_ip, I64 dest_port)
+{
+	no_warn data;
+	no_warn len;
+	no_warn dest_ip;
+	no_warn dest_port;
+	return FALSE;
+}
+
+Bool D1NetSendRawBroadcast(U8 *data, I64 len, I64 dest_port)
+{
+	no_warn data;
+	no_warn len;
+	no_warn dest_port;
+	return FALSE;
+}
+
+Bool D1NetRecvRaw(U8 *buf, I64 max, I64 *out_len, U32 *from_ip)
+{
+	no_warn buf;
+	no_warn max;
+	if (out_len)
+		*out_len = 0;
+	if (from_ip)
+		*from_ip = 0;
+	return FALSE;
+}
+
+Bool D1NetAvailable()
+{
+	return FALSE;
+}
+
+Bool D1NetSetLocalIP(U32 ip)
+{
+	no_warn ip;
+	return FALSE;
+}
+
+U32 D1NetLocalIP()
+{
+	return 0;
+}
+
+Bool D1NetResolve(U32 ip)
+{
+	no_warn ip;
+	return FALSE;
+}
+
+#endif
+
+
+I64 D1NetHdr(U8 *p, I64 type, I64 turn)
+{//returns the body offset
+	p[0] = 'D';
+	p[1] = '1';
+	p[2] = 'N';
+	p[3] = 'P';
+	p[4] = type;
+	if (d1_net_state == D1NS_JOINING)
+		p[5] = 0xFF;
+	else
+		p[5] = d1_net_self;
+	p[6] = D1NET_VER;
+	p[7] = 0;
+	D1NetWrU32(p, 8, turn);
+	return D1NET_HDR;
+}
+
+Bool D1NetHdrOk(U8 *p, I64 len)
+{
+	if (len < D1NET_HDR)
+		return FALSE;
+	if (p[0] != 'D' || p[1] != '1' || p[2] != 'N' || p[3] != 'P')
+		return FALSE;
+	if (p[6] != D1NET_VER)
+		return FALSE;
+	return TRUE;
+}
+
+I64 D1NetEncQuery(U8 *p)
+{
+	return D1NetHdr(p, D1NP_QUERY, 0);
+}
+
+I64 D1NetEncInfo(U8 *p)
+{
+	I64 o = D1NetHdr(p, D1NP_INFO, d1_net_turn);
+
+	p[o]     = D1PeerCount();
+	p[o + 1] = D1_MAXPEER;
+	D1StrCopy(p + o + 2, d1_net_gname, 32);
+	return o + 34;
+}
+
+I64 D1NetEncJoin(U8 *p, U8 *name)
+{
+	I64 o = D1NetHdr(p, D1NP_JOIN, 0);
+
+	D1StrCopy(p + o, name, 32);
+	return o + 32;
+}
+
+I64 D1NetEncAccept(U8 *p, I64 id, I64 npeers)
+{
+	I64 o = D1NetHdr(p, D1NP_ACCEPT, d1_net_turn);
+	I64 i;
+
+	p[o]     = id;
+	p[o + 1] = npeers;
+	p[o + 2] = 0;
+	p[o + 3] = 0;
+	D1NetWrU32(p, o + 4, d1_net_gameseed);
+	for (i = 0; i < D1NET_NSEED; i++)
+		D1NetWrU32(p, o + 8 + i * 4, d1_net_seeds[i]);
+	return o + 8 + D1NET_NSEED * 4;
+}
+
+I64 D1NetEncReject(U8 *p, I64 reason)
+{
+	I64 o = D1NetHdr(p, D1NP_REJECT, 0);
+
+	D1NetWrU32(p, o, reason);
+	return o + 4;
+}
+
+I64 D1NetEncPack(U8 *p, U8 *src, I64 total, I64 off, I64 flen)
+{
+	I64 o = D1NetHdr(p, D1NP_PACK, 0);
+
+	D1NetWrU32(p, o, total);
+	D1NetWrU32(p, o + 4, off);
+	D1NetWrU16(p, o + 8, flen);
+	D1NetWrU16(p, o + 10, 0);
+	MemCopy(p + o + 12, src + off, flen);
+	return o + 12 + flen;
+}
+
+I64 D1NetEncPackAck(U8 *p, I64 got)
+{
+	I64 o = D1NetHdr(p, D1NP_PACKACK, 0);
+
+	D1NetWrU32(p, o, got);
+	return o + 4;
+}
+
+I64 D1NetEncTurn(U8 *p, I64 turn, I64 cmd, I64 a, I64 b, I64 c)
+{
+	I64	 o = D1NetHdr(p, D1NP_TURN, turn);
+	I64	 n = 0;
+	I64	 k;
+	I64	 t;
+	I64	 ro = o + 4;
+	CD1TurnRec *r;
+
+	D1NetWrU32(p, ro, turn);
+	D1NetWrU32(p, ro + 4, cmd);
+	D1NetWrU32(p, ro + 8, a);
+	D1NetWrU32(p, ro + 12, b);
+	D1NetWrU32(p, ro + 16, c);
+	n = 1;
+	ro += 20;
+
+	for (k = 1; k < D1NET_REDUN; k++)
+	{
+		t = turn - k;
+		if (t >= 0)
+		{
+			r = &d1_net_ring[D1NetRingSlot(d1_net_self, t)];
+			if (r->turn == t)
+			{
+				D1NetWrU32(p, ro, t);
+				D1NetWrU32(p, ro + 4, r->cmd);
+				D1NetWrU32(p, ro + 8, r->a);
+				D1NetWrU32(p, ro + 12, r->b);
+				D1NetWrU32(p, ro + 16, r->c);
+				n++;
+				ro += 20;
+			}
+		}
+	}
+
+	p[o]     = n;
+	p[o + 1] = 0;
+	p[o + 2] = 0;
+	p[o + 3] = 0;
+	return ro;
+}
+
+I64 D1NetEncLeave(U8 *p)
+{
+	return D1NetHdr(p, D1NP_LEAVE, d1_net_turn);
+}
+
+
+I64 D1NetPktType(U8 *p, I64 len)
+{
+	if (!D1NetHdrOk(p, len))
+		return 0;
+	return p[4];
+}
+
+I64 D1NetPktPeer(U8 *p, I64 len)
+{//0xFF, an unassigned sender, decodes to -1
+	if (!D1NetHdrOk(p, len))
+		return -1;
+	if (p[5] == 0xFF)
+		return -1;
+	return p[5];
+}
+
+I64 D1NetPktTurn(U8 *p, I64 len)
+{
+	if (!D1NetHdrOk(p, len))
+		return -1;
+	return D1RdU32(p + 8);
+}
+
+Bool D1NetDecAccept(U8 *p, I64 len, I64 *id, I64 *npeers)
+{
+	I64 i;
+
+	if (len < D1NET_HDR + 8 + D1NET_NSEED * 4)
+		return FALSE;
+	*id     = p[D1NET_HDR];
+	*npeers = p[D1NET_HDR + 1];
+	if (*id < 0 || *id >= D1_MAXPEER)
+		return FALSE;
+	d1_net_gameseed = D1NetRdI32(p, D1NET_HDR + 4);
+	for (i = 0; i < D1NET_NSEED; i++)
+		d1_net_seeds[i] = D1NetRdI32(p, D1NET_HDR + 8 + i * 4);
+	return TRUE;
+}
+
+Bool D1NetDecPack(U8 *p, I64 len, I64 *total, I64 *off, I64 *flen)
+{
+	if (len < D1NET_HDR + 12)
+		return FALSE;
+	*total = D1RdU32(p + D1NET_HDR);
+	*off   = D1RdU32(p + D1NET_HDR + 4);
+	*flen  = D1NetRdU16(p, D1NET_HDR + 8);
+	if (*total < 1 || *total > D1NET_PACKMAX)
+		return FALSE;
+	if (*flen < 1 || *flen > D1NET_FRAG)
+		return FALSE;
+	if (*off < 0 || *off + *flen > *total)
+		return FALSE;
+	if (len < D1NET_HDR + 12 + *flen)
+		return FALSE;
+	return TRUE;
+}
+
+I64 D1NetDecTurn(U8 *p, I64 len, I64 pidx)
+{
+	I64 n;
+	I64 k;
+	I64 o;
+	I64 got = 0;
+
+	if (len < D1NET_HDR + 4)
+		return 0;
+	n = p[D1NET_HDR];
+	if (n < 1 || n > D1NET_REDUN)
+		return 0;
+	if (len < D1NET_HDR + 4 + n * 20)
+		return 0;
+
+	for (k = 0; k < n; k++)
+	{
+		o = D1NET_HDR + 4 + k * 20;
+		if (D1NetPostCmd(pidx, D1NetRdI32(p, o), D1NetRdI32(p, o + 4),
+			D1NetRdI32(p, o + 8), D1NetRdI32(p, o + 12),
+			D1NetRdI32(p, o + 16)))
+			got++;
+	}
+	return got;
+}
+
+
+U0 D1NetReset()
+{
+	I64 i;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+		D1PeerClear(i);
+	D1NetRingClear;
+	for (i = 0; i < D1NET_NSEED; i++)
+		d1_net_seeds[i] = 0;
+
+	d1_net_on      = FALSE;
+	d1_net_host    = FALSE;
+	d1_net_state   = D1NS_OFF;
+	d1_net_self    = 0;
+	d1_net_npeers  = 1;
+	d1_net_turn    = 0;
+	d1_net_tick    = 0;
+	d1_net_cmd     = D1NC_NONE;
+	d1_net_arg_a   = 0;
+	d1_net_arg_b   = 0;
+	d1_net_arg_c   = 0;
+	d1_net_simseed = 0;
+	d1_net_locseed = 0;
+	d1_net_insim   = FALSE;
+	d1_net_gameseed = 0;
+	d1_net_packlen = 0;
+	d1_net_packgot = 0;
+	d1_net_packwant = 0;
+	d1_net_packfrom = -1;
+	d1_net_sent    = 0;
+	d1_net_recvd   = 0;
+	d1_net_dups    = 0;
+	d1_net_late    = 0;
+	d1_net_stalls  = 0;
+	d1_net_errors  = 0;
+	d1_net_unres   = 0;
+	d1_net_packs   = 0;
+	d1_net_status[0] = 0;
+	D1StrCopy(d1_net_gname, "ZEAL", 32);
+}
+
+U0 D1NetSeedRoll(I64 base)
+{
+	I64 i;
+
+	D1SetRndSeed(base);
+	d1_net_gameseed = D1GetRndSeed();
+	for (i = 0; i < D1NET_NSEED; i++)
+		d1_net_seeds[i] = D1GetRndSeed();
+}
+
+Bool D1NetHostStart(U8 *name, I64 seedbase)
+{
+	D1NetReset;
+	if (!D1NetOpen(D1NET_PORT))
+	{
+		d1_net_state = D1NS_ERROR;
+		return FALSE;
+	}
+	D1NetSeedRoll(seedbase);
+
+	d1_net_host  = TRUE;
+	d1_net_self  = 0;
+	d1_net_state = D1NS_HOSTING;
+
+	D1PeerClear(0);
+	d1_peers[0].used  = TRUE;
+	d1_peers[0].local = TRUE;
+	d1_peers[0].ip    = D1NetLocalIP();
+	D1StrCopy(d1_peers[0].name, name, 32);
+	d1_net_npeers = 1;
+
+	D1StrCopy(d1_net_status, "hosting - waiting for a player", 96);
+	return TRUE;
+}
+
+Bool D1NetJoinStart(U8 *name, U32 host_ip)
+{
+	I64 n;
+
+	D1NetReset;
+	if (!D1NetOpen(D1NET_PORT))
+	{
+		d1_net_state = D1NS_ERROR;
+		return FALSE;
+	}
+	if (!D1NetResolve(host_ip))
+	{
+		D1StrCopy(d1_net_status, "no answer from that address", 96);
+		d1_net_state = D1NS_ERROR;
+		return FALSE;
+	}
+
+	d1_net_host  = FALSE;
+	d1_net_self  = 1;
+	d1_net_state = D1NS_JOINING;
+	D1StrCopy(d1_peers[0].name, "host", 32);
+	d1_peers[0].ip   = host_ip;
+	d1_peers[0].used = TRUE;
+
+	n = D1NetEncJoin(d1_net_txbuf, name);
+	D1NetSendRawTo(d1_net_txbuf, n, host_ip, D1NET_PORT);
+	D1StrCopy(d1_net_status, "joining...", 96);
+	return TRUE;
+}
+
+U0 D1NetQuery()
+{
+	I64 n = D1NetEncQuery(d1_net_txbuf);
+
+	D1NetSendRawBroadcast(d1_net_txbuf, n, D1NET_PORT);
+}
+
+U0 D1NetPackSendTo(U32 ip)
+{
+	I64 off = 0;
+	I64 flen;
+	I64 n;
+
+	if (!d1_net_pack_build)
+		return;
+	d1_net_packlen = (*d1_net_pack_build)(d1_net_packbuf, D1NET_PACKMAX);
+	if (d1_net_packlen < 1)
+		return;
+
+	while (off < d1_net_packlen)
+	{
+		flen = d1_net_packlen - off;
+		if (flen > D1NET_FRAG)
+			flen = D1NET_FRAG;
+		n = D1NetEncPack(d1_net_txbuf, d1_net_packbuf, d1_net_packlen, off,
+			flen);
+		D1NetSendRawTo(d1_net_txbuf, n, ip, D1NET_PORT);
+		off += flen;
+	}
+}
+
+U0 D1NetSendTurn(I64 turn)
+{
+	I64 i;
+	I64 n;
+
+	n = D1NetEncTurn(d1_net_txbuf, turn, d1_net_cmd, d1_net_arg_a,
+		d1_net_arg_b, d1_net_arg_c);
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (d1_peers[i].used && !d1_peers[i].local && d1_peers[i].ip)
+			D1NetSendRawTo(d1_net_txbuf, n, d1_peers[i].ip, D1NET_PORT);
+	}
+}
+
+U0 D1NetLeave()
+{
+	I64 i;
+	I64 n;
+
+	if (d1_net_state == D1NS_OFF)
+		return;
+	n = D1NetEncLeave(d1_net_txbuf);
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (d1_peers[i].used && !d1_peers[i].local && d1_peers[i].ip)
+			D1NetSendRawTo(d1_net_txbuf, n, d1_peers[i].ip, D1NET_PORT);
+	}
+	D1NetClose;
+	D1NetReset;
+}
+
+U0 D1NetOnJoin(U8 *p, I64 len, U32 from)
+{
+	I64 id = D1PeerByIP(from);
+	I64 n;
+
+	if (!d1_net_host)
+		return;
+
+	if (id < 0)
+	{
+		id = D1PeerFree();
+		if (id < 0)
+		{
+			n = D1NetEncReject(d1_net_txbuf, D1NR_FULL);
+			D1NetSendRawTo(d1_net_txbuf, n, from, D1NET_PORT);
+			return;
+		}
+		D1PeerClear(id);
+		d1_peers[id].used  = TRUE;
+		d1_peers[id].local = FALSE;
+		d1_peers[id].ip    = from;
+		if (len >= D1NET_HDR + 32)
+			D1StrCopy(d1_peers[id].name, p + D1NET_HDR, 32);
+		d1_net_npeers = D1PeerCount();
+	}
+
+	n = D1NetEncAccept(d1_net_txbuf, id, d1_net_npeers);
+	D1NetSendRawTo(d1_net_txbuf, n, from, D1NET_PORT);
+	D1NetPackSendTo(from);
+	StrPrint(d1_net_status, "%s joined as peer %d", d1_peers[id].name, id);
+}
+
+U0 D1NetOnAccept(U8 *p, I64 len, U32 from)
+{
+	I64 id = 0;
+	I64 np = 0;
+
+	if (d1_net_state != D1NS_JOINING)
+		return;
+	if (!D1NetDecAccept(p, len, &id, &np))
+		return;
+
+	d1_net_self = id;
+	D1PeerClear(id);
+	d1_peers[id].used  = TRUE;
+	d1_peers[id].local = TRUE;
+	d1_peers[id].ip    = D1NetLocalIP();
+
+	D1PeerClear(0);
+	d1_peers[0].used = TRUE;
+	d1_peers[0].ip   = from;
+	D1StrCopy(d1_peers[0].name, "host", 32);
+
+	d1_net_npeers = D1PeerCount();
+	d1_net_state  = D1NS_PACKING;
+	d1_net_packgot  = 0;
+	d1_net_packwant = 0;
+	d1_net_packfrom = 0;
+
+	D1NetPackSendTo(from);
+	StrPrint(d1_net_status, "joined as peer %d", id);
+}
+
+U0 D1NetOnPack(U8 *p, I64 len, U32 from)
+{
+	I64 total = 0;
+	I64 off   = 0;
+	I64 flen  = 0;
+	I64 pidx    = D1PeerByIP(from);
+	I64 n;
+
+	if (pidx < 0)
+		return;
+	if (!D1NetDecPack(p, len, &total, &off, &flen))
+		return;
+
+	if (d1_net_packfrom != pidx || d1_net_packwant != total)
+	{
+		d1_net_packfrom = pidx;
+		d1_net_packwant = total;
+		d1_net_packgot  = 0;
+	}
+	MemCopy(d1_net_rxpack + off, p + D1NET_HDR + 12, flen);
+	d1_net_packgot += flen;
+
+	n = D1NetEncPackAck(d1_net_txbuf, d1_net_packgot);
+	D1NetSendRawTo(d1_net_txbuf, n, from, D1NET_PORT);
+
+	if (d1_net_packgot >= total)
+	{
+		if (d1_net_pack_apply)
+		{
+			if ((*d1_net_pack_apply)(pidx, d1_net_rxpack, total))
+			{
+				d1_net_packs++;
+				StrPrint(d1_net_status, "%s ready", d1_peers[pidx].name);
+			}
+		}
+		d1_net_packgot  = 0;
+		d1_net_packwant = 0;
+	}
+}
+
+U0 D1NetOnLeave(U32 from)
+{
+	I64 pidx = D1PeerByIP(from);
+
+	if (pidx < 0 || d1_peers[pidx].local)
+		return;
+	StrPrint(d1_net_status, "%s left", d1_peers[pidx].name);
+	D1PeerClear(pidx);
+	d1_net_npeers = D1PeerCount();
+}
+
+U0 D1NetPump()
+{
+	I64	 len = 0;
+	U32	 from = 0;
+	I64	 type;
+	I64	 pidx;
+	I64	 n;
+	I64	 guard = 0;
+
+	if (d1_net_state == D1NS_OFF || d1_net_state == D1NS_ERROR)
+		return;
+
+	while (guard < 64 && D1NetRecvRaw(d1_net_rxbuf, D1NET_MTU, &len, &from))
+	{
+		guard++;
+		type = D1NetPktType(d1_net_rxbuf, len);
+		if (type == D1NP_QUERY)
+		{
+			if (d1_net_host)
+			{
+				n = D1NetEncInfo(d1_net_txbuf);
+				D1NetSendRawTo(d1_net_txbuf, n, from, D1NET_PORT);
+			}
+		}
+		else if (type == D1NP_JOIN)
+			D1NetOnJoin(d1_net_rxbuf, len, from);
+		else if (type == D1NP_ACCEPT)
+			D1NetOnAccept(d1_net_rxbuf, len, from);
+		else if (type == D1NP_REJECT)
+		{
+			D1StrCopy(d1_net_status, "host refused the join", 96);
+			d1_net_state = D1NS_ERROR;
+		}
+		else if (type == D1NP_PACK)
+			D1NetOnPack(d1_net_rxbuf, len, from);
+		else if (type == D1NP_TURN)
+		{
+			pidx = D1PeerByIP(from);
+			if (pidx >= 0 && !d1_peers[pidx].local)
+				D1NetDecTurn(d1_net_rxbuf, len, pidx);
+		}
+		else if (type == D1NP_LEAVE)
+			D1NetOnLeave(from);
+	}
+}
+
+U0 D1NetGoLive()
+{
+	d1_net_on      = TRUE;
+	d1_net_state   = D1NS_PLAY;
+	d1_net_turn    = 0;
+	d1_net_tick    = 0;
+	d1_net_simseed = d1_net_gameseed;
+	d1_net_npeers  = D1PeerCount();
+	D1NetRingClear;
+	D1NetPostCmd(d1_net_self, 0, D1NC_NONE, 0, 0, 0);
+	D1NetPostCmd(d1_net_self, 1, D1NC_NONE, 0, 0, 0);
+	D1StrCopy(d1_net_status, "in game", 96);
+}
+
+Bool D1NetTurnDue()
+{
+	d1_net_tick++;
+	if (d1_net_tick < D1NET_TICKS)
+		return FALSE;
+	d1_net_tick = 0;
+	return TRUE;
+}
+
+U0 D1NetPeerLost(I64 pidx)
+{
+	StrPrint(d1_net_status, "%s timed out", d1_peers[pidx].name);
+	D1PeerClear(pidx);
+	d1_net_npeers = D1PeerCount();
+}
+
+Bool D1NetTurnReady()
+{
+	I64 i;
+
+	if (D1NetHaveTurn(d1_net_turn))
+		return TRUE;
+
+	d1_net_stalls++;
+	for (i = 0; i < D1_MAXPEER; i++)
+	{
+		if (d1_peers[i].used && !d1_peers[i].local)
+		{
+			d1_peers[i].stall++;
+			if (d1_peers[i].stall > D1NET_STALLMAX)
+				D1NetPeerLost(i);
+		}
+	}
+	D1NetSendTurn(d1_net_turn + D1NET_DELAY);
+	return FALSE;
+}
+
+U0 D1NetTurnDone()
+{
+	I64 i;
+
+	for (i = 0; i < D1_MAXPEER; i++)
+		d1_peers[i].stall = 0;
+
+	d1_net_turn++;
+	D1NetPostCmd(d1_net_self, d1_net_turn + D1NET_DELAY - 1, d1_net_cmd,
+		d1_net_arg_a, d1_net_arg_b, d1_net_arg_c);
+	D1NetSendTurn(d1_net_turn + D1NET_DELAY - 1);
+	d1_net_cmd   = D1NC_NONE;
+	d1_net_arg_a = 0;
+	d1_net_arg_b = 0;
+	d1_net_arg_c = 0;
+}
+
+U0 D1NetInit()
+{
+	D1NetReset;
+	if (D1NetAvailable())
+		D1StrCopy(d1_net_status, "udp available", 96);
+	else
+		D1StrCopy(d1_net_status, "udp not compiled in", 96);
+}
+
+D1NetInit;

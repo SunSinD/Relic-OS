@@ -1,0 +1,3107 @@
+//YDE-native email client, single truecolor window on the YKD theme.
+//Fetch via IMAPS (implicit TLS, port 993: server-side \Seen flags and UID
+//delete/expunge) or POP3S (port 995); send via SMTPS (implicit TLS, port 465)
+//with AUTH LOGIN. Needs the net stack + TLS (BrowserBoot) and the DE theme.
+//
+//All blocking network I/O runs in a spawned worker task: WinMgr handlers must
+//not block and TLSRead blocks up to ~9s. The UI task reads shared state and
+//posts jobs.
+//
+//The mailbox is read one ZM_MAX_MSGS page at a time, headers only; a body is
+//fetched when the message is opened. IMAP caches raw messages and the page
+//index under C:/Home/Mail/<user>/. POP3 sequence numbers are not stable
+//across sessions, so nothing is cached there.
+//
+//The account, including the password, is written in plaintext to ZM_CFG_PATH.
+
+#define ZM_POP_PORT		995
+#define ZM_SMTP_PORT	465
+
+#define ZM_MAX_MSGS		50		//one page of the mailbox, newest first
+#define ZM_FROM_LEN		128
+#define ZM_SUBJ_LEN		192
+#define ZM_DATE_LEN		64
+#define ZM_ADDR_LEN		128
+#define ZM_BODY_MAX		24000
+#define ZM_RAW_MAX		65536
+#define ZM_CONN_BUF		8192
+#define ZM_LINE_MAX		2048
+
+#define ZM_COMPOSE_BODY	4096
+
+//Screens.
+#define ZM_SCR_SETUP	0
+#define ZM_SCR_LIST		1
+#define ZM_SCR_VIEW		2
+#define ZM_SCR_COMPOSE	3
+
+//Worker jobs.
+#define ZM_JOB_NONE		0
+#define ZM_JOB_FETCH	1
+#define ZM_JOB_SEND		2
+#define ZM_JOB_DELETE	3
+#define ZM_JOB_SEEN		4	//IMAP: STORE +FLAGS \Seen for target_uid.
+#define ZM_JOB_BODY		5	//Fetch one message body (+ mark it seen).
+
+#define ZM_IMAP_PORT	993
+
+//Account persistence (same convention as the SSH keys: C:/Home/Config).
+//The password is stored in plaintext, as with the SSH private key seed.
+#define ZM_CFG_DIR		"C:/Home/Config"
+#define ZM_CFG_PATH		"C:/Home/Config/ZMail.CFG"
+
+//Message store. One directory per account under C:/Home/Mail, holding the
+//raw RFC822 text of every message that has been opened plus INDEX.TXT, the
+//header listing of the last page fetched. IMAP only: POP3 sequence numbers
+//are not stable across sessions, so nothing there is worth keying a file on.
+#define ZM_MAIL_DIR		"C:/Home/Mail"
+#define ZM_ACCT_LEN		160
+#define ZM_MAX_ACCTS	6
+
+#define ZM_ROW_H		(FONT_HEIGHT + 4)
+
+//Pull-down menu commands. MESSAGE_CMD arg1. Every entry uses a code rather
+//than a synthesized keystroke: the setup and compose screens take raw text,
+//and a character-bound entry would type into the focused field.
+#define ZMM_REFRESH		1
+#define ZMM_REPLY		2
+#define ZMM_SEND		3
+#define ZMM_DELETE		4
+#define ZMM_EXIT		5
+#define ZMM_OPEN		6
+#define ZMM_PREV		7
+#define ZMM_NEXT		8
+#define ZMM_COPY		9
+#define ZMM_CUT			10
+#define ZMM_PASTE		11
+#define ZMM_SCR_LIST	12
+#define ZMM_SCR_READ	13
+#define ZMM_SCR_COMPOSE	14
+#define ZMM_SCR_SETUP	15
+#define ZMM_IMAP		16
+#define ZMM_POP3		17
+#define ZMM_SAVE_ACCT	18
+
+class CZMailMsg
+{
+	I64	 svr_num;			//POP3 message index this session.
+	I64	 uid;				//IMAP UID (stable across the session).
+	Bool seen;
+	U8	 from[ZM_FROM_LEN];
+	U8	 subject[ZM_SUBJ_LEN];
+	U8	 date[ZM_DATE_LEN];
+	U8	*body;				//Decoded plain text (MAlloc, ZM_BODY_MAX cap).
+	I64	 body_len;			//Zero until the body job lands; headers come first.
+};
+
+class CZMailAcct
+{//One saved mailbox. The live copy sits in CZMailGlobals; this is the store.
+	U8	proto[8];
+	U8	recv_host[96], smtp_host[96];
+	U8	recv_port_s[8], smtp_port_s[8];
+	U8	user[ZM_ADDR_LEN], pass[ZM_ADDR_LEN];
+	U8	email[ZM_ADDR_LEN], from_name[64];
+};
+
+class CZMailConn
+{
+	CTLS	*tls;
+	U8		*rbuf;
+	I64		 rlen, rpos;
+	Bool	 dead;
+};
+
+class CZMailField
+{
+	U8	*buf;
+	I64	 max;
+	Bool secret;
+	U8	*label;
+};
+
+class CZMailGlobals
+{
+	I64			 scr;
+	Bool		 quit;
+	CTask		*ui_task, *worker;
+
+	//Account. The fields below are the live copy the form edits; accts[] is
+	//what gets written to disk, and cur_acct says which slot they came from.
+	CZMailAcct	 accts[ZM_MAX_ACCTS];
+	I64			 num_accts, cur_acct;
+	U8			 proto[8];		//"imap" or "pop3".
+	U8			 recv_host[96], smtp_host[96];
+	U8			 recv_port_s[8], smtp_port_s[8];
+	U8			 user[ZM_ADDR_LEN], pass[ZM_ADDR_LEN];
+	U8			 email[ZM_ADDR_LEN], from_name[64];
+
+	//Setup form.
+	CZMailField	 fields[10];
+	I64			 num_fields, f_focus;
+
+	//Inbox. One page at a time: msgs[] holds server sequence numbers
+	//page_first..page_last, newest first.
+	CZMailMsg	 msgs[ZM_MAX_MSGS];
+	I64			 num_msgs, sel, view_scroll, list_scroll;
+	I64			 srv_total;		//EXISTS (IMAP) / STAT count (POP).
+	I64			 page_first, page_last;
+	I64			 page_req;		//Newest sequence wanted; 0 = newest page.
+	U8			 acct_dir[ZM_ACCT_LEN];
+
+	//Compose.
+	U8			 c_to[ZM_ADDR_LEN], c_subj[ZM_SUBJ_LEN];
+	U8			 c_body[ZM_COMPOSE_BODY];
+	I64			 c_focus;		//0 To, 1 Subject, 2 Body.
+	I64			 c_body_len;
+	Bool		 c_selall;		//Ctrl+A: next edit replaces the field.
+
+	//Worker job protocol (single job at a time).
+	I64			 job_req;		//Set by UI, cleared by worker.
+	Bool		 job_active;	//Worker busy.
+	Bool		 worker_quit;
+	I64			 del_num;		//Server index (POP) for a DELETE job.
+	I64			 target_uid;	//IMAP UID for DELETE / mark-seen jobs.
+	I64			 body_uid;		//UID (IMAP) or sequence (POP) for a BODY job.
+	I64			 body_slot;		//msgs[] index the body belongs to.
+	U8			 status[140];	//Worker progress, drawn on the UI.
+	Bool		 status_err;
+	U8			 last_reply[220];	//Last raw server reply line (for errors).
+	I64			 last_z;		//Mouse wheel tracking.
+
+	//Extra pens.
+	CColorROPU32 c_green, c_red, c_yellow;
+} zmail;
+
+
+U0 ZMailStatusCopy(U8 *s)
+{//Bounded copy into the fixed status buffer (server replies can be long).
+	I64 n = StrLen(s);
+
+	if (n > sizeof(zmail.status) - 1)
+		n = sizeof(zmail.status) - 1;
+	MemCopy(zmail.status, s, n);
+	zmail.status[n] = 0;
+}
+
+U0 ZMailStatus(U8 *s, Bool err)
+{
+	ZMailStatusCopy(s);
+	zmail.status_err = err;
+}
+
+U0 ZMailStatusF(Bool err, U8 *fmt, ...)
+{
+	U8 *s = StrPrintJoin(NULL, fmt, argc, argv);
+
+	ZMailStatusCopy(s);
+	zmail.status_err = err;
+	Free(s);
+}
+
+I64 ZMailB64Val(U8 c)
+{
+	if ('A' <= c <= 'Z') return c - 'A';
+	if ('a' <= c <= 'z') return c - 'a' + 26;
+	if ('0' <= c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+I64 ZMailB64Decode(U8 *src, I64 srclen, U8 *out, I64 outmax)
+{//Base64 decode, ignoring whitespace/padding. Returns byte count.
+	I64 acc = 0, nb = 0, n = 0, v, i = 0;
+
+	while (i < srclen && n < outmax)
+	{
+		v = ZMailB64Val(src[i]);
+		i++;
+		if (v >= 0)
+		{
+			acc = acc << 6 | v;
+			nb += 6;
+			if (nb >= 8)
+			{
+				nb -= 8;
+				out[n++] = acc >> nb & 0xFF;
+			}
+		}
+	}
+	return n;
+}
+
+U0 ZMailB64Encode(U8 *src, I64 n, U8 *out)
+{//Standard base64 with padding. out must hold ((n+2)/3)*4 + 1.
+	U8 *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	I64 i = 0, o = 0, b0, b1, b2;
+
+	while (i < n)
+	{
+		b0 = src[i];
+		out[o++] = tbl[b0 >> 2];
+		if (i + 1 < n)
+		{
+			b1 = src[i + 1];
+			out[o++] = tbl[(b0 & 3) << 4 | b1 >> 4];
+			if (i + 2 < n)
+			{
+				b2 = src[i + 2];
+				out[o++] = tbl[(b1 & 15) << 2 | b2 >> 6];
+				out[o++] = tbl[b2 & 63];
+			}
+			else
+			{
+				out[o++] = tbl[(b1 & 15) << 2];
+				out[o++] = '=';
+			}
+		}
+		else
+		{
+			out[o++] = tbl[(b0 & 3) << 4];
+			out[o++] = '=';
+			out[o++] = '=';
+		}
+		i += 3;
+	}
+	out[o] = 0;
+}
+
+I64 ZMailHexVal(U8 c)
+{
+	if ('0' <= c <= '9') return c - '0';
+	if ('A' <= c <= 'F') return c - 'A' + 10;
+	if ('a' <= c <= 'f') return c - 'a' + 10;
+	return -1;
+}
+
+I64 ZMailQPDecode(U8 *src, I64 srclen, U8 *out, I64 outmax, Bool underscore_sp)
+{//Quoted-printable decode. underscore_sp: RFC2047 'Q' maps '_' to space.
+	I64 i = 0, n = 0, hi, lo;
+
+	while (i < srclen && n < outmax)
+	{
+		if (src[i] == '=' && i + 1 < srclen)
+		{
+			if (src[i + 1] == '\r' || src[i + 1] == '\n')
+			{//Soft line break.
+				i += 2;
+				if (i - 1 < srclen && src[i - 1] == '\r' && i < srclen && src[i] == '\n')
+					i++;
+			}
+			else if (i + 2 < srclen)
+			{
+				hi = ZMailHexVal(src[i + 1]);
+				lo = ZMailHexVal(src[i + 2]);
+				if (hi >= 0 && lo >= 0)
+				{
+					out[n++] = hi << 4 | lo;
+					i += 3;
+				}
+				else
+				{
+					out[n++] = src[i];
+					i++;
+				}
+			}
+			else
+			{
+				out[n++] = src[i];
+				i++;
+			}
+		}
+		else if (underscore_sp && src[i] == '_')
+		{
+			out[n++] = ' ';
+			i++;
+		}
+		else
+		{
+			out[n++] = src[i];
+			i++;
+		}
+	}
+	return n;
+}
+
+U0 ZMailUTF8ToAscii(U8 *s)
+{//In place: collapse UTF-8 multibyte to '?' (the DE font is 8-bit CP437-ish).
+	U8	*d = s, *p = s;
+	I64	 skip;
+
+	while (*p)
+	{
+		if (*p < 0x80)
+			*d++ = *p++;
+		else
+		{//Lead byte: count continuation bytes, emit one placeholder.
+			if (*p >= 0xF0)		skip = 4;
+			else if (*p >= 0xE0)	skip = 3;
+			else					skip = 2;
+			*d++ = '?';
+			while (skip && *p)
+			{
+				p++;
+				skip--;
+			}
+		}
+	}
+	*d = 0;
+}
+
+U0 ZMailDecodeWord(U8 *dst, I64 dstmax, U8 *src)
+{//RFC2047: decode any =?charset?B/Q?data?= encoded-words in a header value.
+	U8	*p = src, *q, *enc, *data, *end;
+	I64	 n = 0, dlen, tmp_n, i;
+	U8	 tmp[ZM_SUBJ_LEN];
+
+	while (*p && n < dstmax - 1)
+	{
+		q = NULL;
+		end = NULL;
+		//An encoded-word must be =?charset?E?data?= - validate before decoding.
+		if (p[0] == '=' && p[1] == '?')
+		{
+			q = StrFind("?", p + 2);		//End of charset.
+			if (q && q[1] && q[2] == '?')
+			{
+				enc = q + 1;				//'B' or 'Q'.
+				data = enc + 2;				//After the 2nd '?'.
+				end = StrFind("?=", data);
+			}
+			else
+				q = NULL;
+		}
+		if (q && end)
+		{
+			dlen = end - data;
+			if (*enc == 'B' || *enc == 'b')
+				tmp_n = ZMailB64Decode(data, dlen, tmp, ZM_SUBJ_LEN - 1);
+			else
+				tmp_n = ZMailQPDecode(data, dlen, tmp, ZM_SUBJ_LEN - 1, TRUE);
+			for (i = 0; i < tmp_n && n < dstmax - 1; i++)
+				dst[n++] = tmp[i];
+			p = end + 2;
+			if (p[0] == ' ' && p[1] == '=' && p[2] == '?')
+				p++;	//Fold whitespace between adjacent words.
+		}
+		else
+			dst[n++] = *p++;
+	}
+	dst[n] = 0;
+	ZMailUTF8ToAscii(dst);
+}
+
+
+U0 ZMailClipSet(U8 *s)
+{//Copy text to the OS clipboard so Ctrl+V pastes it anywhere (browser, editor).
+//Dollars are doubled: DocPrint treats a bare dollar as a DolDoc command.
+	U8	*esc = MAlloc(StrLen(s) * 2 + 1);
+	U8	*d = esc;
+
+	while (*s)
+	{
+		if (*s == 0x24)
+			*d++ = 0x24;
+		*d++ = *s++;
+	}
+	*d = 0;
+	ClipDel;
+	DocPrint(sys_clip_doc, "%s", esc);
+	Free(esc);
+}
+
+I64 ZMailClipGet(U8 *out, I64 max)
+{//Plain text out of the OS clipboard: text-entry tags + newlines. Un-doubles
+//the '$$' escaping. Returns byte count. (Mirrors the browser's GxClipTextGet.)
+	CDocEntry	*e;
+	U8			*p;
+	I64			 n = 0;
+	Bool		 unlock = DocLock(sys_clip_doc);
+
+	e = sys_clip_doc->head.next;
+	while (e != sys_clip_doc && n < max - 2)
+	{
+		if (e->type_u8 == DOCT_TEXT && e->tag)
+		{
+			p = e->tag;
+			while (*p && n < max - 2)
+			{
+				if (*p == 0x24 && p[1] == 0x24)
+					p++;			//Doubled dollar -> one literal.
+				out[n++] = *p++;
+			}
+		}
+		else if (e->type_u8 == DOCT_NEW_LINE || e->type_u8 == DOCT_SOFT_NEW_LINE)
+			out[n++] = '\n';
+		e = e->next;
+	}
+	out[n] = 0;
+	if (unlock)
+		DocUnlock(sys_clip_doc);
+	return n;
+}
+
+
+Bool ZMailConnFill(CZMailConn *c)
+{
+	I64 n;
+
+	if (c->dead)
+		return FALSE;
+	if (c->rpos < c->rlen)
+		return TRUE;
+	n = TLSRead(c->tls, c->rbuf, ZM_CONN_BUF);
+	if (n <= 0)
+	{
+		c->dead = TRUE;
+		return FALSE;
+	}
+	c->rlen = n;
+	c->rpos = 0;
+	return TRUE;
+}
+
+I64 ZMailGetLine(CZMailConn *c, U8 *out, I64 max)
+{//One CRLF-terminated line, CR/LF stripped. -1 = connection dead.
+	I64 n = 0;
+	U8	ch;
+
+	while (TRUE)
+	{
+		if (!ZMailConnFill(c))
+		{
+			if (n)
+			{
+				out[n] = 0;
+				return n;
+			}
+			return -1;
+		}
+		ch = c->rbuf[c->rpos++];
+		if (ch == '\n')
+		{
+			if (n && out[n - 1] == '\r')
+				n--;
+			out[n] = 0;
+			return n;
+		}
+		if (n < max - 1)
+			out[n++] = ch;
+	}
+}
+
+Bool ZMailSend(CZMailConn *c, U8 *s)
+{
+	if (c->dead)
+		return FALSE;
+	if (TLSWrite(c->tls, s, StrLen(s)) < 0)
+	{
+		c->dead = TRUE;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+Bool ZMailSendF(CZMailConn *c, U8 *fmt, ...)
+{
+	U8	*s = StrPrintJoin(NULL, fmt, argc, argv);
+	Bool ok = ZMailSend(c, s);
+
+	Free(s);
+	return ok;
+}
+
+CZMailConn *ZMailConnect(U8 *host, I64 port)
+{//TCP + implicit TLS. Returns a live CZMailConn or NULL.
+	CTCPSocket	*sock;
+	CTLS		*tls;
+	CZMailConn	*c;
+
+	sock = TCPConnectionCreate(host, port);
+	if (sock <= 0)
+		return NULL;
+	tls = TLSConnect(host, sock);
+	if (!tls)
+	{
+		TCPSocketClose(sock);
+		return NULL;
+	}
+	c = CAlloc(sizeof(CZMailConn), zmail.ui_task);
+	c->tls = tls;
+	c->rbuf = MAlloc(ZM_CONN_BUF, zmail.ui_task);
+	return c;
+}
+
+U0 ZMailConnClose(CZMailConn *c)
+{
+	if (!c)
+		return;
+	if (c->tls)
+		TLSClose(c->tls);	//Closes the socket + frees the CTLS.
+	Free(c->rbuf);
+	Free(c);
+}
+
+
+U0 ZMailHeaderVal(U8 *raw, U8 *name, U8 *out, I64 outmax)
+{//Case-insensitive header lookup on the raw message head. Handles folded
+//continuation lines. out gets the (possibly encoded-word) value, undecoded.
+	U8	*p = raw, *nl, *val;
+	I64	 nlen = StrLen(name), n = 0;
+
+	out[0] = 0;
+	while (*p)
+	{
+		if (!StrNICompare(p, name, nlen) && p[nlen] == ':')
+		{
+			val = p + nlen + 1;
+			while (*val == ' ' || *val == '\t')
+				val++;
+			while (*val && n < outmax - 1)
+			{
+				if (val[0] == '\r' && val[1] == '\n' &&
+					(val[2] == ' ' || val[2] == '\t'))
+				{//Folded: replace the break with a single space.
+					out[n++] = ' ';
+					val += 3;
+					while (*val == ' ' || *val == '\t')
+						val++;
+				}
+				else if (val[0] == '\n' && (val[1] == ' ' || val[1] == '\t'))
+				{
+					out[n++] = ' ';
+					val += 2;
+					while (*val == ' ' || *val == '\t')
+						val++;
+				}
+				else if (val[0] == '\r' || val[0] == '\n')
+					break;
+				else
+					out[n++] = *val++;
+			}
+			out[n] = 0;
+			return;
+		}
+		//Advance to the next line; stop at the blank line ending the head.
+		nl = StrFirstOcc(p, "\n");
+		if (!nl)
+			return;
+		p = nl + 1;
+		if (p[0] == '\r' && p[1] == '\n' || p[0] == '\n')
+			return;	//End of headers.
+	}
+}
+
+U8 *ZMailBodyStart(U8 *raw)
+{//First byte after the header/body separator (blank line).
+	U8 *p = StrFind("\r\n\r\n", raw);
+
+	if (p)
+		return p + 4;
+	p = StrFind("\n\n", raw);
+	if (p)
+		return p + 2;
+	return raw + StrLen(raw);
+}
+
+U0 ZMailGetParam(U8 *header, U8 *key, U8 *out, I64 outmax)
+{//Pull key=value (optionally quoted) out of a structured header value.
+	U8	*p = StrFind(key, header), *v;
+	I64	 n = 0;
+
+	out[0] = 0;
+	if (!p)
+		return;
+	v = p + StrLen(key);
+	while (*v == ' ' || *v == '=')
+		v++;
+	if (*v == '"')
+	{
+		v++;
+		while (*v && *v != '"' && n < outmax - 1)
+			out[n++] = *v++;
+	}
+	else
+	{
+		while (*v && *v != ';' && *v != ' ' && *v != '\r' && *v != '\n' &&
+			   n < outmax - 1)
+			out[n++] = *v++;
+	}
+	out[n] = 0;
+}
+
+U0 ZMailStripHtml(U8 *s)
+{//Crude HTML -> text: drop tags, collapse a few entities. In place.
+	U8	*d = s, *p = s;
+	Bool in_tag = FALSE;
+
+	while (*p)
+	{
+		if (*p == '<')
+			in_tag = TRUE;
+		else if (*p == '>')
+			in_tag = FALSE;
+		else if (!in_tag)
+			*d++ = *p;
+		p++;
+	}
+	*d = 0;
+}
+
+I64 ZMailDecodeBody(U8 *src, I64 srclen, U8 *cte, U8 *out, I64 outmax)
+{
+	I64 n;
+
+	if (!StrICompare(cte, "base64"))
+		n = ZMailB64Decode(src, srclen, out, outmax);
+	else if (!StrICompare(cte, "quoted-printable"))
+		n = ZMailQPDecode(src, srclen, out, outmax, FALSE);
+	else
+	{
+		n = srclen;
+		if (n > outmax)
+			n = outmax;
+		MemCopy(out, src, n);
+	}
+	return n;
+}
+
+U0 ZMailExtractText(U8 *raw, U8 *ctype, U8 *out, I64 outmax)
+{
+	U8	 boundary[128], marker[136], cte[48], part_ct[128], part_cte[48];
+	U8	*bstart, *p, *pend, *pbody;
+	U8	*decoded;
+	I64	 n, blen, want_html;
+	Bool is_multi = !StrNICompare(ctype, "multipart/", 10);
+
+	bstart = ZMailBodyStart(raw);
+	out[0] = 0;
+
+	if (!is_multi)
+	{//Single part: decode the whole body per the top-level CTE.
+		ZMailHeaderVal(raw, "Content-Transfer-Encoding", cte, sizeof(cte));
+		n = ZMailDecodeBody(bstart, StrLen(bstart), cte, out, outmax - 1);
+		out[n] = 0;
+		if (!StrNICompare(ctype, "text/html", 9))
+			ZMailStripHtml(out);
+		ZMailUTF8ToAscii(out);
+		return;
+	}
+
+	ZMailGetParam(ctype, "boundary", boundary, sizeof(boundary));
+	if (!boundary[0])
+	{//No boundary: treat as flat text.
+		n = StrLen(bstart);
+		if (n > outmax - 1)
+			n = outmax - 1;
+		MemCopy(out, bstart, n);
+		out[n] = 0;
+		ZMailUTF8ToAscii(out);
+		return;
+	}
+	StrPrint(marker, "--%s", boundary);
+
+	//Two passes: prefer text/plain, fall back to text/html.
+	for (want_html = 0; want_html <= 1; want_html++)
+	{
+		p = StrFind(marker, bstart);
+		while (p)
+		{
+			p += StrLen(marker);
+			if (p[0] == '-' && p[1] == '-')
+				break;					//Closing boundary.
+			//Part headers run until the blank line.
+			pbody = ZMailBodyStart(p);
+			ZMailHeaderVal(p, "Content-Type", part_ct, sizeof(part_ct));
+			ZMailHeaderVal(p, "Content-Transfer-Encoding", part_cte, sizeof(part_cte));
+			pend = StrFind(marker, pbody);
+			if (pend)
+				blen = pend - pbody;
+			else
+				blen = StrLen(pbody);
+			//Trim the trailing CRLF that precedes the boundary.
+			while (blen > 0 && (pbody[blen - 1] == '\r' || pbody[blen - 1] == '\n'))
+				blen--;
+
+			if ((!want_html && !StrNICompare(part_ct, "text/plain", 10)) ||
+				(want_html && !StrNICompare(part_ct, "text/html", 9)))
+			{
+				decoded = MAlloc(outmax + 4, zmail.ui_task);
+				n = ZMailDecodeBody(pbody, blen, part_cte, decoded, outmax - 1);
+				decoded[n] = 0;
+				if (want_html)
+					ZMailStripHtml(decoded);
+				StrCopy(out, decoded);
+				Free(decoded);
+				ZMailUTF8ToAscii(out);
+				return;
+			}
+			p = pend;
+		}
+	}
+	//Nothing matched: leave a hint.
+	StrCopy(out, "(no text/plain part)");
+}
+
+U0 ZMailParseHdr(CZMailMsg *m, U8 *raw)
+{//From/Subject/Date only. A header-only FETCH returns exactly these lines.
+	U8	 enc_from[ZM_FROM_LEN], enc_subj[ZM_SUBJ_LEN];
+
+	ZMailHeaderVal(raw, "From", enc_from, sizeof(enc_from));
+	ZMailHeaderVal(raw, "Subject", enc_subj, sizeof(enc_subj));
+	ZMailHeaderVal(raw, "Date", m->date, ZM_DATE_LEN);
+
+	ZMailDecodeWord(m->from, ZM_FROM_LEN, enc_from);
+	ZMailDecodeWord(m->subject, ZM_SUBJ_LEN, enc_subj);
+	ZMailUTF8ToAscii(m->date);
+	if (!m->subject[0])
+		StrCopy(m->subject, "(no subject)");
+	if (!m->from[0])
+		StrCopy(m->from, "(unknown sender)");
+}
+
+U0 ZMailParseBody(CZMailMsg *m, U8 *raw)
+{//Decoded text out of a full message. body is published last: the draw task
+//reads it without a lock and treats non-NULL as complete.
+	U8	 ctype[160];
+	U8	*out;
+
+	if (m->body)
+		return;
+	ZMailHeaderVal(raw, "Content-Type", ctype, sizeof(ctype));
+	if (!ctype[0])
+		StrCopy(ctype, "text/plain");
+	out = MAlloc(ZM_BODY_MAX + 4, zmail.ui_task);
+	ZMailExtractText(raw, ctype, out, ZM_BODY_MAX);
+	m->body_len = StrLen(out);
+	m->body = out;
+}
+
+U0 ZMailParseMsg(CZMailMsg *m, U8 *raw)
+{
+	ZMailParseHdr(m, raw);
+	ZMailParseBody(m, raw);
+}
+
+Bool ZMailIsPop()
+{
+	return !StrICompare(zmail.proto, "pop3") || !StrICompare(zmail.proto, "pop");
+}
+
+
+U0 ZMailAcctDir()
+{//C:/Home/Mail/<user>, with anything that is not a filename character folded
+//to '_'. Empty when the drive is read-only or no account is set.
+	I64	 n = 0;
+	U8	*p = zmail.user;
+
+	zmail.acct_dir[0] = 0;
+	if (!zmail.user[0] || !DriveIsWritable || ZMailIsPop)
+		return;
+	DirMake(ZM_MAIL_DIR);
+	StrCopy(zmail.acct_dir, ZM_MAIL_DIR "/");
+	n = StrLen(zmail.acct_dir);
+	while (*p && n < ZM_ACCT_LEN - 12)
+	{
+		if ('A' <= *p <= 'Z' || 'a' <= *p <= 'z' || '0' <= *p <= '9')
+			zmail.acct_dir[n++] = *p;
+		else
+			zmail.acct_dir[n++] = '_';
+		p++;
+	}
+	zmail.acct_dir[n] = 0;
+	DirMake(zmail.acct_dir);
+}
+
+U0 ZMailCachePath(U8 *out, I64 uid)
+{
+	StrPrint(out, "%s/U%d.EML", zmail.acct_dir, uid);
+}
+
+U0 ZMailCacheWrite(I64 uid, U8 *raw, I64 len)
+{
+	U8 path[ZM_ACCT_LEN + 32];
+
+	if (!zmail.acct_dir[0] || uid <= 0 || len <= 0)
+		return;
+	ZMailCachePath(path, uid);
+	FileWrite(path, raw, len);
+}
+
+U8 *ZMailCacheRead(I64 uid)
+{//Caller Frees. NULL when the message is not on disk.
+	U8	 path[ZM_ACCT_LEN + 32];
+	I64	 size;
+
+	if (!zmail.acct_dir[0] || uid <= 0)
+		return NULL;
+	ZMailCachePath(path, uid);
+	if (!FileFind(path))
+		return NULL;
+	return FileRead(path, &size);
+}
+
+U0 ZMailIndexSave()
+{//INDEX.TXT: header line "total<TAB>first<TAB>last", then one line per message
+//in the page: uid seq seen date from subject, tab separated. Read back by
+//ZMailIndexLoad so the list is up before the first FETCH answers.
+	U8			*buf, path[ZM_ACCT_LEN + 32];
+	CZMailMsg	*m;
+	I64			 i, n, cap, t = 0;
+
+	if (!zmail.acct_dir[0] || !zmail.num_msgs)
+		return;
+	cap = 128 + zmail.num_msgs * (ZM_FROM_LEN + ZM_SUBJ_LEN + ZM_DATE_LEN + 64);
+	buf = MAlloc(cap, zmail.ui_task);
+	StrPrint(buf, "%d\t%d\t%d\n", zmail.srv_total, zmail.page_first,
+			 zmail.page_last);
+	n = StrLen(buf);
+	for (i = 0; i < zmail.num_msgs; i++)
+	{
+		m = &zmail.msgs[i];
+		StrPrint(buf + n, "%d\t%d\t%d\t%s\t%s\t%s\n", m->uid, m->svr_num,
+				 m->seen, m->date, m->from, m->subject);
+		//A tab inside a header would split the line into the wrong fields.
+		while (buf[n])
+		{
+			if (buf[n] == '\t' && ++t > 5)
+				buf[n] = ' ';
+			n++;
+		}
+		t = 0;
+	}
+	StrPrint(path, "%s/INDEX.TXT", zmail.acct_dir);
+	FileWrite(path, buf, n);
+	Free(buf);
+}
+
+U8 *ZMailIndexField(U8 *p, U8 *out, I64 max)
+{//Copy up to the next tab or newline; returns the start of the next field,
+//or NULL at end of line.
+	I64 n = 0;
+
+	while (*p && *p != '\t' && *p != '\n')
+	{
+		if (n < max - 1)
+			out[n++] = *p;
+		p++;
+	}
+	out[n] = 0;
+	if (*p == '\t')
+		return p + 1;
+	if (*p == '\n')
+		return NULL;
+	return NULL;
+}
+
+U0 ZMailIndexLoad()
+{//Populate the list from INDEX.TXT. Bodies stay NULL: opening one pulls it
+//from the cache directory or the server.
+	U8			 path[ZM_ACCT_LEN + 32], f[ZM_SUBJ_LEN];
+	U8			*body, *line, *next, *q;
+	CZMailMsg	*m;
+	I64			 size;
+
+	if (!zmail.acct_dir[0] || zmail.num_msgs)
+		return;
+	StrPrint(path, "%s/INDEX.TXT", zmail.acct_dir);
+	if (!FileFind(path))
+		return;
+	body = FileRead(path, &size);
+	if (!body)
+		return;
+	q = ZMailIndexField(body, f, sizeof(f));
+	zmail.srv_total = Str2I64(f);
+	if (q)
+		q = ZMailIndexField(q, f, sizeof(f));
+	zmail.page_first = Str2I64(f);
+	if (q)
+		ZMailIndexField(q, f, sizeof(f));
+	zmail.page_last = Str2I64(f);
+
+	line = StrFirstOcc(body, "\n");
+	while (line && line[1] && zmail.num_msgs < ZM_MAX_MSGS)
+	{
+		next = StrFirstOcc(line + 1, "\n");
+		q = line + 1;
+		m = &zmail.msgs[zmail.num_msgs];
+		MemSet(m, 0, sizeof(CZMailMsg));
+		q = ZMailIndexField(q, f, sizeof(f));
+		m->uid = Str2I64(f);
+		if (q)
+			q = ZMailIndexField(q, f, sizeof(f));
+		m->svr_num = Str2I64(f);
+		if (q)
+			q = ZMailIndexField(q, f, sizeof(f));
+		m->seen = ToBool(Str2I64(f));
+		if (q)
+			q = ZMailIndexField(q, f, sizeof(f));
+		StrCopy(m->date, f);
+		if (q)
+			q = ZMailIndexField(q, f, sizeof(f));
+		StrCopy(m->from, f);
+		if (q)
+			ZMailIndexField(q, m->subject, ZM_SUBJ_LEN);
+		zmail.num_msgs++;
+		line = next;
+	}
+	Free(body);
+}
+
+
+Bool ZMailPopOk(CZMailConn *c, U8 *line, I64 max)
+{//Read one status line, TRUE on "+OK".
+	if (ZMailGetLine(c, line, max) < 0)
+		return FALSE;
+	return line[0] == '+';
+}
+
+U0 ZMailFreeMsgs()
+{
+	I64 i, n = zmail.num_msgs;
+
+	//Count is zeroed before the bodies are freed; the WinMgr draw runs in
+	//another task and bounds its msgs[] loop on num_msgs.
+	zmail.num_msgs = 0;
+	zmail.sel = 0;
+	Sleep(1);
+	for (i = 0; i < n; i++)
+		if (zmail.msgs[i].body)
+		{
+			Free(zmail.msgs[i].body);
+			zmail.msgs[i].body = NULL;
+		}
+}
+
+
+I64 ZMailPopReadDot(CZMailConn *c, U8 *raw, I64 cap)
+{//Read a dot-terminated POP3 multiline response into raw. Returns the length,
+//or -1 if the connection died mid-message.
+	U8	 line[ZM_LINE_MAX];
+	I64	 n = 0, len;
+
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+			return -1;
+		if (line[0] == '.' && !line[1])
+			break;				//End-of-message dot.
+		if (line[0] == '.')
+		{//Undo dot-stuffing. The regions overlap, so copy forwards by hand.
+			len = 0;
+			while (line[len + 1])
+			{
+				line[len] = line[len + 1];
+				len++;
+			}
+			line[len] = 0;
+		}
+		len = StrLen(line);
+		if (n + len + 2 < cap)
+		{
+			MemCopy(raw + n, line, len);
+			n += len;
+			raw[n++] = '\r';
+			raw[n++] = '\n';
+		}
+	}
+	raw[n] = 0;
+
+	return n;
+}
+
+Bool ZMailPopLogin(CZMailConn *c, I64 *total_out)
+{//Greeting, USER/PASS, STAT. *total_out gets the message count.
+	U8 line[ZM_LINE_MAX];
+
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("No POP3 greeting.", TRUE);
+		return FALSE;
+	}
+	ZMailStatus("Authenticating...", FALSE);
+	ZMailSendF(c, "USER %s\r\n", zmail.user);
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("USER rejected.", TRUE);
+		return FALSE;
+	}
+	ZMailSendF(c, "PASS %s\r\n", zmail.pass);
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("Login failed (bad password / app password needed).", TRUE);
+		return FALSE;
+	}
+	if (!total_out)
+		return TRUE;
+	ZMailSend(c, "STAT\r\n");			//"+OK count size".
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("STAT failed.", TRUE);
+		return FALSE;
+	}
+	*total_out = Str2I64(line + 4);
+
+	return TRUE;
+}
+
+U0 ZMailDoFetchPop()
+{//Headers only, one page. TOP n 0 is headers with zero body lines; the body
+//arrives on demand through ZM_JOB_BODY.
+	CZMailConn	*c;
+	U8			 line[ZM_LINE_MAX];
+	U8			*raw;
+	I64			 port = Str2I64(zmail.recv_port_s);
+	I64			 total = 0, first, last, i, rawlen;
+	CZMailMsg	*m;
+
+	if (port <= 0)
+		port = ZM_POP_PORT;
+	ZMailStatusF(FALSE, "Connecting to %s:%d...", zmail.recv_host, port);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("POP3 connect/TLS failed.", TRUE);
+		return;
+	}
+	if (!ZMailPopLogin(c, &total))
+	{
+		ZMailConnClose(c);
+		return;
+	}
+	zmail.srv_total = total;
+	ZMailFreeMsgs;
+	if (total <= 0)
+	{
+		ZMailStatus("Inbox empty.", FALSE);
+		ZMailSend(c, "QUIT\r\n");
+		ZMailConnClose(c);
+		return;
+	}
+
+	last = total;
+	if (0 < zmail.page_req < total)
+		last = zmail.page_req;
+	first = last - ZM_MAX_MSGS + 1;
+	if (first < 1)
+		first = 1;
+	zmail.page_first = first;
+	zmail.page_last  = last;
+	raw = MAlloc(ZM_RAW_MAX + 4, zmail.ui_task);
+
+	//Newest first.
+	for (i = last; i >= first; i--)
+	{
+		ZMailStatusF(FALSE, "Headers %d of %d...", last - i + 1, last - first + 1);
+		ZMailSendF(c, "TOP %d 0\r\n", i);
+		if (!ZMailPopOk(c, line, sizeof(line)))
+			goto retr_done;		//No TOP support, or the server refused.
+		rawlen = ZMailPopReadDot(c, raw, ZM_RAW_MAX);
+		if (rawlen < 0)
+			goto retr_done;		//Connection died mid-message.
+		m = &zmail.msgs[zmail.num_msgs];
+		MemSet(m, 0, sizeof(CZMailMsg));
+		m->svr_num = i;
+		m->seen = TRUE;			//POP3 has no server-side read state.
+		ZMailParseHdr(m, raw);
+		zmail.num_msgs++;		//After the slot is fully built (draw reads it).
+	}
+retr_done:
+	Free(raw);
+	ZMailSend(c, "QUIT\r\n");
+	ZMailConnClose(c);
+	ZMailStatus("", FALSE);
+}
+
+U0 ZMailDoBodyPop()
+{//RETR the selected message. body_uid holds its sequence number.
+	CZMailConn	*c;
+	U8			 line[ZM_LINE_MAX];
+	U8			*raw;
+	I64			 port = Str2I64(zmail.recv_port_s), rawlen;
+	CZMailMsg	*m;
+
+	if (zmail.body_slot < 0 || zmail.body_slot >= zmail.num_msgs)
+		return;
+	m = &zmail.msgs[zmail.body_slot];
+	if (port <= 0)
+		port = ZM_POP_PORT;
+	ZMailStatus("Loading message...", FALSE);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("Message: connect failed.", TRUE);
+		return;
+	}
+	if (!ZMailPopLogin(c, NULL))
+	{
+		ZMailConnClose(c);
+		return;
+	}
+	ZMailSendF(c, "RETR %d\r\n", zmail.body_uid);
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("RETR refused.", TRUE);
+		ZMailSend(c, "QUIT\r\n");
+		ZMailConnClose(c);
+		return;
+	}
+	raw = MAlloc(ZM_RAW_MAX + 4, zmail.ui_task);
+	rawlen = ZMailPopReadDot(c, raw, ZM_RAW_MAX);
+	if (rawlen > 0 && m->svr_num == zmail.body_uid)
+		ZMailParseBody(m, raw);
+	Free(raw);
+	ZMailSend(c, "QUIT\r\n");
+	ZMailConnClose(c);
+	ZMailStatus("", FALSE);
+}
+
+
+I64 ZMailReadStore(CZMailConn *c, U8 *out, I64 n, I64 cap)
+{//Read exactly n bytes off the stream (IMAP literal); store the first cap
+//into out, discard the rest so the protocol stays in sync. Returns stored.
+	I64 got = 0, stored = 0, take, s;
+
+	while (got < n)
+	{
+		if (!ZMailConnFill(c))
+			break;
+		take = c->rlen - c->rpos;
+		if (take > n - got)
+			take = n - got;
+		if (stored < cap)
+		{
+			s = take;
+			if (s > cap - stored)
+				s = cap - stored;
+			MemCopy(out + stored, c->rbuf + c->rpos, s);
+			stored += s;
+		}
+		c->rpos += take;
+		got += take;
+	}
+	return stored;
+}
+
+Bool ZMailImapTagged(CZMailConn *c, U8 *tag)
+{//Consume lines (ignoring untagged '*') until the tagged reply; TRUE on OK.
+	U8	 line[ZM_LINE_MAX];
+	I64	 tl = StrLen(tag);
+	U8	*p;
+
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+			return FALSE;
+		if (!StrNCompare(line, tag, tl) && line[tl] == ' ')
+		{
+			p = line + tl + 1;
+			while (*p == ' ')
+				p++;
+			return !StrNCompare(p, "OK", 2);
+		}
+	}
+}
+
+Bool ZMailImapLogin(CZMailConn *c, I64 *tagn, I64 *total_out)
+{//Greeting + LOGIN + SELECT INBOX. Fills *total_out with EXISTS if non-NULL.
+	U8	 line[ZM_LINE_MAX], tag[16];
+	I64	 tl;
+	U8	*p;
+
+	if (ZMailGetLine(c, line, sizeof(line)) < 0)	//Server greeting.
+		return FALSE;
+
+	(*tagn)++;
+	StrPrint(tag, "a%d", *tagn);
+	ZMailSendF(c, "%s LOGIN \"%s\" \"%s\"\r\n", tag, zmail.user, zmail.pass);
+	if (!ZMailImapTagged(c, tag))
+		return FALSE;
+
+	(*tagn)++;
+	StrPrint(tag, "a%d", *tagn);
+	tl = StrLen(tag);
+	ZMailSendF(c, "%s SELECT INBOX\r\n", tag);
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+			return FALSE;
+		if (line[0] == '*' && StrFind("EXISTS", line) && total_out)
+			*total_out = Str2I64(line + 2);
+		if (!StrNCompare(line, tag, tl) && line[tl] == ' ')
+		{
+			p = line + tl + 1;
+			while (*p == ' ')
+				p++;
+			return !StrNCompare(p, "OK", 2);
+		}
+	}
+}
+
+U0 ZMailMsgsReverse()
+{//The server answers a range in ascending sequence; the list wants newest
+//first.
+	CZMailMsg	 t;
+	I64			 i = 0, j = zmail.num_msgs - 1;
+
+	while (i < j)
+	{
+		MemCopy(&t, &zmail.msgs[i], sizeof(CZMailMsg));
+		MemCopy(&zmail.msgs[i], &zmail.msgs[j], sizeof(CZMailMsg));
+		MemCopy(&zmail.msgs[j], &t, sizeof(CZMailMsg));
+		i++;
+		j--;
+	}
+}
+
+U0 ZMailDoFetchImap()
+{//One page of headers in a single FETCH. Bodies are left out: BODY.PEEK[] on
+//a range pulls whole mailboxes down the wire.
+	CZMailConn	*c;
+	U8			 line[ZM_LINE_MAX], tag[16];
+	U8			*raw, *p;
+	I64			 port = Str2I64(zmail.recv_port_s);
+	I64			 total = 0, first, last, seq, tagn = 0, size, uid, tl, stored;
+	Bool		 seen;
+	CZMailMsg	*m;
+
+	if (port <= 0)
+		port = ZM_IMAP_PORT;
+	ZMailStatusF(FALSE, "Connecting to %s:%d...", zmail.recv_host, port);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("IMAP connect/TLS failed.", TRUE);
+		return;
+	}
+	ZMailStatus("Authenticating...", FALSE);
+	if (!ZMailImapLogin(c, &tagn, &total))
+	{
+		ZMailStatus("IMAP login failed (app password needed?).", TRUE);
+		ZMailConnClose(c);
+		return;
+	}
+
+	zmail.srv_total = total;
+	ZMailFreeMsgs;
+	if (total <= 0)
+	{
+		ZMailStatus("Inbox empty.", FALSE);
+		ZMailSendF(c, "a%d LOGOUT\r\n", ++tagn);
+		ZMailConnClose(c);
+		return;
+	}
+
+	last = total;
+	if (0 < zmail.page_req < total)
+		last = zmail.page_req;
+	first = last - ZM_MAX_MSGS + 1;
+	if (first < 1)
+		first = 1;
+	zmail.page_first = first;
+	zmail.page_last  = last;
+
+	raw = MAlloc(ZM_RAW_MAX + 4, zmail.ui_task);
+	ZMailStatusF(FALSE, "Headers %d-%d of %d...", first, last, total);
+	tagn++;
+	StrPrint(tag, "a%d", tagn);
+	tl = StrLen(tag);
+	ZMailSendF(c, "%s FETCH %d:%d "
+			   "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])\r\n",
+			   tag, first, last);
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+			goto imap_done;			//Connection died.
+		if (line[0] == '*' && StrFind("FETCH", line))
+		{
+			seq = Str2I64(line + 2);
+			uid = 0;
+			seen = FALSE;
+			stored = 0;
+			if (StrFind("\\Seen", line))
+				seen = TRUE;
+			p = StrFind("UID ", line);
+			if (p)
+				uid = Str2I64(p + 4);
+			p = StrFind("{", line);		//Literal size marker.
+			if (p)
+			{
+				size = Str2I64(p + 1);
+				stored = ZMailReadStore(c, raw, size, ZM_RAW_MAX - 1);
+				raw[stored] = 0;
+			}
+			if (stored > 0 && zmail.num_msgs < ZM_MAX_MSGS)
+			{
+				m = &zmail.msgs[zmail.num_msgs];
+				MemSet(m, 0, sizeof(CZMailMsg));
+				m->svr_num = seq;
+				m->uid = uid;
+				m->seen = seen;
+				ZMailParseHdr(m, raw);
+				zmail.num_msgs++;	//After the slot is fully built.
+			}
+		}
+		if (!StrNCompare(line, tag, tl) && line[tl] == ' ')
+			break;					//Tagged reply: the range is done.
+	}
+imap_done:
+	Free(raw);
+	ZMailMsgsReverse;
+	ZMailSendF(c, "a%d LOGOUT\r\n", ++tagn);
+	ZMailConnClose(c);
+	ZMailIndexSave;
+	ZMailStatus("", FALSE);
+}
+
+U0 ZMailDoBodyImap()
+{//Body of one message by UID, then \Seen in the same session. Served from
+//the cache directory when the message has been opened before.
+	CZMailConn	*c;
+	U8			 line[ZM_LINE_MAX], tag[16];
+	U8			*raw, *p, *cached;
+	I64			 port = Str2I64(zmail.recv_port_s);
+	I64			 tagn = 0, size, tl, stored = 0;
+	CZMailMsg	*m;
+
+	if (zmail.body_slot < 0 || zmail.body_slot >= zmail.num_msgs)
+		return;
+	m = &zmail.msgs[zmail.body_slot];
+	if (m->uid != zmail.body_uid)
+		return;					//List moved under the job.
+
+	cached = ZMailCacheRead(zmail.body_uid);
+	if (cached)
+	{
+		ZMailParseBody(m, cached);
+		Free(cached);
+		ZMailStatus("", FALSE);
+		return;
+	}
+
+	if (port <= 0)
+		port = ZM_IMAP_PORT;
+	ZMailStatus("Loading message...", FALSE);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("Message: connect failed.", TRUE);
+		return;
+	}
+	if (!ZMailImapLogin(c, &tagn, NULL))
+	{
+		ZMailStatus("Message: login failed.", TRUE);
+		ZMailConnClose(c);
+		return;
+	}
+	raw = MAlloc(ZM_RAW_MAX + 4, zmail.ui_task);
+	tagn++;
+	StrPrint(tag, "a%d", tagn);
+	tl = StrLen(tag);
+	ZMailSendF(c, "%s UID FETCH %d (BODY.PEEK[])\r\n", tag, zmail.body_uid);
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+			goto body_done;
+		if (line[0] == '*' && StrFind("FETCH", line))
+		{
+			p = StrFind("{", line);
+			if (p)
+			{
+				size = Str2I64(p + 1);
+				stored = ZMailReadStore(c, raw, size, ZM_RAW_MAX - 1);
+				raw[stored] = 0;
+			}
+		}
+		if (!StrNCompare(line, tag, tl) && line[tl] == ' ')
+			break;
+	}
+	if (stored > 0)
+	{
+		ZMailCacheWrite(zmail.body_uid, raw, stored);
+		ZMailParseBody(m, raw);
+		tagn++;
+		StrPrint(tag, "a%d", tagn);
+		ZMailSendF(c, "%s UID STORE %d +FLAGS (\\Seen)\r\n", tag,
+				   zmail.body_uid);
+		ZMailImapTagged(c, tag);
+	}
+body_done:
+	Free(raw);
+	ZMailSendF(c, "a%d LOGOUT\r\n", ++tagn);
+	ZMailConnClose(c);
+	ZMailStatus("", FALSE);
+}
+
+U0 ZMailDoBody()
+{
+	if (ZMailIsPop())
+		ZMailDoBodyPop;
+	else
+		ZMailDoBodyImap;
+}
+
+U0 ZMailDoFetch()
+{//Dispatch on the configured protocol (default IMAP).
+	if (ZMailIsPop())
+		ZMailDoFetchPop;
+	else
+		ZMailDoFetchImap;
+}
+
+U0 ZMailDoDeletePop()
+{
+	CZMailConn	*c;
+	U8			 line[ZM_LINE_MAX];
+	I64			 port = Str2I64(zmail.recv_port_s);
+
+	if (port <= 0)
+		port = ZM_POP_PORT;
+	ZMailStatus("Deleting...", FALSE);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("Delete: connect failed.", TRUE);
+		return;
+	}
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{ ZMailConnClose(c); return; }
+	ZMailSendF(c, "USER %s\r\n", zmail.user);
+	ZMailPopOk(c, line, sizeof(line));
+	ZMailSendF(c, "PASS %s\r\n", zmail.pass);
+	if (!ZMailPopOk(c, line, sizeof(line)))
+	{
+		ZMailStatus("Delete: login failed.", TRUE);
+		ZMailConnClose(c);
+		return;
+	}
+	ZMailSendF(c, "DELE %d\r\n", zmail.del_num);
+	ZMailPopOk(c, line, sizeof(line));
+	ZMailSend(c, "QUIT\r\n");		//DELE only commits on QUIT.
+	ZMailConnClose(c);
+	ZMailDoFetch;		//Resync (dispatcher defined above).
+}
+
+U0 ZMailDoDeleteImap()
+{
+	CZMailConn	*c;
+	U8			 tag[16];
+	I64			 port = Str2I64(zmail.recv_port_s), tagn = 0;
+
+	if (port <= 0)
+		port = ZM_IMAP_PORT;
+	ZMailStatus("Deleting...", FALSE);
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+	{
+		ZMailStatus("Delete: connect failed.", TRUE);
+		return;
+	}
+	if (!ZMailImapLogin(c, &tagn, NULL))
+	{
+		ZMailStatus("Delete: login failed.", TRUE);
+		ZMailConnClose(c);
+		return;
+	}
+	tagn++;
+	StrPrint(tag, "a%d", tagn);
+	ZMailSendF(c, "%s UID STORE %d +FLAGS (\\Deleted)\r\n", tag, zmail.target_uid);
+	ZMailImapTagged(c, tag);
+	tagn++;
+	StrPrint(tag, "a%d", tagn);
+	ZMailSendF(c, "%s EXPUNGE\r\n", tag);
+	ZMailImapTagged(c, tag);
+	ZMailSendF(c, "a%d LOGOUT\r\n", ++tagn);
+	ZMailConnClose(c);
+	ZMailDoFetch;		//Resync.
+}
+
+U0 ZMailDoDelete()
+{
+	if (ZMailIsPop())
+		ZMailDoDeletePop;
+	else
+		ZMailDoDeleteImap;
+}
+
+U0 ZMailDoSeen()
+{//IMAP only: mark target_uid \Seen on the server. POP has no such concept.
+	CZMailConn	*c;
+	U8			 tag[16];
+	I64			 port = Str2I64(zmail.recv_port_s), tagn = 0;
+
+	if (ZMailIsPop())
+		return;
+	if (port <= 0)
+		port = ZM_IMAP_PORT;
+	c = ZMailConnect(zmail.recv_host, port);
+	if (!c)
+		return;
+	if (ZMailImapLogin(c, &tagn, NULL))
+	{
+		tagn++;
+		StrPrint(tag, "a%d", tagn);
+		ZMailSendF(c, "%s UID STORE %d +FLAGS (\\Seen)\r\n", tag, zmail.target_uid);
+		ZMailImapTagged(c, tag);
+		ZMailSendF(c, "a%d LOGOUT\r\n", ++tagn);
+	}
+	ZMailConnClose(c);
+}
+
+
+I64 ZMailSmtpReply(CZMailConn *c)
+{//Read a (possibly multiline) reply; return the 3-digit code, -1 on death.
+//Stashes the final line into zmail.last_reply so errors can show it verbatim.
+	U8	line[ZM_LINE_MAX];
+	I64	code = -1;
+
+	zmail.last_reply[0] = 0;
+	while (TRUE)
+	{
+		if (ZMailGetLine(c, line, sizeof(line)) < 0)
+		{
+			if (!zmail.last_reply[0])
+				StrCopy(zmail.last_reply, "connection closed / timed out");
+			return -1;
+		}
+		if (StrLen(line) >= 3)
+			code = Str2I64(line);
+		MemCopy(zmail.last_reply, line, MinI64(StrLen(line), sizeof(zmail.last_reply) - 1));
+		zmail.last_reply[MinI64(StrLen(line), sizeof(zmail.last_reply) - 1)] = 0;
+		if (StrLen(line) < 4 || line[3] == ' ')
+			return code;		//Final line of the reply.
+	}
+}
+
+U8 *ZMailBuildBody(U8 *src)
+{//Compose stores '\n'-only lines; SMTP DATA needs CRLF line endings plus
+//dot-stuffing (a line that is just "." would otherwise end the message).
+//Returns a MAlloc'd string on the worker heap; caller frees.
+	U8	*out = MAlloc(ZM_COMPOSE_BODY * 2 + 8);
+	I64	 n = 0;
+	Bool line_start = TRUE;
+
+	while (*src && n < ZM_COMPOSE_BODY * 2)
+	{
+		if (line_start && *src == '.')
+			out[n++] = '.';		//Stuff the leading dot.
+		if (*src == '\n')
+		{
+			out[n++] = '\r';
+			out[n++] = '\n';
+			line_start = TRUE;
+			src++;
+		}
+		else
+		{
+			out[n++] = *src++;
+			line_start = FALSE;
+		}
+	}
+	out[n] = 0;
+	return out;
+}
+
+U0 ZMailDoSend()
+{
+	CZMailConn	*c;
+	U8			 b64[ZM_ADDR_LEN * 2];
+	U8			*mail, *body;
+	I64			 port = Str2I64(zmail.smtp_port_s);
+
+	if (port <= 0)
+		port = ZM_SMTP_PORT;
+	if (!zmail.c_to[0])
+	{
+		ZMailStatus("Send: no recipient.", TRUE);
+		return;
+	}
+	ZMailStatusF(FALSE, "Connecting to %s:%d...", zmail.smtp_host, port);
+	c = ZMailConnect(zmail.smtp_host, port);
+	if (!c)
+	{
+		ZMailStatus("SMTP connect/TLS failed.", TRUE);
+		return;
+	}
+	if (ZMailSmtpReply(c) != 220)
+	{ ZMailStatusF(TRUE, "No SMTP greeting: %s", zmail.last_reply); ZMailConnClose(c); return; }
+
+	ZMailSendF(c, "EHLO zealos\r\n");
+	if (ZMailSmtpReply(c) != 250)
+	{ ZMailStatusF(TRUE, "EHLO refused: %s", zmail.last_reply); ZMailConnClose(c); return; }
+
+	ZMailStatus("Authenticating...", FALSE);
+	ZMailSend(c, "AUTH LOGIN\r\n");
+	if (ZMailSmtpReply(c) != 334)
+	{ ZMailStatusF(TRUE, "AUTH LOGIN refused: %s", zmail.last_reply); ZMailConnClose(c); return; }
+	ZMailB64Encode(zmail.user, StrLen(zmail.user), b64);
+	ZMailSendF(c, "%s\r\n", b64);
+	if (ZMailSmtpReply(c) != 334)
+	{ ZMailStatusF(TRUE, "Username rejected: %s", zmail.last_reply); ZMailConnClose(c); return; }
+	ZMailB64Encode(zmail.pass, StrLen(zmail.pass), b64);
+	ZMailSendF(c, "%s\r\n", b64);
+	if (ZMailSmtpReply(c) != 235)
+	{ ZMailStatusF(TRUE, "Auth failed (app password?): %s", zmail.last_reply); ZMailConnClose(c); return; }
+
+	ZMailStatus("Sending...", FALSE);
+	ZMailSendF(c, "MAIL FROM:<%s>\r\n", zmail.email);
+	if (ZMailSmtpReply(c) != 250)
+	{ ZMailStatusF(TRUE, "MAIL FROM refused: %s", zmail.last_reply); ZMailConnClose(c); return; }
+	ZMailSendF(c, "RCPT TO:<%s>\r\n", zmail.c_to);
+	if (ZMailSmtpReply(c) != 250)
+	{ ZMailStatusF(TRUE, "Recipient refused: %s", zmail.last_reply); ZMailConnClose(c); return; }
+	ZMailSend(c, "DATA\r\n");
+	if (ZMailSmtpReply(c) != 354)
+	{ ZMailStatusF(TRUE, "DATA refused: %s", zmail.last_reply); ZMailConnClose(c); return; }
+
+	//RFC822 message: CRLF, dot-stuffed body, terminated by a lone ".".
+	body = ZMailBuildBody(zmail.c_body);
+	if (zmail.from_name[0])
+		mail = MStrPrint("From: %s <%s>\r\nTo: %s\r\nSubject: %s\r\n"
+						 "Content-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n.\r\n",
+						 zmail.from_name, zmail.email, zmail.c_to,
+						 zmail.c_subj, body);
+	else
+		mail = MStrPrint("From: %s\r\nTo: %s\r\nSubject: %s\r\n"
+						 "Content-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n.\r\n",
+						 zmail.email, zmail.c_to, zmail.c_subj, body);
+	Free(body);
+	ZMailSend(c, mail);
+	Free(mail);
+	if (ZMailSmtpReply(c) != 250)
+	{ ZMailStatusF(TRUE, "Message rejected: %s", zmail.last_reply); ZMailConnClose(c); return; }
+
+	ZMailSend(c, "QUIT\r\n");
+	ZMailConnClose(c);
+	ZMailStatus("Message sent.", FALSE);
+	//Clear the draft.
+	zmail.c_to[0] = 0;
+	zmail.c_subj[0] = 0;
+	zmail.c_body[0] = 0;
+	zmail.c_body_len = 0;
+}
+
+
+U0 ZMailWorker(I64)
+{
+	while (!zmail.worker_quit)
+	{
+		if (zmail.job_req == ZM_JOB_FETCH)
+		{
+			zmail.job_req = ZM_JOB_NONE;
+			zmail.job_active = TRUE;
+			ZMailDoFetch;
+			zmail.job_active = FALSE;
+		}
+		else if (zmail.job_req == ZM_JOB_SEND)
+		{
+			zmail.job_req = ZM_JOB_NONE;
+			zmail.job_active = TRUE;
+			ZMailDoSend;
+			zmail.job_active = FALSE;
+		}
+		else if (zmail.job_req == ZM_JOB_DELETE)
+		{
+			zmail.job_req = ZM_JOB_NONE;
+			zmail.job_active = TRUE;
+			ZMailDoDelete;
+			zmail.job_active = FALSE;
+		}
+		else if (zmail.job_req == ZM_JOB_SEEN)
+		{
+			zmail.job_req = ZM_JOB_NONE;
+			zmail.job_active = TRUE;
+			ZMailDoSeen;
+			zmail.job_active = FALSE;
+		}
+		else if (zmail.job_req == ZM_JOB_BODY)
+		{
+			zmail.job_req = ZM_JOB_NONE;
+			zmail.job_active = TRUE;
+			ZMailDoBody;
+			zmail.job_active = FALSE;
+		}
+		else
+			Sleep(40);
+	}
+}
+
+Bool ZMailPostJob(I64 job)
+{//UI-side: queue a job if the worker is idle.
+	if (zmail.job_active || zmail.job_req != ZM_JOB_NONE)
+		return FALSE;
+	zmail.job_req = job;
+	return TRUE;
+}
+
+U0 ZMailAcctStore()
+{
+	CZMailAcct *a;
+
+	if (zmail.cur_acct < 0 || zmail.cur_acct >= ZM_MAX_ACCTS)
+		return;
+	if (zmail.cur_acct >= zmail.num_accts)
+		zmail.num_accts = zmail.cur_acct + 1;
+	a = &zmail.accts[zmail.cur_acct];
+	StrCopy(a->proto,       zmail.proto);
+	StrCopy(a->recv_host,   zmail.recv_host);
+	StrCopy(a->recv_port_s, zmail.recv_port_s);
+	StrCopy(a->smtp_host,   zmail.smtp_host);
+	StrCopy(a->smtp_port_s, zmail.smtp_port_s);
+	StrCopy(a->email,       zmail.email);
+	StrCopy(a->user,        zmail.user);
+	StrCopy(a->pass,        zmail.pass);
+	StrCopy(a->from_name,   zmail.from_name);
+}
+
+U0 ZMailAcctLoad(I64 i)
+{//Slot -> live form fields. The field table points at the live copies, so
+//nothing else needs re-binding.
+	CZMailAcct *a;
+
+	if (i < 0 || i >= zmail.num_accts)
+		return;
+	zmail.cur_acct = i;
+	a = &zmail.accts[i];
+	StrCopy(zmail.proto,       a->proto);
+	StrCopy(zmail.recv_host,   a->recv_host);
+	StrCopy(zmail.recv_port_s, a->recv_port_s);
+	StrCopy(zmail.smtp_host,   a->smtp_host);
+	StrCopy(zmail.smtp_port_s, a->smtp_port_s);
+	StrCopy(zmail.email,       a->email);
+	StrCopy(zmail.user,        a->user);
+	StrCopy(zmail.pass,        a->pass);
+	StrCopy(zmail.from_name,   a->from_name);
+}
+
+U0 ZMailAcctLabel(U8 *out, I64 max, I64 i)
+{//Email, else user@host, else a placeholder.
+	CZMailAcct *a = &zmail.accts[i];
+
+	out[0] = 0;
+	if (a->email[0])
+		StrPrint(out, "%s", a->email);
+	else if (a->user[0])
+		StrPrint(out, "%s@%s", a->user, a->recv_host);
+	else
+		StrPrint(out, "(new account %d)", i + 1);
+	out[max - 1] = 0;
+}
+
+
+U0 ZMailEdge(CDC *dc, I64 x, I64 y, I64 w, I64 h)
+{
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, x, y, w, 1);
+	GrRect(dc, x, y + h - 1, w, 1);
+	GrRect(dc, x, y, 1, h);
+	GrRect(dc, x + w - 1, y, 1, h);
+}
+
+U0 ZMailStatusBar(CTask *task, CDC *dc, I64 botbar, U8 *help)
+{//Shared bottom bar: help on the left, status in the right half. The status
+//is drawn left-to-right (front kept) and truncated so long server error
+//replies never run off-screen.
+	U8	 disp[160];
+	I64	 sx, fit;
+
+	dc->color = de_theme.panel;
+	GrRect(dc, 0, botbar, task->pix_width, 22);
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, 0, botbar, task->pix_width, 1);
+	dc->color = de_theme.text_dim;
+	sx = task->pix_width / 2;
+	fit = (task->pix_width - 16) / FONT_WIDTH;
+	if (zmail.status[0])
+		fit = (sx - 16) / FONT_WIDTH;		//Help stops where the status starts.
+	StrCopy(disp, help);
+	if (StrLen(disp) > fit)
+		disp[fit] = 0;
+	GrPrint(dc, 8, botbar + 7, "%s", disp);
+	if (zmail.status[0])
+	{
+		fit = (task->pix_width - sx - 8) / FONT_WIDTH;
+		StrCopy(disp, zmail.status);
+		if (StrLen(disp) > fit)
+			disp[fit] = 0;
+		if (zmail.status_err)
+			dc->color = zmail.c_red;
+		else
+			dc->color = de_theme.accent_dim;
+		GrPrint(dc, sx, botbar + 7, "%s", disp);
+	}
+}
+
+U0 ZMailDrawField(CDC *dc, I64 x, I64 y, I64 w, U8 *label, U8 *val,
+				  Bool focus, Bool secret)
+{
+	U8	 shown[ZM_ADDR_LEN + 2];
+	I64	 i, n, fit;
+
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, x, y + 5, "%s", label);
+	dc->color = de_theme.win_bg;
+	GrRect(dc, x + 96, y, w, 20);
+	if (focus)
+		dc->color = de_theme.accent;
+	else
+		dc->color = de_theme.bttn;
+	GrRect(dc, x + 96, y, w, 1);
+	GrRect(dc, x + 96, y + 19, w, 1);
+	GrRect(dc, x + 96, y, 1, 20);
+	GrRect(dc, x + 96 + w - 1, y, 1, 20);
+
+	n = StrLen(val);
+	fit = (w - 12) / FONT_WIDTH;
+	if (secret)
+	{
+		for (i = 0; i < n && i < fit; i++)
+			shown[i] = '*';
+		shown[i] = 0;
+	}
+	else
+	{
+		i = 0;
+		if (n > fit)
+			i = n - fit;			//Scroll to show the tail while typing.
+		StrCopy(shown, val + i);
+	}
+	dc->color = de_theme.text;
+	if (focus && Blink)
+		CatPrint(shown, "_");
+	GrPrint(dc, x + 102, y + 6, "%s", shown);
+}
+
+U0 ZMailDrawSetup(CTask *task, CDC *dc)
+{
+	U8	 label[ZM_ADDR_LEN + 32];
+	I64	 fw = 380, fh = 428;
+	I64	 fx = (task->pix_width - fw) / 2, fy = (task->pix_height - fh) / 2;
+	I64	 i, y, cx;
+
+	dc->color = de_theme.panel;
+	GrRect(dc, fx, fy, fw, fh);
+	ZMailEdge(dc, fx, fy, fw, fh);
+	dc->color = de_theme.accent;
+	GrPrint(dc, fx + (fw - 18 * FONT_WIDTH) / 2, fy + 12, "ZMail  -  Account");
+
+	y = fy + 36;
+	for (i = 0; i < zmail.num_accts; i++)
+	{
+		cx = fx + 16 + i * 30;
+		if (i == zmail.cur_acct)
+			dc->color = de_theme.bttn_focus;
+		else
+			dc->color = de_theme.bttn;
+		GrRect(dc, cx, y, 26, 22);
+		ZMailEdge(dc, cx, y, 26, 22);
+		dc->color = de_theme.text;
+		GrPrint(dc, cx + 9, y + 7, "%d", i + 1);
+	}
+	cx = fx + 16 + zmail.num_accts * 30;
+	dc->color = de_theme.bttn;
+	GrRect(dc, cx, y, 26, 22);
+	ZMailEdge(dc, cx, y, 26, 22);
+	dc->color = de_theme.text;
+	GrPrint(dc, cx + 9, y + 7, "+");
+	dc->color = de_theme.bttn;
+	GrRect(dc, fx + fw - 60, y, 44, 22);
+	ZMailEdge(dc, fx + fw - 60, y, 44, 22);
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, fx + fw - 52, y + 7, "Del");
+
+	ZMailAcctLabel(label, sizeof(label), zmail.cur_acct);
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, fx + 16, fy + 62, "%s", label);
+
+	for (i = 0; i < zmail.num_fields; i++)
+	{
+		y = fy + 84 + i * 28;
+		ZMailDrawField(dc, fx + 16, y, 244, zmail.fields[i].label,
+					   zmail.fields[i].buf, zmail.f_focus == i,
+					   zmail.fields[i].secret);
+	}
+
+	y = fy + 84 + zmail.num_fields * 28 + 8;
+	if (zmail.f_focus == zmail.num_fields)
+		dc->color = de_theme.bttn_focus;
+	else
+		dc->color = de_theme.bttn_hot;
+	GrRect(dc, fx + 112, y, 156, 26);
+	ZMailEdge(dc, fx + 112, y, 156, 26);
+	dc->color = de_theme.text;
+	GrPrint(dc, fx + 112 + (156 - 14 * FONT_WIDTH) / 2, y + 9, "Fetch Inbox");
+
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, fx + 16, fy + fh - 44,
+			"imap/pop3, TLS. App password for Gmail.");
+	GrPrint(dc, fx + 16, fy + fh - 32,
+			"Fetch saves the account to disk (plaintext, like SSH keys).");
+	if (zmail.status[0])
+	{
+		if (zmail.status_err)
+			dc->color = zmail.c_red;
+		else
+			dc->color = de_theme.accent_dim;
+		GrPrint(dc, fx + 16, fy + fh - 16, "%s", zmail.status);
+	}
+}
+
+U0 ZMailDrawTopBar(CTask *task, CDC *dc, U8 *title)
+{
+	U8 alabel[ZM_ADDR_LEN + 32], abuf[ZM_ADDR_LEN + 48];
+
+	dc->color = de_theme.panel;
+	GrRect(dc, 0, 0, task->pix_width, 24);
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, 0, 24, task->pix_width, 1);
+	dc->color = de_theme.accent;
+	GrPrint(dc, 8, 8, "%s", title);
+	if (zmail.num_accts > 1)
+	{
+		ZMailAcctLabel(alabel, sizeof(alabel), zmail.cur_acct);
+		StrPrint(abuf, "[%d/%d] %s", zmail.cur_acct + 1, zmail.num_accts,
+				 alabel);
+		dc->color = de_theme.text_dim;
+		GrPrint(dc, 8 + (StrLen(title) + 3) * FONT_WIDTH, 8, "%s", abuf);
+	}
+	if (zmail.job_active)
+	{
+		dc->color = de_theme.chip_hot;
+		GrPrint(dc, task->pix_width - 90, 8, "[working]");
+	}
+}
+
+U0 ZMailDrawList(CTask *task, CDC *dc)
+{
+	CZMailMsg	*m;
+	I64			 x = 8, y = 34, w = task->pix_width - 16;
+	I64			 i, rows, top, botbar = task->pix_height - 22;
+	U8			 buf[256], from[40], subj[180];
+
+	ZMailDrawTopBar(task, dc, "ZMail  -  Inbox");
+
+	rows = (botbar - y) / ZM_ROW_H;
+	top = zmail.list_scroll;
+	if (zmail.sel < top)
+		top = zmail.sel;
+	if (zmail.sel >= top + rows)
+		top = zmail.sel - rows + 1;
+	zmail.list_scroll = top;
+
+	if (!zmail.num_msgs)
+	{
+		dc->color = de_theme.text_dim;
+		if (zmail.job_active)
+			GrPrint(dc, x, y + 8, "%s", zmail.status);
+		else
+			GrPrint(dc, x, y + 8, "Empty. Press R to refresh, C to compose.");
+	}
+
+	for (i = top; i < zmail.num_msgs && i < top + rows; i++)
+	{
+		m = &zmail.msgs[i];
+		if (i == zmail.sel)
+		{
+			dc->color = de_theme.accent_dim;
+			GrRect(dc, x, y, w, ZM_ROW_H);
+		}
+		if (!m->seen)
+		{
+			dc->color = de_theme.accent;
+			GrRect(dc, x + 4, y + ZM_ROW_H / 2 - 2, 4, 4);
+		}
+		MemCopy(from, m->from, MinI64(StrLen(m->from), 24));
+		from[MinI64(StrLen(m->from), 24)] = 0;
+		MemCopy(subj, m->subject, MinI64(StrLen(m->subject), 60));
+		subj[MinI64(StrLen(m->subject), 60)] = 0;
+		StrPrint(buf, "%-24s  %s", from, subj);
+		if (i == zmail.sel)
+			dc->color = de_theme.text;
+		else if (!m->seen)
+			dc->color = de_theme.text;
+		else
+			dc->color = de_theme.text_dim;
+		GrPrint(dc, x + 14, y + 3, "%s", buf);
+		y += ZM_ROW_H;
+	}
+
+	if (zmail.srv_total > 0)
+	{
+		dc->color = de_theme.text_dim;
+		StrPrint(buf, "%d-%d of %d", zmail.page_first, zmail.page_last,
+				 zmail.srv_total);
+		i = task->pix_width - 16 - StrLen(buf) * FONT_WIDTH;
+		if (zmail.job_active)
+			i -= 96;
+		GrPrint(dc, i, 8, "%s", buf);
+	}
+
+	ZMailStatusBar(task, dc, botbar,
+			"ENTER read  PGDN/PGUP page  C compose  R refresh  X delete  "
+			"A account  S setup  ESC quit");
+}
+
+U0 ZMailDrawView(CTask *task, CDC *dc)
+{
+	CZMailMsg	*m;
+	I64			 x = 8, y, w = task->pix_width - 16;
+	I64			 log_y = 30, botbar = task->pix_height - 22;
+	I64			 line_rows, cpl, skip, seg, r, blen;
+	U8			 seg_buf[220], hdr[260];
+	U8			*bp, *nl;
+
+	ZMailDrawTopBar(task, dc, "ZMail  -  Message");
+
+	if (zmail.sel < 0 || zmail.sel >= zmail.num_msgs)
+		return;
+	m = &zmail.msgs[zmail.sel];
+
+	y = log_y;
+	dc->color = de_theme.accent;
+	StrPrint(hdr, "From: %s", m->from);
+	if (StrLen(hdr) * FONT_WIDTH > w)
+		hdr[w / FONT_WIDTH] = 0;
+	GrPrint(dc, x, y, "%s", hdr);
+	y += ZM_ROW_H;
+	dc->color = de_theme.text;
+	StrPrint(hdr, "Subj: %s", m->subject);
+	if (StrLen(hdr) * FONT_WIDTH > w)
+		hdr[w / FONT_WIDTH] = 0;
+	GrPrint(dc, x, y, "%s", hdr);
+	y += ZM_ROW_H;
+	dc->color = de_theme.text_dim;
+	StrPrint(hdr, "Date: %s", m->date);
+	GrPrint(dc, x, y, "%s", hdr);
+	y += ZM_ROW_H + 2;
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, x, y, w, 1);
+	y += 6;
+
+	if (!m->body)
+	{
+		dc->color = de_theme.text_dim;
+		if (zmail.job_active)
+			GrPrint(dc, x, y, "Loading message...");
+		else
+			GrPrint(dc, x, y, "Body not loaded. Press ENTER again.");
+	}
+
+	cpl = w / FONT_WIDTH;
+	skip = zmail.view_scroll;
+	bp = m->body;
+	dc->color = de_theme.text;
+	while (bp && *bp && y + FONT_HEIGHT < botbar)
+	{
+		nl = StrFirstOcc(bp, "\n");
+		if (nl)
+			blen = nl - bp;
+		else
+			blen = StrLen(bp);
+		while (blen > 0 && bp[blen - 1] == '\r')
+			blen--;
+		line_rows = 1;
+		if (blen > cpl)
+			line_rows = (blen + cpl - 1) / cpl;
+		for (r = 0; r < line_rows && y + FONT_HEIGHT < botbar; r++)
+		{
+			if (skip)
+				skip--;
+			else
+			{
+				seg = blen - r * cpl;
+				if (seg > cpl)
+					seg = cpl;
+				if (seg < 0)
+					seg = 0;
+				MemCopy(seg_buf, bp + r * cpl, seg);
+				seg_buf[seg] = 0;
+				GrPrint(dc, x, y, "%s", seg_buf);
+				y += ZM_ROW_H;
+			}
+		}
+		if (!nl)
+			break;
+		bp = nl + 1;
+	}
+
+	dc->color = de_theme.panel;
+	GrRect(dc, 0, botbar, task->pix_width, 22);
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, 0, botbar, task->pix_width, 1);
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, 8, botbar + 7,
+			"UP/DN scroll  wheel  R reply  X delete  BKSP/ESC back");
+}
+
+U0 ZMailDrawCompose(CTask *task, CDC *dc)
+{
+	I64	 x = 8, w = task->pix_width - 16, y;
+	I64	 botbar = task->pix_height - 22, ba_y;
+	I64	 cpl, blen, seg, r, line_rows;
+	U8	 seg_buf[220];
+	U8	*bp, *nl;
+
+	ZMailDrawTopBar(task, dc, "ZMail  -  Compose");
+
+	y = 34;
+	ZMailDrawField(dc, x, y, w - 100, "To:", zmail.c_to, zmail.c_focus == 0, FALSE);
+	y += 28;
+	ZMailDrawField(dc, x, y, w - 100, "Subject:", zmail.c_subj,
+				   zmail.c_focus == 1, FALSE);
+	y += 30;
+
+	dc->color = de_theme.win_bg;
+	GrRect(dc, x, y, w, botbar - y - 4);
+	if (zmail.c_focus == 2)
+		dc->color = de_theme.accent;
+	else
+		dc->color = de_theme.bttn;
+	ZMailEdge(dc, x, y, w, botbar - y - 4);
+
+	cpl = (w - 12) / FONT_WIDTH;
+	bp = zmail.c_body;
+	ba_y = y + 6;
+	dc->color = de_theme.text;
+	while (bp && *bp && ba_y + FONT_HEIGHT < botbar - 8)
+	{
+		nl = StrFirstOcc(bp, "\n");
+		if (nl)
+			blen = nl - bp;
+		else
+			blen = StrLen(bp);
+		line_rows = 1;
+		if (blen > cpl)
+			line_rows = (blen + cpl - 1) / cpl;
+		for (r = 0; r < line_rows && ba_y + FONT_HEIGHT < botbar - 8; r++)
+		{
+			seg = blen - r * cpl;
+			if (seg > cpl)
+				seg = cpl;
+			if (seg < 0)
+				seg = 0;
+			MemCopy(seg_buf, bp + r * cpl, seg);
+			seg_buf[seg] = 0;
+			GrPrint(dc, x + 6, ba_y, "%s", seg_buf);
+			ba_y += ZM_ROW_H;
+		}
+		if (!nl)
+			break;
+		bp = nl + 1;
+	}
+	if (zmail.c_focus == 2 && Blink && ba_y + FONT_HEIGHT < botbar - 8)
+	{
+		dc->color = de_theme.accent;
+		GrRect(dc, x + 6, ba_y - ZM_ROW_H + FONT_HEIGHT, FONT_WIDTH, 2);
+	}
+
+	ZMailStatusBar(task, dc, botbar,
+			"TAB field  Ctrl+A/C/X/V edit  Ctrl+ENTER send  ESC cancel");
+}
+
+U0 ZMailDrawIt(CTask *task, CDC *dc)
+{
+	dc->color = de_theme.win_bg;
+	GrRect(dc, 0, 0, task->pix_width, task->pix_height);
+	switch (zmail.scr)
+	{
+		case ZM_SCR_SETUP:		ZMailDrawSetup(task, dc);	break;
+		case ZM_SCR_LIST:		ZMailDrawList(task, dc);	break;
+		case ZM_SCR_VIEW:		ZMailDrawView(task, dc);	break;
+		case ZM_SCR_COMPOSE:	ZMailDrawCompose(task, dc);	break;
+	}
+}
+
+
+U0 ZMailConfigSave()
+{//Write every account to C:/Home/Config/ZMail.CFG as "account" blocks. Values
+//are rest-of-line, so spaces are fine. Passwords are plaintext, as with the
+//SSH private key seed.
+	U8			*buf;
+	CZMailAcct	*a;
+	I64			 i, n;
+
+	if (!DriveIsWritable)
+		return;
+	ZMailAcctStore;
+	DirMake(ZM_CFG_DIR);
+	buf = MAlloc(ZM_MAX_ACCTS * 1024 + 256, zmail.ui_task);
+	StrPrint(buf, "# ZMail accounts - plaintext, edit freely, reloaded on "
+			 "launch.\n# One \"account\" line starts each block.\n");
+	n = StrLen(buf);
+	for (i = 0; i < zmail.num_accts; i++)
+	{
+		a = &zmail.accts[i];
+		StrPrint(buf + n,
+				 "account\n"
+				 "proto %s\n"
+				 "recvhost %s\n"
+				 "recvport %s\n"
+				 "smtphost %s\n"
+				 "smtpport %s\n"
+				 "email %s\n"
+				 "user %s\n"
+				 "pass %s\n"
+				 "name %s\n",
+				 a->proto, a->recv_host, a->recv_port_s, a->smtp_host,
+				 a->smtp_port_s, a->email, a->user, a->pass, a->from_name);
+		n = StrLen(buf);
+	}
+	FileWrite(ZM_CFG_PATH, buf, n);
+	Free(buf);
+}
+
+Bool ZMailCfgKey(U8 *line, U8 *key, U8 *out, I64 max)
+{//"key value to end of line" -> out. FALSE when the line is not this key.
+	I64 kl = StrLen(key), n = 0;
+
+	if (StrNCompare(line, key, kl) || line[kl] != ' ')
+		return FALSE;
+	line += kl + 1;
+	while (*line && *line != '\n' && *line != '\r' && n < max - 1)
+		out[n++] = *line++;
+	out[n] = 0;
+
+	return TRUE;
+}
+
+U0 ZMailConfigLoad()
+{//Parse the account blocks. A file without any "account" line is the old
+//single-account format and lands in slot 0.
+	U8			*body, *line, *next;
+	CZMailAcct	*a = NULL;
+	I64			 size;
+
+	body = FileRead(ZM_CFG_PATH, &size);
+	if (!body)
+		return;
+	zmail.num_accts = 0;
+	line = body;
+	while (line && *line)
+	{
+		next = StrFirstOcc(line, "\n");
+		if (next)
+			*next = 0;
+		if (!StrNCompare(line, "account", 7) && zmail.num_accts < ZM_MAX_ACCTS)
+		{
+			a = &zmail.accts[zmail.num_accts++];
+			MemSet(a, 0, sizeof(CZMailAcct));
+		}
+		else if (a)
+		{
+			ZMailCfgKey(line, "proto",    a->proto,       sizeof(CZMailAcct.proto));
+			ZMailCfgKey(line, "recvhost", a->recv_host,   sizeof(CZMailAcct.recv_host));
+			ZMailCfgKey(line, "recvport", a->recv_port_s, sizeof(CZMailAcct.recv_port_s));
+			ZMailCfgKey(line, "smtphost", a->smtp_host,   sizeof(CZMailAcct.smtp_host));
+			ZMailCfgKey(line, "smtpport", a->smtp_port_s, sizeof(CZMailAcct.smtp_port_s));
+			ZMailCfgKey(line, "email",    a->email,       sizeof(CZMailAcct.email));
+			ZMailCfgKey(line, "user",     a->user,        sizeof(CZMailAcct.user));
+			ZMailCfgKey(line, "pass",     a->pass,        sizeof(CZMailAcct.pass));
+			ZMailCfgKey(line, "name",     a->from_name,   sizeof(CZMailAcct.from_name));
+		}
+		if (!next)
+			break;
+		*next = '\n';
+		line = next + 1;
+	}
+	if (!zmail.num_accts)
+	{//Pre-blocks config: one account, flat keys.
+		a = &zmail.accts[0];
+		MemSet(a, 0, sizeof(CZMailAcct));
+		DEConfigValStr(body, "proto",    a->proto,       sizeof(CZMailAcct.proto));
+		DEConfigValStr(body, "recvhost", a->recv_host,   sizeof(CZMailAcct.recv_host));
+		DEConfigValStr(body, "recvport", a->recv_port_s, sizeof(CZMailAcct.recv_port_s));
+		DEConfigValStr(body, "smtphost", a->smtp_host,   sizeof(CZMailAcct.smtp_host));
+		DEConfigValStr(body, "smtpport", a->smtp_port_s, sizeof(CZMailAcct.smtp_port_s));
+		DEConfigValStr(body, "email",    a->email,       sizeof(CZMailAcct.email));
+		DEConfigValStr(body, "user",     a->user,        sizeof(CZMailAcct.user));
+		DEConfigValStr(body, "pass",     a->pass,        sizeof(CZMailAcct.pass));
+		DEConfigValStr(body, "name",     a->from_name,   sizeof(CZMailAcct.from_name));
+		if (a->recv_host[0])
+			zmail.num_accts = 1;
+	}
+	Free(body);
+	if (zmail.num_accts)
+		ZMailAcctLoad(0);
+}
+
+U0 ZMailStartFetch()
+{
+	if (!zmail.recv_host[0] || !zmail.user[0])
+	{
+		ZMailStatus("Server + user required.", TRUE);
+		return;
+	}
+	ZMailConfigSave;		//Persist the account so it survives a reboot.
+	ZMailAcctDir;
+	zmail.scr = ZM_SCR_LIST;
+	zmail.page_req = 0;
+	zmail.sel = 0;
+	if (!ZMailPostJob(ZM_JOB_FETCH))
+		ZMailStatus("Busy...", FALSE);
+}
+
+U0 ZMailAcctSwitch(I64 i)
+{//Park the live fields in their slot, bring up another account and refetch.
+//Each account has its own cache directory, so the list redraws from disk
+//before the network answers.
+	if (i < 0 || i >= zmail.num_accts || i == zmail.cur_acct)
+		return;
+	if (zmail.job_active)
+	{
+		ZMailStatus("Busy...", FALSE);
+		return;
+	}
+	ZMailAcctStore;
+	ZMailAcctLoad(i);
+	ZMailFreeMsgs;
+	zmail.srv_total  = 0;
+	zmail.page_first = 0;
+	zmail.page_last  = 0;
+	zmail.page_req   = 0;
+	zmail.list_scroll = 0;
+	zmail.view_scroll = 0;
+	ZMailAcctDir;
+	ZMailIndexLoad;
+	zmail.status[0] = 0;
+	if (zmail.recv_host[0] && zmail.user[0] && zmail.pass[0])
+		ZMailPostJob(ZM_JOB_FETCH);
+}
+
+U0 ZMailAcctNew()
+{
+	CZMailAcct *a;
+
+	if (zmail.num_accts >= ZM_MAX_ACCTS)
+	{
+		ZMailStatus("Account limit reached.", TRUE);
+		return;
+	}
+	ZMailAcctStore;
+	a = &zmail.accts[zmail.num_accts];
+	MemSet(a, 0, sizeof(CZMailAcct));
+	StrCopy(a->proto, "imap");
+	StrCopy(a->recv_port_s, "993");
+	StrCopy(a->smtp_port_s, "465");
+	zmail.num_accts++;
+	ZMailAcctLoad(zmail.num_accts - 1);
+	ZMailFreeMsgs;
+	zmail.srv_total = 0;
+	zmail.scr = ZM_SCR_SETUP;
+	zmail.f_focus = 1;
+}
+
+U0 ZMailAcctDel()
+{//Drop the current account. The cache directory is left alone.
+	I64 i;
+
+	if (zmail.num_accts <= 1)
+	{
+		ZMailStatus("Last account; edit it instead.", TRUE);
+		return;
+	}
+	for (i = zmail.cur_acct; i < zmail.num_accts - 1; i++)
+		MemCopy(&zmail.accts[i], &zmail.accts[i + 1], sizeof(CZMailAcct));
+	zmail.num_accts--;
+	if (zmail.cur_acct >= zmail.num_accts)
+		zmail.cur_acct = zmail.num_accts - 1;
+	i = zmail.cur_acct;
+	zmail.cur_acct = -1;		//Force the reload below.
+	ZMailAcctLoad(i);
+	ZMailConfigSave;
+	ZMailFreeMsgs;
+	zmail.srv_total = 0;
+	ZMailAcctDir;
+	ZMailIndexLoad;
+}
+
+U0 ZMailSetupClick(I64 mx, I64 my)
+{//Click-to-focus a setup field, or hit the Fetch button. Geometry matches
+//ZMailDrawSetup (fw/fh + field/button layout).
+	I64	 fw = 380, fh = 428;
+	I64	 fx = (Fs->pix_width - fw) / 2, fy = (Fs->pix_height - fh) / 2;
+	I64	 i, y, by;
+
+	y = fy + 36;
+	if (y <= my < y + 22)
+	{
+		for (i = 0; i < zmail.num_accts; i++)
+			if (fx + 16 + i * 30 <= mx < fx + 42 + i * 30)
+			{
+				ZMailAcctStore;
+				ZMailAcctLoad(i);
+				ZMailAcctDir;
+				return;
+			}
+		i = fx + 16 + zmail.num_accts * 30;
+		if (i <= mx < i + 26)
+		{
+			ZMailAcctNew;
+			return;
+		}
+		if (fx + fw - 60 <= mx < fx + fw - 16)
+		{
+			ZMailAcctDel;
+			return;
+		}
+	}
+	for (i = 0; i < zmail.num_fields; i++)
+	{
+		y = fy + 84 + i * 28;
+		if (fx + 16 <= mx < fx + 356 && y - 2 <= my < y + 20)
+		{
+			zmail.f_focus = i;
+			return;
+		}
+	}
+	by = fy + 84 + zmail.num_fields * 28 + 8;
+	if (fx + 112 <= mx < fx + 268 && by <= my < by + 26)
+	{
+		zmail.f_focus = zmail.num_fields;
+		ZMailStartFetch;
+	}
+}
+
+U0 ZMailSetupKey(I64 ch, I64 sc)
+{
+	CZMailField	*f;
+	U8			*pb;
+	I64			 len, i, plen;
+
+	if (ch == CH_ESC || ch == CH_SHIFT_ESC)
+	{
+		zmail.quit = TRUE;
+		return;
+	}
+	if (ch == '\t' || (!ch && sc == SC_CURSOR_DOWN))
+	{
+		zmail.f_focus = (zmail.f_focus + 1) % (zmail.num_fields + 1);
+		return;
+	}
+	if (!ch && sc == SC_CURSOR_UP)
+	{
+		zmail.f_focus = (zmail.f_focus + zmail.num_fields) % (zmail.num_fields + 1);
+		return;
+	}
+	if (ch == '\n')
+	{
+		if (zmail.f_focus == zmail.num_fields)
+			ZMailStartFetch;
+		else
+			zmail.f_focus++;
+		return;
+	}
+	if (zmail.f_focus >= zmail.num_fields)
+		return;
+	f = &zmail.fields[zmail.f_focus];
+	len = StrLen(f->buf);
+
+	if (ch == CH_CTRLA)			//Ctrl+A: clear the field (select-all + replace).
+	{
+		f->buf[0] = 0;
+		return;
+	}
+	if (ch == CH_CTRLC)			//Ctrl+C: copy field to the OS clipboard.
+	{
+		ZMailClipSet(f->buf);
+		ZMailStatus("Copied.", FALSE);
+		return;
+	}
+	if (ch == CH_CTRLX)			//Ctrl+X: cut.
+	{
+		ZMailClipSet(f->buf);
+		f->buf[0] = 0;
+		return;
+	}
+	if (ch == CH_CTRLV)			//Ctrl+V: paste one line (no newlines in fields).
+	{
+		pb = MAlloc(ZM_COMPOSE_BODY + 2, zmail.ui_task);
+		plen = ZMailClipGet(pb, ZM_COMPOSE_BODY);
+		for (i = 0; i < plen && len < f->max - 1; i++)
+			if (' ' <= pb[i] < 0x7F)
+			{
+				f->buf[len++] = pb[i];
+				f->buf[len] = 0;
+			}
+		Free(pb);
+		return;
+	}
+
+	if (ch == CH_BACKSPACE)
+	{
+		if (len)
+			f->buf[len - 1] = 0;
+	}
+	else if (' ' <= ch < 0x7F && len < f->max - 1)
+	{
+		f->buf[len] = ch;
+		f->buf[len + 1] = 0;
+	}
+}
+
+U0 ZMailOpenSel()
+{
+	CZMailMsg *m;
+
+	if (zmail.sel < 0 || zmail.sel >= zmail.num_msgs)
+		return;
+	m = &zmail.msgs[zmail.sel];
+	//Headers arrive first; the body is fetched on open and cached on disk.
+	//The IMAP job also sets \Seen, in the same session.
+	if (!m->body)
+	{
+		zmail.body_slot = zmail.sel;
+		zmail.body_uid  = m->uid;
+		if (ZMailIsPop)
+			zmail.body_uid = m->svr_num;
+		if (!ZMailPostJob(ZM_JOB_BODY))
+			ZMailStatus("Busy...", FALSE);
+	}
+	else if (!m->seen && !ZMailIsPop)
+	{//Body was already in hand, so the flag never went out with a fetch.
+		zmail.target_uid = m->uid;
+		ZMailPostJob(ZM_JOB_SEEN);
+	}
+	m->seen = TRUE;
+	zmail.view_scroll = 0;
+	zmail.scr = ZM_SCR_VIEW;
+}
+
+U0 ZMailComposeNew()
+{
+	zmail.scr = ZM_SCR_COMPOSE;
+	zmail.c_focus = 0;
+	zmail.status[0] = 0;
+}
+
+U0 ZMailReply()
+{
+	CZMailMsg	*m;
+	U8			*p, *lt, *gt;
+	I64			 i;
+
+	if (zmail.sel < 0 || zmail.sel >= zmail.num_msgs)
+		return;
+	m = &zmail.msgs[zmail.sel];
+	//Pull a bare address out of "Name <addr>" if present.
+	lt = StrFirstOcc(m->from, "<");
+	if (lt)
+	{
+		gt = StrFirstOcc(lt, ">");
+		StrCopy(zmail.c_to, lt + 1);
+		p = StrFirstOcc(zmail.c_to, ">");
+		if (p)
+			*p = 0;
+	}
+	else
+		StrCopy(zmail.c_to, m->from);
+	if (StrNICompare(m->subject, "Re:", 3))
+	{//"Re: " + a full-length subject overruns the field by four bytes.
+		StrCopy(zmail.c_subj, "Re: ");
+		i = MinI64(StrLen(m->subject), ZM_SUBJ_LEN - 5);
+		MemCopy(zmail.c_subj + 4, m->subject, i);
+		zmail.c_subj[4 + i] = 0;
+	}
+	else
+		StrCopy(zmail.c_subj, m->subject);
+	zmail.c_body[0] = 0;
+	zmail.c_body_len = 0;
+	ZMailComposeNew;
+}
+
+U0 ZMailDeleteSel()
+{
+	if (zmail.sel < 0 || zmail.sel >= zmail.num_msgs)
+		return;
+	if (zmail.job_active)
+		return;
+	zmail.del_num = zmail.msgs[zmail.sel].svr_num;	//POP sequence.
+	zmail.target_uid = zmail.msgs[zmail.sel].uid;	//IMAP UID.
+	zmail.scr = ZM_SCR_LIST;
+	ZMailPostJob(ZM_JOB_DELETE);
+}
+
+U0 ZMailPageTo(I64 newest)
+{//Fetch the page whose newest message is this server sequence. 0 = the newest
+//page. Clamped to the mailbox.
+	if (zmail.job_active)
+		return;
+	if (newest > zmail.srv_total)
+		newest = 0;
+	if (0 < newest < ZM_MAX_MSGS)
+		newest = ZM_MAX_MSGS;
+	zmail.page_req = newest;
+	zmail.sel = 0;
+	zmail.list_scroll = 0;
+	if (ZMailPostJob(ZM_JOB_FETCH))
+		ZMailStatus("Fetching...", FALSE);
+}
+
+U0 ZMailListKey(I64 ch, I64 sc)
+{
+	if (ch == CH_ESC || ch == CH_SHIFT_ESC)
+		zmail.quit = TRUE;
+	else if (ch == '\n')
+		ZMailOpenSel;
+	else if (ch == 'c' || ch == 'C')
+		ZMailComposeNew;
+	else if (ch == 'r' || ch == 'R')
+	{
+		zmail.page_req = 0;
+		if (ZMailPostJob(ZM_JOB_FETCH))
+			ZMailStatus("Refreshing...", FALSE);
+	}
+	else if (ch == 'x' || ch == 'X')
+		ZMailDeleteSel;
+	else if (ch == 's' || ch == 'S')
+		zmail.scr = ZM_SCR_SETUP;
+	else if ((ch == 'a' || ch == 'A') && zmail.num_accts > 1)
+		ZMailAcctSwitch((zmail.cur_acct + 1) % zmail.num_accts);
+	else if (!ch)
+	{
+		if (sc == SC_CURSOR_UP && zmail.sel > 0)
+			zmail.sel--;
+		else if (sc == SC_CURSOR_DOWN && zmail.sel < zmail.num_msgs - 1)
+			zmail.sel++;
+		else if (sc == SC_HOME)
+			zmail.sel = 0;
+		else if (sc == SC_END)
+			zmail.sel = zmail.num_msgs - 1;
+		else if (sc == SC_PAGE_DOWN && zmail.page_first > 1)
+			ZMailPageTo(zmail.page_first - 1);		//Older.
+		else if (sc == SC_PAGE_UP && zmail.page_last < zmail.srv_total)
+			ZMailPageTo(zmail.page_last + ZM_MAX_MSGS);
+	}
+}
+
+U0 ZMailViewKey(I64 ch, I64 sc)
+{
+	CZMailMsg *m;
+	I64 maxs;
+
+	if (ch == CH_ESC || ch == CH_SHIFT_ESC || ch == CH_BACKSPACE)
+		zmail.scr = ZM_SCR_LIST;
+	else if (ch == 'r' || ch == 'R')
+		ZMailReply;
+	else if (ch == 'x' || ch == 'X')
+		ZMailDeleteSel;
+	else if (!ch)
+	{
+		m = &zmail.msgs[zmail.sel];
+		maxs = m->body_len / 40 + 40;	//Loose upper bound on wrapped rows.
+		if (sc == SC_CURSOR_UP)
+			zmail.view_scroll = MaxI64(0, zmail.view_scroll - 1);
+		else if (sc == SC_CURSOR_DOWN)
+			zmail.view_scroll = MinI64(maxs, zmail.view_scroll + 1);
+		else if (sc == SC_PAGE_UP)
+			zmail.view_scroll = MaxI64(0, zmail.view_scroll - 12);
+		else if (sc == SC_PAGE_DOWN)
+			zmail.view_scroll = MinI64(maxs, zmail.view_scroll + 12);
+		else if (sc == SC_HOME)
+			zmail.view_scroll = 0;
+	}
+}
+
+U0 ZMailComposeKey(I64 ch, I64 sc)
+{//Ctrl shortcuts match the browser URL bar: Ctrl+A select-all, Ctrl+C copy,
+//Ctrl+X cut, Ctrl+V paste (all via the OS clipboard).
+	U8	*buf, *pb;
+	I64	 max, len, i, plen;
+
+	if (ch == CH_ESC || ch == CH_SHIFT_ESC)
+	{
+		zmail.scr = ZM_SCR_LIST;
+		zmail.c_selall = FALSE;
+		return;
+	}
+	if (ch == '\t' || (!ch && sc == SC_CURSOR_DOWN))
+	{
+		zmail.c_focus = (zmail.c_focus + 1) % 3;
+		zmail.c_selall = FALSE;
+		return;
+	}
+	if (!ch && sc == SC_CURSOR_UP)
+	{
+		zmail.c_focus = (zmail.c_focus + 2) % 3;
+		zmail.c_selall = FALSE;
+		return;
+	}
+
+	if (zmail.c_focus == 0)		{ buf = zmail.c_to;   max = ZM_ADDR_LEN; }
+	else if (zmail.c_focus == 1)	{ buf = zmail.c_subj; max = ZM_SUBJ_LEN; }
+	else						{ buf = zmail.c_body; max = ZM_COMPOSE_BODY; }
+	len = StrLen(buf);
+
+	if (ch == CH_CTRLA)			//Ctrl+A: select all (next edit replaces).
+	{
+		zmail.c_selall = TRUE;
+		ZMailStatus("Select all - type or paste to replace, Ctrl+C to copy.", FALSE);
+		return;
+	}
+	if (ch == CH_CTRLC)			//Ctrl+C: copy the field to the OS clipboard.
+	{
+		ZMailClipSet(buf);
+		ZMailStatus("Copied to clipboard.", FALSE);
+		return;
+	}
+	if (ch == CH_CTRLX)			//Ctrl+X: cut.
+	{
+		ZMailClipSet(buf);
+		buf[0] = 0;
+		zmail.c_selall = FALSE;
+		ZMailStatus("Cut to clipboard.", FALSE);
+		return;
+	}
+	if (ch == CH_CTRLV)			//Ctrl+V: paste from the OS clipboard.
+	{
+		if (zmail.c_selall)
+		{
+			buf[0] = 0;
+			len = 0;
+			zmail.c_selall = FALSE;
+		}
+		pb = MAlloc(ZM_COMPOSE_BODY + 2, zmail.ui_task);
+		plen = ZMailClipGet(pb, ZM_COMPOSE_BODY);
+		for (i = 0; i < plen && len < max - 1; i++)
+		{
+			if (pb[i] == '\n' && zmail.c_focus == 2)
+				buf[len++] = '\n';			//Newlines only in the body.
+			else if (' ' <= pb[i] < 0x7F)
+				buf[len++] = pb[i];
+		}
+		buf[len] = 0;
+		Free(pb);
+		return;
+	}
+
+	//A pending select-all: the first real edit wipes the field.
+	if (zmail.c_selall &&
+		(ch == CH_BACKSPACE || ch == '\n' || ' ' <= ch < 0x7F))
+	{
+		buf[0] = 0;
+		len = 0;
+		zmail.c_selall = FALSE;
+	}
+
+	if (ch == CH_BACKSPACE)
+	{
+		if (len)
+			buf[len - 1] = 0;
+	}
+	else if (ch == '\n')
+	{
+		if (zmail.c_focus == 2)
+		{//Newline in the body.
+			if (len < max - 1)
+			{
+				buf[len] = '\n';
+				buf[len + 1] = 0;
+			}
+		}
+		else
+			zmail.c_focus++;	//Enter moves to the next field.
+	}
+	else if (' ' <= ch < 0x7F && len < max - 1)
+	{
+		buf[len] = ch;
+		buf[len + 1] = 0;
+	}
+}
+
+U0 ZMailComposeClick(I64 my)
+{//Click To / Subject / Body to focus it. Geometry matches ZMailDrawCompose.
+	I64 botbar = Fs->pix_height - 22;
+
+	if (34 <= my < 54)
+		zmail.c_focus = 0;			//To.
+	else if (62 <= my < 82)
+		zmail.c_focus = 1;			//Subject.
+	else if (92 <= my < botbar - 4)
+		zmail.c_focus = 2;			//Body.
+}
+
+U0 ZMailMenuPush()
+{//Native ZealOS pull-down menu. Appears when the mouse reaches the top of the
+//screen, or on the GUI key. Entry names are lexed as identifiers, so no spaces.
+	MenuPush("Mail {"
+			 "  Refresh(MESSAGE_CMD,ZMM_REFRESH);"
+			 "  Reply(MESSAGE_CMD,ZMM_REPLY);"
+			 "  Send(MESSAGE_CMD,ZMM_SEND);"
+			 "  Delete(MESSAGE_CMD,ZMM_DELETE);"
+			 "  Exit(MESSAGE_CMD,ZMM_EXIT);"
+			 "}"
+			 "Message {"
+			 "  Open(MESSAGE_CMD,ZMM_OPEN);"
+			 "  Previous(MESSAGE_CMD,ZMM_PREV);"
+			 "  Next(MESSAGE_CMD,ZMM_NEXT);"
+			 "}"
+			 "Edit {"
+			 "  Copy(MESSAGE_CMD,ZMM_COPY);"
+			 "  Cut(MESSAGE_CMD,ZMM_CUT);"
+			 "  Paste(MESSAGE_CMD,ZMM_PASTE);"
+			 "}"
+			 "View {"
+			 "  Inbox(MESSAGE_CMD,ZMM_SCR_LIST);"
+			 "  Reading(MESSAGE_CMD,ZMM_SCR_READ);"
+			 "  Compose(MESSAGE_CMD,ZMM_SCR_COMPOSE);"
+			 "}"
+			 "Account {"
+			 "  Setup(MESSAGE_CMD,ZMM_SCR_SETUP);"
+			 "  IMAP(MESSAGE_CMD,ZMM_IMAP);"
+			 "  POP3(MESSAGE_CMD,ZMM_POP3);"
+			 "  Save(MESSAGE_CMD,ZMM_SAVE_ACCT);"
+			 "}");
+	LBtr(&Fs->win_inhibit, WIf_FOCUS_TASK_MENU);
+}
+
+U0 ZMailMenuCheck(U8 *path, Bool on)
+{
+	CMenuEntry *e = MenuEntryFind(Fs->cur_menu, path);
+
+	if (e)
+		e->checked = on;
+}
+
+U0 ZMailMenuSync()
+{//Mirror the screen and the protocol into the check marks. Runs every frame.
+	ZMailMenuCheck("View/Inbox",     zmail.scr == ZM_SCR_LIST);
+	ZMailMenuCheck("View/Reading",   zmail.scr == ZM_SCR_VIEW);
+	ZMailMenuCheck("View/Compose",   zmail.scr == ZM_SCR_COMPOSE);
+	ZMailMenuCheck("Account/Setup",  zmail.scr == ZM_SCR_SETUP);
+	ZMailMenuCheck("Account/IMAP",   !ZMailIsPop());
+	ZMailMenuCheck("Account/POP3",   ZMailIsPop());
+}
+
+U0 ZMailMenuProto(U8 *proto, I64 old_port, I64 new_port)
+{//Switch the receive protocol. The port is a separate setup field, so move it
+//too when it still holds the previous protocol's default; a hand-entered port
+//is left alone.
+	StrCopy(zmail.proto, proto);
+	if (Str2I64(zmail.recv_port_s) == old_port)
+		StrPrint(zmail.recv_port_s, "%d", new_port);
+	ZMailStatusF(FALSE, "Protocol %s, port %s. Refresh to reconnect.",
+				 zmail.proto, zmail.recv_port_s);
+}
+
+U0 ZMailMenuEdit(I64 ch)
+{//Clipboard commands route to the key handler of whichever text screen has
+//focus. The list and read screens have no editable field.
+	if (zmail.scr == ZM_SCR_COMPOSE)
+		ZMailComposeKey(ch, 0);
+	else if (zmail.scr == ZM_SCR_SETUP)
+		ZMailSetupKey(ch, 0);
+}
+
+U0 ZMailMenuCmd(I64 cmd)
+{
+	switch (cmd)
+	{
+		case ZMM_REFRESH:
+			//From the setup form this validates and saves the account first.
+			if (zmail.scr == ZM_SCR_SETUP)
+				ZMailStartFetch;
+			else if (ZMailPostJob(ZM_JOB_FETCH))
+				ZMailStatus("Refreshing...", FALSE);
+			break;
+		case ZMM_REPLY:		ZMailReply;					break;
+		case ZMM_SEND:
+			//Send is valid only from the compose form. Posts a job; the
+			//worker task does the blocking SMTP.
+			if (zmail.scr == ZM_SCR_COMPOSE && ZMailPostJob(ZM_JOB_SEND))
+				ZMailStatus("Queued...", FALSE);
+			break;
+		case ZMM_DELETE:	ZMailDeleteSel;				break;
+		case ZMM_EXIT:		zmail.quit = TRUE;			break;
+		case ZMM_OPEN:		ZMailOpenSel;				break;
+		case ZMM_PREV:
+			ZMailListKey(0, SC_CURSOR_UP);
+			if (zmail.scr == ZM_SCR_VIEW)
+				ZMailOpenSel;		//Reset the scroll and mark the new one seen.
+			break;
+		case ZMM_NEXT:
+			ZMailListKey(0, SC_CURSOR_DOWN);
+			if (zmail.scr == ZM_SCR_VIEW)
+				ZMailOpenSel;
+			break;
+		case ZMM_COPY:		ZMailMenuEdit(CH_CTRLC);	break;
+		case ZMM_CUT:		ZMailMenuEdit(CH_CTRLX);	break;
+		case ZMM_PASTE:		ZMailMenuEdit(CH_CTRLV);	break;
+		case ZMM_SCR_LIST:	zmail.scr = ZM_SCR_LIST;	break;
+		case ZMM_SCR_READ:	ZMailOpenSel;				break;
+		case ZMM_SCR_COMPOSE: ZMailComposeNew;			break;
+		case ZMM_SCR_SETUP:	zmail.scr = ZM_SCR_SETUP;	break;
+		case ZMM_IMAP:
+			ZMailMenuProto("imap", ZM_POP_PORT, ZM_IMAP_PORT);
+			break;
+		case ZMM_POP3:
+			ZMailMenuProto("pop3", ZM_IMAP_PORT, ZM_POP_PORT);
+			break;
+		case ZMM_SAVE_ACCT:
+			ZMailConfigSave;
+			ZMailStatus("Account saved.", FALSE);
+			break;
+	}
+}
+
+U0 ZMailPoll()
+{
+	I64 m, a1, a2, ch, sc, row, dz;
+
+	while (m = MessageScan(&a1, &a2))
+	{
+		switch (m)
+		{
+			case MESSAGE_KEY_DOWN:
+				ch = a1;
+				sc = a2.u8[0];
+				//CTRL-ENTER from compose = send.
+				if (zmail.scr == ZM_SCR_COMPOSE && (a2 & SCF_CTRL) && sc == SC_ENTER)
+				{
+					if (ZMailPostJob(ZM_JOB_SEND))
+						ZMailStatus("Queued...", FALSE);
+					break;
+				}
+				switch (zmail.scr)
+				{
+					case ZM_SCR_SETUP:		ZMailSetupKey(ch, sc);	break;
+					case ZM_SCR_LIST:		ZMailListKey(ch, sc);	break;
+					case ZM_SCR_VIEW:		ZMailViewKey(ch, sc);	break;
+					case ZM_SCR_COMPOSE:	ZMailComposeKey(ch, sc);break;
+				}
+				break;
+			case MESSAGE_MS_L_DOWN:
+				switch (zmail.scr)
+				{
+					case ZM_SCR_SETUP:
+						ZMailSetupClick(a1, a2);
+						break;
+					case ZM_SCR_LIST:
+						//Click a row to select; click the selected row to open.
+						row = (a2 - 34) / ZM_ROW_H + zmail.list_scroll;
+						if (a2 >= 34 && row >= 0 && row < zmail.num_msgs)
+						{
+							if (row == zmail.sel)
+								ZMailOpenSel;
+							else
+								zmail.sel = row;
+						}
+						break;
+					case ZM_SCR_VIEW:
+						//Click anywhere below the header goes back to the list.
+						if (a2 > Fs->pix_height - 22)
+							zmail.scr = ZM_SCR_LIST;
+						break;
+					case ZM_SCR_COMPOSE:
+						ZMailComposeClick(a2);
+						break;
+				}
+				break;
+			case MESSAGE_CMD:
+				ZMailMenuCmd(a1);
+				break;
+		}
+	}
+
+	//Wheel scroll (no queued message for the wheel; watch pos.z directly).
+	dz = mouse.pos.z - zmail.last_z;
+	zmail.last_z = mouse.pos.z;
+	if (dz && Fs == sys_focus_task)
+	{
+		if (zmail.scr == ZM_SCR_VIEW)
+			zmail.view_scroll = MaxI64(0, zmail.view_scroll - dz * 3);
+		else if (zmail.scr == ZM_SCR_LIST && zmail.num_msgs)
+			zmail.sel = ClampI64(zmail.sel - dz, 0, zmail.num_msgs - 1);
+	}
+}
+
+/***** setup + main *****/
+
+U0 ZMailFieldsInit()
+{
+	I64 i = 0;
+
+	zmail.fields[i].buf = zmail.proto;       zmail.fields[i].max = sizeof(zmail.proto);       zmail.fields[i].label = "Protocol"; i++;
+	zmail.fields[i].buf = zmail.recv_host;   zmail.fields[i].max = sizeof(zmail.recv_host);   zmail.fields[i].label = "Recv host"; i++;
+	zmail.fields[i].buf = zmail.recv_port_s; zmail.fields[i].max = sizeof(zmail.recv_port_s); zmail.fields[i].label = "Recv port"; i++;
+	zmail.fields[i].buf = zmail.smtp_host;  zmail.fields[i].max = sizeof(zmail.smtp_host);  zmail.fields[i].label = "SMTP host"; i++;
+	zmail.fields[i].buf = zmail.smtp_port_s;zmail.fields[i].max = sizeof(zmail.smtp_port_s);zmail.fields[i].label = "SMTP port"; i++;
+	zmail.fields[i].buf = zmail.email;      zmail.fields[i].max = sizeof(zmail.email);      zmail.fields[i].label = "Email"; i++;
+	zmail.fields[i].buf = zmail.user;       zmail.fields[i].max = sizeof(zmail.user);       zmail.fields[i].label = "Username"; i++;
+	zmail.fields[i].buf = zmail.pass;       zmail.fields[i].max = sizeof(zmail.pass);       zmail.fields[i].secret = TRUE; zmail.fields[i].label = "Password"; i++;
+	zmail.fields[i].buf = zmail.from_name;  zmail.fields[i].max = sizeof(zmail.from_name);  zmail.fields[i].label = "Your name"; i++;
+	zmail.num_fields = i;
+}
+
+public U0 ZMail()
+{
+	I64 old_inhibit;
+
+	MemSet(&zmail, 0, sizeof(CZMailGlobals));	//Globals are not zeroed on load.
+	zmail.ui_task = Fs;
+	zmail.last_z = mouse.pos.z;
+	zmail.c_green  = ColorRGB(0x5E, 0xC8, 0x7A);
+	zmail.c_red	   = ColorRGB(0xD8, 0x6A, 0x6A);
+	zmail.c_yellow = ColorRGB(0xD4, 0xB8, 0x62);
+
+	//Defaults are Gmail IMAP; the setup form overrides them.
+	StrCopy(zmail.proto, "imap");
+	StrCopy(zmail.recv_host, "imap.gmail.com");
+	StrCopy(zmail.recv_port_s, "993");
+	StrCopy(zmail.smtp_host, "smtp.gmail.com");
+	StrCopy(zmail.smtp_port_s, "465");
+	ZMailConfigLoad;	//Saved accounts override the defaults above.
+	ZMailFieldsInit;
+	if (!zmail.num_accts)
+		ZMailAcctStore;	//No config yet: the defaults become account 1.
+	ZMailAcctDir;
+	//Saved account with a password: skip straight to the inbox + fetch. The
+	//cached index draws the list while the first FETCH is still in the air.
+	if (zmail.recv_host[0] && zmail.user[0] && zmail.pass[0])
+	{
+		ZMailIndexLoad;
+		zmail.scr = ZM_SCR_LIST;
+		zmail.job_req = ZM_JOB_FETCH;
+	}
+
+	//Child of this task: if the window is force-closed the worker dies with it.
+	zmail.worker = Spawn(&ZMailWorker, NULL, "ZMail Net", -1, Fs);
+
+	SettingsPush;
+	old_inhibit = Fs->win_inhibit;
+	StrCopy(Fs->task_title, "ZMail");
+	WinHorz(MaxI64(1, (TEXT_COLS - 116) / 2), MaxI64(1, (TEXT_COLS - 116) / 2) + 115);
+	WinVert(MaxI64(2, (TEXT_ROWS - 54) / 2), MaxI64(2, (TEXT_ROWS - 54) / 2) + 53);
+	Fs->win_inhibit = old_inhibit | WIF_FOCUS_TASK_MS_L_D;
+	WinFocus;
+	DocCursor(OFF);
+	DocClear;
+	Fs->user_data = &zmail;
+	Fs->draw_it = &ZMailDrawIt;
+	ZMailMenuPush;
+
+	while (!zmail.quit)
+	{
+		ZMailPoll;
+		ZMailMenuSync;
+		Sleep(30);
+	}
+
+	//Tear down the worker (wait out any in-flight blocking network call).
+	zmail.worker_quit = TRUE;
+	while (zmail.job_active)
+		Sleep(50);
+	Sleep(60);
+	if (TaskValidate(zmail.worker))
+		Kill(zmail.worker);
+
+	Fs->draw_it = NULL;
+	MenuPop;
+	Fs->user_data = 0;
+	Fs->win_inhibit = old_inhibit;
+	ZMailFreeMsgs;
+	DocCursor(ON);
+	DocClear;
+	SettingsPop;
+}
+
+ZMail;

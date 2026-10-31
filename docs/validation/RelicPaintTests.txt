@@ -1,0 +1,6 @@
+PASS layered document round trip
+PASS truncated drawing preserves open document
+PASS negative layer length rejected
+PASS drawing saved and reopened from disk
+PASS TGA export written
+RESULT 5 passed, 0 failed

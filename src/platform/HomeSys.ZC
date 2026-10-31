@@ -1,0 +1,54 @@
+//Place this file in /Home and change
+//anything you want.
+
+#include "::/System/RelicVMMouse"
+#include "::/System/RelicShellHelp"
+
+U0 UserStartUp()
+{//Run each time a user a spawned
+	DocTermNew;
+	Fs->text_attr = WHITE << 4 | BLACK;
+	"RelicOS Terminal\nType help; for commands, or Dir; to list files.\n\n";
+	LBts(&Fs->display_flags, DISPLAYf_SHOW);
+	WinToTop;
+	WinZBufUpdate;
+}
+
+U0 ServerStartUp()
+{//Run each time a server task is spawned.
+	DocTermNew;
+	LBts(&Fs->display_flags, DISPLAYf_SHOW);
+	WinToTop;
+	WinZBufUpdate;
+}
+
+
+U0 StartUpTasks()
+{
+	CTask *user = User;
+
+	// geometry precedes anything slow: ACInit below runs for seconds and a resize after it is visible
+	if (boot_term_fp)
+		(*boot_term_fp)(user);
+
+	"Boot Time:%7.3fs\n", tS;
+	XTalk(user, "Cd; #include \"Once\";\n");
+	Silent; //no output to screen
+
+	// ACInit("/*;!*/Bible.TXT;!*/Clementine.TXT;!*/PCIDevices.DD;!*/HTML/*;!*/ChangeLog.DD"
+	// 	   ";!*/Apps/QuakePlus/*;!*/Apps/UT99/*;!*/Apps/HL1/*;!*/Apps/Diablo1/*"
+	// 	   ";!*/Apps/Quake/*;!*/Apps/yTracker/Examples/*;!*/Home/Music/*");
+
+	// AutoComplete(OFF);
+	Silent(OFF); //no output to screen
+
+	if (!boot_term_fp)
+	{ // no desktop: stock tiling
+		WinToTop(user);
+		WinTileVert;
+	}
+}
+
+StartUpTasks;
+
+"\n%s\n\n", sys_os_version_nice;

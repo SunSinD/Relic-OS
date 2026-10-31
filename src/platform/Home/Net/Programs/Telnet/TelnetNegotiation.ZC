@@ -1,0 +1,144 @@
+#define IAC 0xFF
+#define WILL 0xFB
+#define WONT 0xFC
+#define DO 0xFD
+#define DONT 0xFE
+#define ECHO 0x01
+#define SUPPRESS_GO_AHEAD 0x03
+#define TERMINAL_TYPE 0x18
+#define LINEMODE 0x22
+#define NAWS 0x1F // (Negotiate About Window Size)
+#define IS 0x00
+#define SEND 0x01
+#define SB 0xFA
+#define SE 0xF0
+#define CHARSET 0x2A
+
+#define SEND_LOCATION 23
+#define BINARY_TRANSMISSION 0
+
+U0 SendWindowSize(I64 sock, U16 cols, U16 rows)
+{
+  U8 buf[9];
+
+  buf[0] = IAC;
+  buf[1] = SB;
+  buf[2] = NAWS;
+  // Dynamic resolution would need IAC (255) byte stuffing; not implemented.
+  buf[3] = cols >> 8;   // High byte of columns
+  buf[4] = cols & 0xFF; // Low byte of columns
+  buf[5] = rows >> 8;   // High byte of rows
+  buf[6] = rows & 0xFF; // Low byte of rows
+  buf[7] = IAC;
+  buf[8] = SE;
+
+  SysLog("SendWindowSize: %d x %d\n", cols, rows);
+  TCPSocketSend(sock, buf, 9);
+}
+
+U0 SendTerminalType(I64 sock)
+{
+  U8 response[14];
+
+  response[0] = IAC;
+  response[1] = SB;
+  response[2] = TERMINAL_TYPE;
+  response[3] = IS;
+
+  response[4]  = 'A';
+  response[5]  = 'N';
+  response[6]  = 'S';
+  response[7]  = 'I';
+  response[8]  = '-';
+  response[9]  = 'B';
+  response[10] = 'B';
+  response[11] = 'S';
+
+  response[12] = IAC;
+  response[13] = SE;
+
+  SysLog("SendTerminalType: ANSI-BBS\n");
+  TCPSocketSend(sock, response, 14);
+}
+
+U0 TelnetNegotiateOption(I64 sock, U8 negotiation_code, U8 option_code)
+{ // Respond to a 3-byte negotiation: IAC <WILL|WONT|DO|DONT> <option>.
+  // RFC 854: DO/DONT is answered with WILL/WONT, WILL/WONT is answered with DO/DONT.
+  U8 response[3];
+
+  response[0] = IAC;
+  response[2] = option_code;
+
+  switch (negotiation_code)
+  {
+    case DO: // server asks us to enable an option on our side
+      switch (option_code)
+      {
+        case SUPPRESS_GO_AHEAD:
+        case TERMINAL_TYPE:
+        case NAWS:
+          response[1] = WILL;
+          break;
+        default:
+          response[1] = WONT;
+          break;
+      }
+      break;
+
+    case DONT:
+      response[1] = WONT;
+      break;
+
+    case WILL: // server offers to enable an option on its side
+      switch (option_code)
+      {
+        case ECHO:
+        case SUPPRESS_GO_AHEAD:
+          response[1] = DO;
+          break;
+        default:
+          response[1] = DONT;
+          break;
+      }
+      break;
+
+    case WONT:
+      response[1] = DONT;
+      break;
+
+    default:
+      SysLog("TelnetNegotiateOption: unexpected code %d\n", negotiation_code);
+      return;
+  }
+
+  SysLog("Negotiation code: %d | Option code: %d -> reply %d\n",
+         negotiation_code, option_code, response[1]);
+  TCPSocketSend(sock, response, 3);
+
+  // NAWS: after agreeing, the client volunteers its window size (RFC 1073).
+  if (negotiation_code == DO && option_code == NAWS)
+    SendWindowSize(sock, term.window_width, term.window_height);
+}
+
+U0 TelnetSubnegotiate(I64 sock, U8 *sb, I64 length)
+{ // Handle a complete subnegotiation payload (between IAC SB and IAC SE).
+  // sb[0] is the option code, rest is option-specific data.
+  if (length < 1)
+    return;
+
+  switch (sb[0])
+  {
+    case TERMINAL_TYPE:
+      if (length >= 2 && sb[1] == SEND)
+        SendTerminalType(sock);
+      break;
+
+    case NAWS:
+      SendWindowSize(sock, term.window_width, term.window_height);
+      break;
+
+    default:
+      SysLog("TelnetSubnegotiate: unhandled option %d, length %d\n", sb[0], length);
+      break;
+  }
+}

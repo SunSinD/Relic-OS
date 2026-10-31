@@ -1,0 +1,328 @@
+
+U0 DEWinPolicyEnforce()
+{//Clamp bordered windows that bypassed WinVert() (e.g. fresh task defaults).
+	CTask	*t = sys_winmgr_task;
+	I64		 limit = TEXT_ROWS - 2 - DE_BAR_ROWS;
+
+	while ((t = t->next_task) != sys_winmgr_task)
+	{
+		if (!TaskValidate(t))
+			break;
+		if (Bt(&t->display_flags, DISPLAYf_SHOW) &&
+			!Bt(&t->display_flags, DISPLAYf_NO_BORDER) && t->win_bottom > limit)
+			WinVert(t->win_top, t->win_bottom, t); //WinVert clamps + slides up.
+	}
+}
+
+U0 DEAltTab()
+{//<ALT-TAB>: cycle focus through the taskbar's stable list, wrapping. Every
+//slot is tried: the list keeps minimized windows and a slot can go stale
+//between rebuilds.
+	CTask *t;
+	I64	   i, k, cur = -1;
+
+	if (!de.bar_count)
+		return;
+	for (i = 0; i < de.bar_count; i++)
+		if (de.bar_tasks[i] == sys_focus_task)
+		{
+			cur = i;
+			break;
+		}
+	//cur == -1, focus on something not in the bar, starts the search at 0.
+	for (k = 1; k <= de.bar_count; k++)
+	{
+		i = (cur + k) % de.bar_count;
+		t = de.bar_tasks[i];
+		if (!TaskValidate(t) || t == sys_focus_task)
+			goto de_alttab_next;
+		if (DEIsMinimized(t))
+		{//focusing a hidden window would move focus nowhere visible: restore it
+			DERestore(t);
+			return;
+		}
+		WinFocus(t);
+		WinToTop(t);
+		return;
+de_alttab_next:;
+	}
+}
+
+U0 DETaskMain()
+{
+	I64	 cnt = 0;
+	Bool tab_latch = FALSE;
+
+	de.task = Fs;
+	while (de.on)
+	{
+		if (Bt(kbd.down_bitmap, SC_ALT) && Bt(kbd.down_bitmap, SC_TAB))
+		{
+			if (!tab_latch)
+			{
+				tab_latch = TRUE;
+				DEAltTab;
+			}
+		}
+		else if (!Bt(kbd.down_bitmap, SC_TAB))
+			tab_latch = FALSE;
+
+		if (!(cnt & 15)) //Every ~240ms.
+			DEWinPolicyEnforce;
+		if (de.media_vol && *de.media_vol)
+		{//Volume knob / media keys, latched raw by the kernel kbd driver.
+			DEVolStep(*de.media_vol * 4);
+			*de.media_vol = 0;
+		}
+		if (de.media_mute && *de.media_mute)
+		{
+			*de.media_mute = 0;
+			DEVolMuteToggle;
+		}
+		if (de.cfg_dirty && (cnt & 63) == 0)
+		{
+			de.cfg_dirty = FALSE;
+			DEConfigSave;
+		}
+		if (de.glass)
+		{
+			if (de.glass_deny != sys_focus_task)
+				de.glass_deny = NULL;	//focus moved, re-test
+			if (gr.layer_gfx)
+			{
+				de.glass_deny = sys_focus_task;
+				gr.layer_gfx = FALSE;
+			}//Glass follows focus, but not onto a task with draw_it: the cell
+			//blend erases those graphics. Ctrls are fine either way -
+			//GrWinLayerComposite leaves every pixel of a ctrl rect alone, so a
+			//window can own part of itself and glass the rest.
+			if (sys_focus_task && sys_focus_task != sys_winmgr_task &&
+				sys_focus_task != sys_task && !sys_focus_task->draw_it &&
+				sys_focus_task != de.glass_deny &&
+				!(sys_focus_task->win_inhibit & WIF_SELF_DOC))
+			{
+				if (gr.translucent_task != sys_focus_task ||
+					gr.translucent_alpha != de.glass_alpha)
+					WinTranslucent(sys_focus_task, de.glass_alpha);
+			}
+			else if (gr.translucent_task)
+				WinOpaque;
+		}
+		cnt++;
+		Sleep(15); //Fast enough to catch quick TAB re-presses for ALT-TAB.
+	}
+	de.task = NULL;
+}
+
+I64 *DESymAddr(U8 *name)
+{//Address of a global by name: kernel map symbols land as exports, JIT
+//globals as CHashGlobalVar. NULL if the running kernel doesn't have it.
+	CHashExport		*he = HashFind(name, Fs->hash_table, HTT_EXPORT_SYS_SYM);
+	CHashGlobalVar	*hg;
+
+	if (he)
+		return he->val;
+	hg = HashFind(name, Fs->hash_table, HTT_GLOBAL_VAR);
+	if (hg)
+		return hg->data_addr;
+
+	return NULL;
+}
+
+public U0 DEStart(U8 *wallpaper_filename="::/DE/RelicReaper.PNG")
+//Original RelicOS wave artwork; an empty path selects the matte fill.
+{
+	CCtrl			*c;
+	Bool			 cfg_ok;
+
+	if (de.on)
+		return;
+
+	//JIT globals are not guaranteed zeroed: init the fields read before their
+	//first write here, or DEWallpaperLoad's DCDel(old) frees a garbage pointer.
+	de.wallpaper		 = NULL;
+	de.wallpaper_path[0] = 0;
+	de.menu_task		 = NULL;
+	de.bar				 = NULL;
+	de.muted			 = FALSE;
+	de.cfg_dirty		 = FALSE;
+	de.saved_vol		 = 60;
+	de.cal_last			 = 0;
+	de.cal_task			 = NULL;
+	de.ctx_task			 = NULL;
+	de.ctx_target		 = NULL;
+	de.net_task			 = NULL;
+	de.desk				 = NULL;
+	de.stats_hold		 = FALSE;
+	de.desk_menu_task	 = NULL;
+	de.desk_menu_last	 = 0;
+	de.min_count		 = 0;
+	de.menu_close		 = FALSE;
+	de.menu_last		 = 0;
+	de.clock_x0			 = -1;
+	de.clock_x1			 = -1;
+	de.net_x0			 = -1;
+	de.net_x1			 = -1;
+
+	DEWallpaperLoad(wallpaper_filename);
+	de.old_wall_paper = gr.fp_wall_paper;
+	gr.fp_wall_paper = NULL; //Retire the text-stats wallpaper.
+	sys_winmgr_task->draw_it = &DEWallpaperDraw;
+
+	gr.reserved_bottom_rows = DE_BAR_ROWS;
+	DEWinPolicyEnforce;
+
+	de.term_bttn = CtrlFindUnique(sys_winmgr_task, CTRLT_GENERIC);
+	if (de.term_bttn)
+		de.term_bttn->flags &= ~CTRLF_SHOW;
+
+	c = SysCAlloc(sizeof(CCtrl));
+	c->win_task		= sys_winmgr_task;
+	c->flags		= CTRLF_SHOW;
+	c->type			= CTRLT_GENERIC;
+	c->draw_it		= &DEBarDraw;
+	c->left_click	= &DEBarClick;
+	c->right_click	= &DEBarRightClick;
+	c->wheel_chg	= &DEBarWheel;
+	c->left			= 0;
+	c->right		= GR_WIDTH - 1;
+	c->top			= GR_HEIGHT - DE_BAR_HEIGHT;
+	c->bottom		= GR_HEIGHT - 1;
+	QueueInsert(c, sys_winmgr_task->last_ctrl);
+	TaskDerivedValsUpdate(sys_winmgr_task);
+	de.bar = c;
+
+	//Desktop ctrl: everything above the bar. The WinMgr only runs a task's
+	//ctrls when that task is the topmost window under the cursor, so this fires
+	//on bare desktop only.
+	c = SysCAlloc(sizeof(CCtrl));
+	c->win_task		= sys_winmgr_task;
+	c->flags		= CTRLF_SHOW | CTRLF_CAPTURE_LEFT_MS;
+	c->type			= CTRLT_GENERIC;
+	c->left_click	= &DEDeskClick;
+	c->right_click	= &DEDeskRightClick;
+	c->left			= 0;
+	c->right		= GR_WIDTH - 1;
+	c->top			= 0;
+	c->bottom		= GR_HEIGHT - DE_BAR_HEIGHT - 1;
+	QueueInsert(c, sys_winmgr_task->last_ctrl);
+	TaskDerivedValsUpdate(sys_winmgr_task);
+	de.desk = c;
+
+	if (!gr.tc_chrome) //Truecolor chrome on by default; Settings can revert.
+		GuiChromeTrueColor(de_theme.accent, de_theme.chrome_bg, de_theme.accent_dim);
+	LBtr(&sys_task->display_flags, DISPLAYf_SHOW); //SysLog hidden; F12 toggles.
+
+	//Media-key counters exist only in rebuilt kernels: resolve at runtime.
+	de.media_vol  = DESymAddr("kbd_media_vol");
+	de.media_mute = DESymAddr("kbd_media_mute");
+
+	//The ZealC JIT does not zero globals, so these defaults precede
+	//DEConfigLoad.
+	de.saver_on		= TRUE;
+	de.saver_mins	= DE_SAVER_MINS_DEFAULT;
+	de.stats_enable	= TRUE;
+	de.glass		= FALSE;	//RelicOS: matte, glass is opt-in.
+	de.glass_alpha	= DE_GLASS_ALPHA_DEFAULT;
+	de.glass_blur	= DE_GLASS_BLUR_DEFAULT;
+	de.reduced_motion = FALSE;
+	de.font_h		= FontH;	//running cell height, not a pending request
+
+	de.on = TRUE;
+	//Restores saved hue/chrome/glass/volume/wallpaper when a config exists.
+	try
+		cfg_ok = DEConfigLoad;
+	catch
+	{
+		PutExcept;
+		cfg_ok = FALSE;
+	}
+	if (!cfg_ok)
+	{
+		GuiMenuBarModern(TRUE);
+		GlassBlur(de.glass_blur);
+		AudioMasterVolumeSet(DE_VOL_DEFAULT);
+		YDESaverOn(de.saver_mins * 60);
+	}
+	Spawn(&DETaskMain, NULL, "DE");
+	"YDE started. DEStop; returns to stock.\n";
+}
+
+public U0 DEStop()
+{
+	if (!de.on)
+		return;
+	YDESaverOff;
+	de.on = FALSE;
+
+	de.menu_close = TRUE;	//let the start menu drop its own window + label DCs
+	if (TaskValidate(de.menu_task))
+	{
+		Sleep(150);
+		if (TaskValidate(de.menu_task))
+			Kill(de.menu_task);
+	}
+	de.menu_task = NULL;
+
+	if (TaskValidate(de.ctx_task))
+		Kill(de.ctx_task);
+	de.ctx_task = NULL;
+	if (TaskValidate(de.desk_menu_task))
+		Kill(de.desk_menu_task);
+	de.desk_menu_task = NULL;
+	de.stats_hold = FALSE;
+	de.net_task = NULL;
+	de.min_count = 0;
+
+	gr.reserved_bottom_rows = 0;
+	sys_winmgr_task->draw_it = NULL;
+	gr.fp_wall_paper = de.old_wall_paper;
+
+	if (de.bar)
+	{
+		PUSHFD
+		CLI
+		QueueRemove(de.bar);
+		POPFD
+		TaskDerivedValsUpdate(sys_winmgr_task);
+	}
+	if (de.desk)
+	{
+		PUSHFD
+		CLI
+		QueueRemove(de.desk);
+		POPFD
+		TaskDerivedValsUpdate(sys_winmgr_task);
+	}
+	if (de.term_bttn)
+	{
+		de.term_bttn->flags |= CTRLF_SHOW;
+		de.term_bttn = NULL;
+	}
+
+	Sleep(100); //Let the DE task and the current frame finish before freeing.
+	if (de.bar)
+	{
+		Free(de.bar);
+		de.bar = NULL;
+	}
+	if (de.desk)
+	{
+		Free(de.desk);
+		de.desk = NULL;
+	}
+	gr.translucent_bg = NULL;
+	WinOpaque;
+	GlassBlur(0);
+	de.glass = FALSE;
+	GuiMenuBarModern(FALSE);
+	GuiChromePalette;
+	LBts(&sys_task->display_flags, DISPLAYf_SHOW);
+	Sleep(50); //Compositor frame may still hold the wallpaper pointer.
+	if (de.wallpaper)
+	{
+		DCDel(de.wallpaper);
+		de.wallpaper = NULL;
+	}
+	"YDE stopped.\n";
+}

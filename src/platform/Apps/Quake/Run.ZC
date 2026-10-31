@@ -1,0 +1,38 @@
+
+Cd(__DIR__);;
+
+#include "QFmt"
+#include "QPak"
+#include "QPal"
+#include "QMath"
+#include "QNet"
+
+
+#include "QNetUdp"
+#include "QNetDgrm"
+#include "QDemo"
+#include "QBSP"
+#include "QVis"
+#include "QPhys"
+#include "QDraw"
+#include "QMDL"
+#include "QSpr"
+#include "QPart"
+#include "QSound"
+#include "QWad"
+#include "QProgs"
+#include "QClip"
+#include "QBuiltin"
+#include "QEnt"
+#include "QGame"
+#include "QNetSv"
+#include "QSave"
+#include "QPlayer"
+#include "QSbar"
+#include "QMenu"
+#include "QTest"
+#include "Quake"
+
+Quake;
+
+"\nType $$LTBLUE$$QTest;$$FG$$ to run the data-layer self-check.\n";

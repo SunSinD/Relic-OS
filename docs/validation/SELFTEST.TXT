@@ -1,0 +1,24 @@
+PASS leap year February
+PASS century common year
+PASS 400 year leap rule
+PASS April length
+PASS BMP save
+PASS BMP load
+PASS BMP palette and pixels
+PASS reject truncated BMP
+PASS HTML links
+PASS HTML script omitted
+PASS long page bounded
+PASS settings defaults
+PASS relative page URL
+PASS root relative URL
+PASS scheme relative URL
+MEASURE refresh 75.032 FPS over 9.929 seconds
+RESULT 15 passed, 0 failed
+PASS HTTP chunk decoding
+PASS reject oversized HTTP chunk
+PASS IPv4 address parse
+PASS reject malformed IPv4
+PASS reject cyclic DNS pointer
+PASS DNS label parse
+NETWORK RESULT 21 passed, 0 failed

@@ -1,0 +1,55 @@
+I64 RelicPlatformPassed, RelicPlatformFailed;
+U0 RelicPlatformCheck(Bool ok, U8 *name)
+{
+    if (ok) { RelicPlatformPassed++; "PASS %s\n", name; }
+    else { RelicPlatformFailed++; "FAIL %s\n", name; }
+}
+
+U0 RelicPlatformTests()
+{
+    I64 n, frames;
+    U64 expected_a = 0x006666667E66663C;
+    F64 started;
+    U8 *body, text_buf[8];
+    CDC *dc;
+    Bool ok;
+    DocClear;
+    RelicPlatformPassed = RelicPlatformFailed = 0;
+    RelicPlatformCheck(!MemCompare(FontGlyphRows(&sys_font, 'A'), &expected_a, 8), "TempleOS A glyph");
+    RelicPlatformCheck(DEConfigValI64("nomono 0\nmono 1\n", "mono", 0) == 1, "settings key boundary");
+    RelicPlatformCheck(DEConfigValI64("", "motion", 7) == 7, "missing setting default");
+    text_buf[0] = 42;
+    DEConfigValStr("wallpaper value\n", "wallpaper", text_buf, 0);
+    RelicPlatformCheck(text_buf[0] == 42, "zero-size settings output preserved");
+    DEConfigValStr("wallpaper abcdefghijklmnop\n", "wallpaper", text_buf, sizeof(text_buf));
+    RelicPlatformCheck(!StrCompare(text_buf, "abcdefg"), "settings string bound");
+    DEConfigSave;
+    body = FileRead(DE_CFG_PATH, &n);
+    ok = FALSE;
+    if (body)
+        ok = DEConfigValI64(body, "motion", -1) == !de.reduced_motion &&
+             DEConfigValI64(body, "mono", -1) == de_theme.mono;
+    RelicPlatformCheck(ok, "preferences written and read back");
+    Free(body);
+    dc = PNGRead("::/Apps/ZealAmp/Images/MAIN.PNG");
+    ok = FALSE;
+    if (dc) ok = dc->width == 275 && dc->height == 116;
+    RelicPlatformCheck(ok, "original music skin PNG decoder");
+    if (dc) DCDel(dc);
+    FileWrite("::/Tmp/RelicRoundTrip.TXT", "RelicOS disk check", 17);
+    body = FileRead("::/Tmp/RelicRoundTrip.TXT", &n);
+    ok = FALSE;
+    if (body) ok = n == 17 && !MemCompare(body, "RelicOS disk check", 17);
+    RelicPlatformCheck(ok, "disk write and read back");
+    Free(body);
+    frames = winmgr.updates;
+    started = tS;
+    Sleep(10000);
+    "MEASURE %d frames over %.3f seconds: %.3f FPS\n",
+        winmgr.updates - frames, tS - started, (winmgr.updates - frames) / (tS - started);
+    "RESULT %d passed, %d failed\n", RelicPlatformPassed, RelicPlatformFailed;
+    body = DocSave(DocPut, &n);
+    FileWrite("::/Tmp/RelicPlatformTests.DD", body, n);
+    Free(body);
+}
+RelicPlatformTests;

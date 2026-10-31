@@ -1,0 +1,231 @@
+
+
+
+
+
+Help & Index, Quick Start: Cmd line
+
+ of C:/Home
+DATE_ TIME_ SIZE
+10/30 20:15 0000 
+10/30 20:15 0000 
+10/30 20:39 0000 
+10/30 20:39 0000 
+10/30 20:39 0000 
+10/30 20:39 0000 
+10/30 21:13 0EA7 Basics.DD
+10/30 21:13 0999 DoDistro.ZC
+10/30 21:13 04A3 HomeSys.ZC
+10/30 21:13 0D31 HtmlGen.ZC
+10/30 21:13 01A7 MakeHome.ZC
+10/30 21:13 00B7 Once.ZC
+10/30 21:05 00DB Registry.ZC
+10/30 21:13 0745 RelicPaintTests.ZC
+10/30 21:13 080B RelicTests.ZC
+10/30 21:13 1D9E SSE.ZC
+C:/Home>Cd; #include "Once";
+&LexExcept ⌐ ParseUnaryTerm ⌐ ParseExpression2 ⌐ ParseExpression ERROR: Missing expression at "/" ~/Tmp.DD,0001 FG24/
+&LexExcept ⌐ ParseExpression ⌐ &LexExpression2Bin ⌐ &LexExpressionI64 ERROR: Compiler Parse Error at "/" ~/Tmp.DD,0001 FG24/
+Errs:0 Warns:0 Code:2C5CF Size:30110
+&LexExcept ⌐ ParseUnaryTerm ⌐ ParseExpression2 ⌐ ParseExpression ERROR: Missing expression at "/" ~/Tmp.DD,0001 FG24/
+&LexExcept ⌐ ParseExpression ⌐ &LexExpression2Bin ⌐ &LexExpressionI64 ERROR: Compiler Parse Error at "/" ~/Tmp.DD,0001 FG24/
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Memory/PageTables.ZC,0214
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Memory/PageTables.ZC,0215
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'MemWriteCombineSet'.
+FL:C:/Kernel/Memory/PageTables.ZC,218
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Memory/PageTables.ZC,0233
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Memory/PageTables.ZC,0234
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'LapicTimerInit'.
+FL:C:/Kernel/KInterrupts.ZC,176
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/BlkDev/DiskNVMe.ZC,0428
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/BlkDev/DiskNVMe.ZC,0429
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/BlkDev/DiskAddDev.ZC,0271
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_hcs'
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_hc_count'
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_xhci'
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_devs'
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_task'
+ParseGlobalVarList ⌐ ParseStatement ⌐ &LexStatement2Bin ⌐ CompJoin WARNING: Unused extern 'usb_boot_iso_drv_let'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0130
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0263
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0266
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0270
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0271
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0278
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0279
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0280
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0313
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0409
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0409
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0409
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseWhile WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0486
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0533
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0533
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0573
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0573
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0574
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0579
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0580
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0581
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0581
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0582
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0583
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0591
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0591
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0606
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0607
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0611
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0611
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0639
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0640
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0641
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0642
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0642
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0643
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0644
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0647
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0648
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0650
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0656
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0657
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0659
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0661
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0662
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0663
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0663
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0664
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0668
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0668
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0682
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0689
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0690
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0691
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0692
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0692
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0693
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0694
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0697
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0701
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0702
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0705
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0705
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0714
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0714
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0714
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0717
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0718
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0718
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0718
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0731
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0739
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0740
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseWhile WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0740
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0744
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0795
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0808
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0809
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0810
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0815
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseWhile WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0829
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseWhile WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0832
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0839
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0839
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0839
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0840
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseWhile WARNING: Unnecessary parentheses at C:/Kernel/Usb/KXhci.ZC,0871
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'XhciInitAll'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbCore.ZC,0026
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbCore.ZC,0394
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0090
+ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList ⌐ ParseStatement WARNING: Fun header args mismatch 'UsbKbdCB'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0134
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0134
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0134
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0136
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0136
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0137
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0174
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'UsbHidParseReport'.
+FL:C:/Kernel/Usb/KUsbHid.ZC,179
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'UsbHidParseReport'.
+FL:C:/Kernel/Usb/KUsbHid.ZC,179
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0216
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0234
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0235
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0242
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0243
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0250
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0251
+ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList ⌐ ParseStatement WARNING: Fun header args mismatch 'UsbTabletCB'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0308
+ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList ⌐ ParseStatement WARNING: Fun header args mismatch 'UsbMouseCB'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0465
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0465
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHid.ZC,0501
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0167
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0167
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0167
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0168
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0168
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0168
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0186
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0187
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0188
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0190
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0279
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0386
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbMsd.ZC,0405
+ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList ⌐ ParseStatement WARNING: Fun header args mismatch 'UsbEcmRxCB'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbEcmSend'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbEcm.ZC,0152
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbEcmRecv'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbEcmPresent'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbEcmRep'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbEcmMacAddr'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbEcm.ZC,0349
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbEcm.ZC,0361
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0012
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0012
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0013
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0044
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbHubPortScan'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0107
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbHubAttach'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0147
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbHub.ZC,0149
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbAudioPresent'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0089
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0090
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0091
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0096
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0111
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0118
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0118
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0119
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0151
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0157
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'UsbAudioParse'.
+FL:C:/Kernel/Usb/KUsbAudio.ZC,161
+&LexWarn ⌐ MemberAdd ⌐ ParseVarList ⌐ ParseStatement WARNING: Duplicate type at in fun 'UsbAudioParse'.
+FL:C:/Kernel/Usb/KUsbAudio.ZC,161
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0206
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseIf WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0241
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseUnaryTerm WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0248
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0279
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseStatement WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbAudio.ZC,0280
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbAudioAttach'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbAudioDetach'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbBoot.ZC,0064
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbRep'
+ParenWarning ⌐ ParseExpression2 ⌐ ParseExpression ⌐ ParseFunCall WARNING: Unnecessary parentheses at C:/Kernel/Usb/KUsbBoot.ZC,0195
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbTaskMain'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbBootInit'
+UnusedExternWarning ⌐ ParseFunJoin ⌐ ParseFun ⌐ ParseGlobalVarList WARNING: Unused extern 'UsbBootDriveFallback'
+Errs:0 Warns:31 Code:429E0 Size:49090
+Copying /Kernel/Kernel.ZXE to /Boot/Kernel.ZXE
+ [ 0.00% ]
+ [ 21.91% ]
+ [ 43.81% ]
+ [ 65.72% ]
+Del Kernel.ZXE
+Modifying partition boot record.

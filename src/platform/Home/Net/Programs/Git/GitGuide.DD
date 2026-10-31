@@ -1,0 +1,135 @@
+$WW,1$$FG,5$$TX+CX,"YKD Git Client Guide"$$FG$
+
+A git client for ZealOS/YKD.  Clones repositories over HTTPS or over SSH, fetches the packfile, resolves deltas, and writes the working tree to disk.  It does $UL,1$not$UL,0$ create a .git directory or loose objects (no DEFLATE encoder) -- you get the checked-out files.  This guide only $FG,2$shows$FG$ commands; nothing here runs on its own.
+
+$FG,5$--- 1. Load the client ---$FG$
+
+The network stack must be up (an IP such as 10.0.2.15 in the Network Report).  Then:
+
+$FG,2$#include "C:/Home/Net/Programs/SSH/SSH"$FG$   first, if you want ssh URLs
+$FG,2$#include "C:/Home/Net/Programs/Git/Git"$FG$
+
+Source: $LK,"Git.ZC",A="FI:::/Home/Net/Programs/Git/Git.ZC"$.  Optional sanity check:
+
+$FG,2$SHA1Test;$FG$     Green = object naming is sound.
+
+$FG,5$--- 2. List remote refs ---$FG$
+
+The lightest operation -- good for checking a repo is reachable:
+
+$FG,2$GitLsRemote("https://github.com/octocat/Hello-World");$FG$
+
+Prints each ref (sha + name) and a count.
+
+$FG,5$--- 3. Clone ---$FG$
+
+GitClone takes any URL shape real git takes -- https, git@host:path, or ssh://[user@]host[:port]/path:
+
+$FG,2$GitClone("https://github.com/octocat/Hello-World");$FG$
+$FG,2$GitClone("git@github.com:octocat/Hello-World.git");$FG$
+$FG,2$GitClone("ssh://git@my.host:2222/srv/project.git");$FG$
+
+$ID,2$Clones into <current dir>/<repo-name> by default (name from the URL, .git stripped).  Use $FG,2$Cd("::/Home");$FG$ first to choose where it lands.$ID,-2$
+
+The second argument renames the destination.  A bare name is created under the current directory; anything holding "/" or ":" is taken as a path:
+
+$FG,2$GitClone("git@github.com:octocat/Hello-World.git", "Hello");$FG$
+$FG,2$GitClone("https://host/user/repo", "::/Home/myrepo");$FG$
+
+$ID,2$If the target directory exists, you get a No/Yes prompt first.
+Each file prints as it is written; big packs show periodic progress.
+$FG,4$Esc$FG$ cancels during unpack/checkout (the network fetch is not cancellable yet).$ID,-2$
+
+$FG,3$Debug helper$FG$ -- save just the raw packfile:
+
+$FG,2$GitFetchToFile("https://host/user/repo", "::/Tmp/repo.pack");$FG$
+
+$FG,5$--- 4. Clone over SSH ---$FG$
+
+ssh URLs use your Ed25519 key -- no password.  Set the key up first (section 5).
+
+$FG,3$4.1 Load SSH before git$FG$
+
+The ssh transport lives in GitSSH.ZC, which Git.ZC pulls in only if the SSH client is already loaded.  Order matters:
+
+$FG,2$#include "C:/Home/Net/Programs/SSH/SSH"$FG$
+$FG,2$#include "C:/Home/Net/Programs/Git/Git"$FG$
+
+$ID,2$Git on its own still clones over HTTPS; an ssh URL then prints what to load.$ID,-2$
+
+$FG,3$4.2 Clone$FG$
+
+$ID,2$SSHKeyLoad;   // load your key (once per boot)
+GitClone("git@github.com:username/repository.git");
+GitClone("git@192.168.1.10:user/repo.git", "MyRepo");$ID,-2$
+
+$ID,2$The login name comes before @ and defaults to "git".  The port defaults to 22 and can only be given in the ssh:// form, as in real git.$ID,-2$
+
+$FG,3$4.3 Explicit fields$FG$
+
+GitCloneSSH takes the URL already split apart, and is the only way to use password auth:
+
+$ID,2$// normal git:  git clone git@github.com:username/repository.git
+//              ÀuserÙ ÀÄÄÄÄhostÄÄÄÄÙ ÀÄÄÄÄÄÄÄrepoÄÄÄÄÄÄÄÄÙ
+GitCloneSSH("github.com", 22, "git", "username/repository.git");$ID,-2$
+
+$ID,2$Arguments:  GitCloneSSH(host, port, user, repo, dir=NULL, password=NULL)
+  host     after @, before :  (e.g. github.com)
+  port     22 unless the server uses a custom port
+  user     before @  (almost always "git" on GitHub/gitea)
+  repo     after :  (e.g. username/repository.git, or /srv/git/project.git)
+  dir      target directory or bare name (default <cwd>/<repo-name>)
+  password optional; only if you have no key on the server$ID,-2$
+
+Password fallback (no key):
+
+$FG,2$GitCloneSSH("192.168.1.10", 22, "root", "/srv/repo.git", NULL, "PASSWORD");$FG$
+
+$FG,5$--- 5. Setting up key auth ---$FG$
+
+Public-key auth is shared with the SSH client; full details in $LK,"the SSH guide",A="FI:::/Home/Net/Programs/SSH/SSHGuide.DD"$ section 5.  Short version:
+
+$FG,2$#include "C:/Home/Net/Programs/SSH/SSH"$FG$
+$FG,2$SSHKeyGen;$FG$     Generates the key, prints the authorized_keys line.
+
+Copy the printed ssh-ed25519 line onto the git server, for the account you clone as:
+
+$ID,2$mkdir -p ~/.ssh && chmod 700 ~/.ssh
+echo 'ssh-ed25519 AAAA... YKD@zealos' >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys$ID,-2$
+
+After that GitClone (and SSH) log in with the key automatically.  After a reboot, run $FG,2$SSHKeyLoad;$FG$ once.  To get the key text out of the VM, start the clipboard bridge $FG,2$ClipStart;$FG$ ($LK,"Clip.ZC",A="FI:::/Home/Net/Programs/Clip/Clip.ZC"$), then $FG,2$SSHKeyShow;$FG$, select the printed line and Ctrl+C.
+
+$FG,5$--- 6. Command reference ---$FG$
+
+$ID,2$GitLsRemote(url)                              List a remote's refs over HTTPS.
+GitClone(url, dir=NULL)                       Clone https, git@host:path or ssh:// into <cwd>/<repo>, dir, or a bare name.
+GitFetchToFile(url, path)                     Debug: fetch + save the raw packfile.
+GitCloneSSH(host, port, user, repo, dir, pw)  Clone over SSH from split fields (key auth; password optional).
+SHA1Test                                      SHA-1 self-test.$ID,-2$
+
+$FG,5$--- 7. Notes & limits ---$FG$
+
+$ID,2$$FG,2$Read-only clone.$FG$  No push, no commit, no .git metadata -- you get the working tree of the default branch (HEAD).
+
+$FG,2$GitHub over HTTPS$FG$ sometimes gates on a git/ User-Agent.  If GitLsRemote returns nothing against GitHub, try a gitea or cgit host, or your own server.
+
+$FG,2$git-over-SSH$FG$ needs git-upload-pack on the server PATH (standard) and read access to the repo.
+
+$FG,2$Big repos$FG$ take a while (fetch + delta resolution); progress prints during unpack/checkout and Esc cancels those phases.
+
+Existing files in the target are overwritten (you are warned if the directory already exists).$ID,-2$
+
+$FG,5$--- 8. End-to-end example ---$FG$
+
+$FG,2$#include "C:/Home/Net/Programs/SSH/SSH"$FG$
+$FG,2$SSHKeyGen;$FG$   (paste the printed line into the server's authorized_keys)
+
+$FG,2$#include "C:/Home/Net/Programs/Git/Git"$FG$
+$FG,2$Cd("::/Home");;$FG$
+$FG,2$GitClone("git@github.com:username/repository.git");$FG$
+$FG,2$Dir("::/Home/repository");$FG$
+
+Or a public repo over HTTPS:
+
+$FG,2$GitClone("https://gitea.example.com/user/project");$FG$

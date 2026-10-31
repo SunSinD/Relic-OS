@@ -1,0 +1,13 @@
+// Single-pass compiler: include order is dependency order.
+
+Cd(__DIR__);;
+
+#include "YPDef"
+#include "YPImage"
+#include "YPBrush"
+#include "YPTool"
+#include "YPFile"
+#include "YPUI"
+#include "yPainter"
+
+yPainter;

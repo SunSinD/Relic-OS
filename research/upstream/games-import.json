@@ -1,0 +1,72 @@
+{
+  "repository": "https://github.com/tinkeros/tinkeros",
+  "commit": "fe68fde1f4c3c49652025656dd8f1dc5095a07ae",
+  "files": [
+    {
+      "path": "Apps/Tetris/Tetris.HC",
+      "sha256": "9fe19f757e1a7fc7ff6307db45ca43805de1e3005a2b89ebf56d23a64ef2d1d8",
+      "changes": [
+        "RelicOS score registry namespace",
+        "Mark caught exceptions handled"
+      ]
+    },
+    {
+      "path": "Apps/Scorch/Scorch.HC",
+      "sha256": "f3f5e88db289f4b14b0c0716d7a5264da4fc073a95c8c3f9ffed80d8428bb21e",
+      "changes": [
+        "TempleOS-compatible score registry",
+        "Mark caught exceptions handled"
+      ]
+    },
+    {
+      "path": "Apps/Tetris/Help.DD",
+      "sha256": "8a49333ac297c44b808da642f3483806b740867a4ecf4f9a750d8eed7df8152b",
+      "changes": []
+    },
+    {
+      "path": "Apps/Chess/Chess.HC",
+      "sha256": "c4e6a309e45ec1631811ae1676dc8a8a68127480d304620fd75552505144528e",
+      "changes": [
+        "Stock HolyC struct copies"
+      ]
+    },
+    {
+      "path": "Apps/Chess/Run.HC",
+      "sha256": "891f4defef34943d604b3b78344f61a2ce8c6d48c3e53df780707eeef94b2496",
+      "changes": [
+        "Stock HolyC struct copies"
+      ]
+    },
+    {
+      "path": "Apps/Chess/Load.HC",
+      "sha256": "dea904ab396c196543aa216db1834e8e1e1632645af0f19a26da52dcd0e714a6",
+      "changes": [
+        "Stock HolyC struct copies"
+      ]
+    },
+    {
+      "path": "Apps/Sudoku/Sudoku.HC",
+      "sha256": "57c2e7a3383fb0b5b0b247d66a64c7cba65a49f6d059830f096ba940c89ca5d6",
+      "changes": [
+        "Stock HolyC struct copies",
+        "RelicOS score and save paths"
+      ]
+    },
+    {
+      "path": "Apps/Sudoku/Run.HC",
+      "sha256": "0d6b4c412a0c68ceead77fac58d7b94d1ddcf4fb66b5304ecb8246a85608f750",
+      "changes": [
+        "Stock HolyC struct copies",
+        "RelicOS score and save paths"
+      ]
+    },
+    {
+      "path": "Apps/Sudoku/Load.HC",
+      "sha256": "e5a948ccfb727f9c52f846ea8557e372357c75e097592e35c8f1363ec70ce789",
+      "changes": [
+        "Stock HolyC struct copies",
+        "RelicOS score and save paths"
+      ]
+    }
+  ]
+}

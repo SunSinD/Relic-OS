@@ -1,0 +1,462 @@
+//YKD DE widget toolkit: truecolor widgets inside normal ZealOS task windows.
+//Mirrors erythros Widget.HC. The app task hangs DEWidgetsDrawIt() on
+//Fs->draw_it; input arrives through the task message queue in window-relative
+//pixel coords.
+//
+//App skeleton:
+//	ctx = DEWinInit("My App");
+//	DEButton(ctx, x,y,w,h, "Do it", &cb);
+//	while (DEWinPoll(ctx)) Sleep(30);	//FALSE on <ESC>
+//	DEWinExit(ctx);
+
+#define DEWT_PANEL	0
+#define DEWT_LABEL	1
+#define DEWT_BUTTON	2
+#define DEWT_CHECK	3
+#define DEWT_SLIDER	4
+#define DEWT_INPUT	5
+#define DEWT_SWATCH	6
+
+#define DE_WIDGET_TEXT_LEN	48
+
+class CDEWidget
+{
+	CDEWidget	*next;
+	I64			 type;
+	I64			 x, y, w, h;	//Window pixel coords.
+	U8			 text[DE_WIDGET_TEXT_LEN];
+	Bool		 visible, checked, pressed, big;
+	I64			 val, lo, hi;	//Slider.
+	U0			(*on_click)(CDEWidget *wg);		//Button + checkbox.
+	U0			(*on_change)(CDEWidget *wg);	//Slider, fires per value step.
+	I64			 user_data;
+};
+
+class CDEWinCtx
+{
+	CTask		*task;
+	CDEWidget	*head, *tail;
+	CDEWidget	*grab;			//Slider being dragged.
+	CDEWidget	*focus;			//Text input receiving keys.
+	//Keys DEWinPoll does not consume itself. NULL = dropped.
+	U0			(*on_key)(CDEWinCtx *ctx, I64 ch, I64 sc);
+	I64			 old_inhibit;
+	I64			 content_h;		//lowest widget edge; the vertical scroll range
+};
+
+CDEWidget *DEWidgetAdd(CDEWinCtx *ctx, I64 type, I64 x, I64 y, I64 w, I64 h, U8 *text)
+{
+	CDEWidget	*wg = CAlloc(sizeof(CDEWidget));
+	I64			 len;
+
+	wg->type	= type;
+	wg->x = x;	wg->y = y;
+	wg->w = w;	wg->h = h;
+	wg->visible	= TRUE;
+	if (text)
+	{
+		len = StrLen(text);
+		if (len > DE_WIDGET_TEXT_LEN - 1)
+			len = DE_WIDGET_TEXT_LEN - 1;
+		MemCopy(wg->text, text, len);
+	}
+	if (ctx->tail)
+		ctx->tail->next = wg;
+	else
+		ctx->head = wg;
+	ctx->tail = wg;
+
+	if (y + h > ctx->content_h)
+		ctx->content_h = y + h;
+
+	return wg;
+}
+
+CDEWidget *DEPanel(CDEWinCtx *ctx, I64 x, I64 y, I64 w, I64 h)
+{
+	return DEWidgetAdd(ctx, DEWT_PANEL, x, y, w, h, NULL);
+}
+
+CDEWidget *DELabel(CDEWinCtx *ctx, I64 x, I64 y, U8 *text, Bool big=FALSE)
+{
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_LABEL, x, y, StrLen(text) * FONT_WIDTH, FONT_HEIGHT, text);
+
+	wg->big = big;
+	return wg;
+}
+
+CDEWidget *DEButton(CDEWinCtx *ctx, I64 x, I64 y, I64 w, I64 h, U8 *text, U0 (*on_click)(CDEWidget *wg))
+{
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_BUTTON, x, y, w, h, text);
+
+	wg->on_click = on_click;
+	return wg;
+}
+
+CDEWidget *DECheck(CDEWinCtx *ctx, I64 x, I64 y, U8 *text, Bool checked, U0 (*on_click)(CDEWidget *wg))
+{
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_CHECK, x, y, 14 + 6 + StrLen(text) * FONT_WIDTH, 14, text);
+
+	wg->checked  = checked;
+	wg->on_click = on_click;
+	return wg;
+}
+
+CDEWidget *DESlider(CDEWinCtx *ctx, I64 x, I64 y, I64 w, U8 *text,
+					I64 lo, I64 hi, I64 val, U0 (*on_change)(CDEWidget *wg))
+{
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_SLIDER, x, y, w, 24, text);
+
+	wg->lo = lo;
+	wg->hi = hi;
+	wg->val = ClampI64(val, lo, hi);
+	wg->on_change = on_change;
+	return wg;
+}
+
+CDEWidget *DESwatch(CDEWinCtx *ctx, I64 x, I64 y, I64 w, I64 h, I64 which)
+{//Live colour chip. which: 0 = accent, 1 = secondary accent. Reads de_theme
+//at draw time.
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_SWATCH, x, y, w, h, NULL);
+
+	wg->user_data = which;
+	return wg;
+}
+
+CDEWidget *DEInput(CDEWinCtx *ctx, I64 x, I64 y, I64 w, U8 *default_text,
+				   U0 (*on_submit)(CDEWidget *wg))
+{//Single-line text input. Click to focus, type, <ENTER> fires on_submit.
+//wg->val doubles as the text length.
+	CDEWidget *wg = DEWidgetAdd(ctx, DEWT_INPUT, x, y, w, 18, default_text);
+
+	wg->val = StrLen(wg->text);
+	wg->on_click = on_submit;
+	return wg;
+}
+
+U0 DEWidgetsDrawIt(CTask *task, CDC *dc)
+{//Runs in the WinMgr each frame. Window-relative coords; the screen alias
+//z-clips.
+	CDEWinCtx	*ctx = task->user_data;
+	CDEWidget	*wg;
+	I64			 mx, my, tx, kx, wy;
+	Bool		 hot;
+	U8			 buf[DE_WIDGET_TEXT_LEN + 24];
+
+	if (!ctx)
+		return;
+	mx = mouse.pos.x - task->pix_left - task->scroll_x;
+	my = mouse.pos.y - task->pix_top  - task->scroll_y + task->vert_scroll.pos;
+
+	dc->color = de_theme.win_bg;
+	GrRect(dc, 0, 0, task->pix_width, task->pix_height);
+
+	wg = ctx->head;
+	while (wg)
+	{
+		if (wg->visible)
+		{//Widget coords are content space; the window shows a scrolled slice.
+			wy = wg->y - task->vert_scroll.pos;
+			hot = wg->x <= mx < wg->x + wg->w && wg->y <= my < wg->y + wg->h;
+			switch (wg->type)
+			{
+				case DEWT_PANEL:
+					dc->color = de_theme.panel;
+					GrRect(dc, wg->x, wy, wg->w, wg->h);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, wg->x, wy, wg->w, 1);
+					GrRect(dc, wg->x, wy + wg->h - 1, wg->w, 1);
+					GrRect(dc, wg->x, wy, 1, wg->h);
+					GrRect(dc, wg->x + wg->w - 1, wy, 1, wg->h);
+					break;
+				case DEWT_LABEL:
+					if (wg->big)
+						dc->color = de_theme.accent;
+					else
+						dc->color = de_theme.text_dim;
+					GrPrint(dc, wg->x, wy, "%s", wg->text);
+					break;
+				case DEWT_BUTTON:
+					if (wg->pressed)
+						dc->color = de_theme.bttn_focus;
+					else if (hot)
+						dc->color = de_theme.bttn_hot;
+					else
+						dc->color = de_theme.bttn;
+					GrRect(dc, wg->x, wy, wg->w, wg->h);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, wg->x, wy, wg->w, 1);
+					GrRect(dc, wg->x, wy + wg->h - 1, wg->w, 1);
+					GrRect(dc, wg->x, wy, 1, wg->h);
+					GrRect(dc, wg->x + wg->w - 1, wy, 1, wg->h);
+					dc->color = de_theme.text;
+					GrPrint(dc, wg->x + (wg->w - StrLen(wg->text) * FONT_WIDTH) / 2,
+								wy + (wg->h - FONT_HEIGHT) / 2, "%s", wg->text);
+					break;
+				case DEWT_CHECK:
+					dc->color = de_theme.bttn;
+					GrRect(dc, wg->x, wy, 14, 14);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, wg->x, wy, 14, 1);
+					GrRect(dc, wg->x, wy + 13, 14, 1);
+					GrRect(dc, wg->x, wy, 1, 14);
+					GrRect(dc, wg->x + 13, wy, 1, 14);
+					if (wg->checked)
+					{
+						dc->color = de_theme.accent;
+						GrRect(dc, wg->x + 3, wy + 3, 8, 8);
+					}
+					if (hot)
+						dc->color = de_theme.text;
+					else
+						dc->color = de_theme.text_dim;
+					GrPrint(dc, wg->x + 20, wy + 3, "%s", wg->text);
+					break;
+				case DEWT_SWATCH:
+					if (wg->user_data)
+						dc->color = de_theme.accent2;
+					else
+						dc->color = de_theme.accent;
+					GrRect(dc, wg->x, wy, wg->w, wg->h);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, wg->x, wy, wg->w, 1);
+					GrRect(dc, wg->x, wy + wg->h - 1, wg->w, 1);
+					GrRect(dc, wg->x, wy, 1, wg->h);
+					GrRect(dc, wg->x + wg->w - 1, wy, 1, wg->h);
+					break;
+				case DEWT_INPUT:
+					dc->color = de_theme.win_bg;
+					GrRect(dc, wg->x, wy, wg->w, wg->h);
+					if (ctx->focus == wg)
+						dc->color = de_theme.accent;
+					else if (hot)
+						dc->color = de_theme.panel_edge;
+					else
+						dc->color = de_theme.bttn;
+					GrRect(dc, wg->x, wy, wg->w, 1);
+					GrRect(dc, wg->x, wy + wg->h - 1, wg->w, 1);
+					GrRect(dc, wg->x, wy, 1, wg->h);
+					GrRect(dc, wg->x + wg->w - 1, wy, 1, wg->h);
+					dc->color = de_theme.text;
+					if (ctx->focus == wg && Blink)
+						StrPrint(buf, "%s_", wg->text);
+					else
+						StrPrint(buf, "%s", wg->text);
+					GrPrint(dc, wg->x + 5, wy + (wg->h - FONT_HEIGHT) / 2, "%s", buf);
+					break;
+				case DEWT_SLIDER:
+					StrPrint(buf, "%s: %d", wg->text, wg->val);
+					dc->color = de_theme.text_dim;
+					GrPrint(dc, wg->x, wy, "%s", buf);
+					tx = wy + FONT_HEIGHT + 4;	//Track y.
+					dc->color = de_theme.bttn;
+					GrRect(dc, wg->x, tx, wg->w, 6);
+					kx = wg->x;
+					if (wg->hi > wg->lo)
+						kx += (wg->val - wg->lo) * (wg->w - 8) / (wg->hi - wg->lo);
+					dc->color = de_theme.accent_dim;
+					GrRect(dc, wg->x, tx, kx - wg->x, 6);
+					if (hot || ctx->grab == wg)
+						dc->color = de_theme.accent;
+					GrRect(dc, kx, tx - 3, 8, 12);
+					break;
+			}
+		}
+		wg = wg->next;
+	}
+}
+
+U0 DESliderTrack(CDEWinCtx *ctx, I64 mx)
+{//Map window-relative mouse x onto the grabbed slider's range.
+	CDEWidget	*wg = ctx->grab;
+	I64			 val;
+
+	if (wg->hi <= wg->lo || wg->w <= 8)
+		return;
+	val = wg->lo + (mx - wg->x - 4) * (wg->hi - wg->lo) / (wg->w - 8);
+	val = ClampI64(val, wg->lo, wg->hi);
+	if (val != wg->val)
+	{
+		wg->val = val;
+		if (wg->on_change)
+			(*wg->on_change)(wg);
+	}
+}
+
+Bool DEWinPoll(CDEWinCtx *ctx)
+{//Pump input for the widget window. Returns FALSE when the user hit <ESC>.
+	CDEWidget	*wg;
+	I64			 m, a1, a2, vmax;
+	Bool		 alive = TRUE;
+
+	//Scroll range follows the window. vert_scroll.pos is the only offset, the
+	//way SpriteMesh.ZC does it; task->scroll_y belongs to the text layer and
+	//writing it here would fight CTRL grab-scroll.
+	vmax = ctx->content_h - ctx->task->pix_height;
+	if (vmax < 0)
+		vmax = 0;
+	ctx->task->vert_scroll.min = 0;
+	ctx->task->vert_scroll.max = vmax;
+	if (ctx->task->vert_scroll.pos > vmax)
+		ctx->task->vert_scroll.pos = vmax;
+	if (ctx->task->vert_scroll.pos < 0)
+		ctx->task->vert_scroll.pos = 0;
+
+	//Slider drag tracks the mouse directly, not queued messages.
+	if (ctx->grab)
+	{
+		if (mouse.lb)
+			DESliderTrack(ctx, mouse.pos.x - ctx->task->pix_left - ctx->task->scroll_x);
+		else
+			ctx->grab = NULL;
+	}
+
+	while (m = MessageScan(&a1, &a2))
+	{
+		switch (m)
+		{
+			case MESSAGE_MS_L_DOWN:
+				ctx->focus = NULL; //Click anywhere unfocuses text inputs.
+				wg = ctx->head;
+				while (wg)
+				{
+					if (wg->visible &&
+						(wg->type == DEWT_BUTTON || wg->type == DEWT_CHECK ||
+						 wg->type == DEWT_SLIDER || wg->type == DEWT_INPUT) &&
+						wg->x <= a1 < wg->x + wg->w &&
+						wg->y <= a2 + ctx->task->vert_scroll.pos < wg->y + wg->h)
+					{
+						switch (wg->type)
+						{
+							case DEWT_BUTTON:
+								wg->pressed = TRUE;
+								if (wg->on_click)
+									(*wg->on_click)(wg);
+								break;
+							case DEWT_CHECK:
+								wg->checked = !wg->checked;
+								if (wg->on_click)
+									(*wg->on_click)(wg);
+								break;
+							case DEWT_SLIDER:
+								ctx->grab = wg;
+								DESliderTrack(ctx, a1);
+								break;
+							case DEWT_INPUT:
+								ctx->focus = wg;
+								break;
+						}
+						break;
+					}
+					wg = wg->next;
+				}
+				break;
+			case MESSAGE_MS_L_UP:
+				wg = ctx->head;
+				while (wg)
+				{
+					wg->pressed = FALSE;
+					wg = wg->next;
+				}
+				break;
+			case MESSAGE_KEY_DOWN:
+				if (a1 == CH_ESC || a1 == CH_SHIFT_ESC)
+					alive = FALSE;
+				else if (!ctx->focus && ctx->on_key)
+					(*ctx->on_key)(ctx, a1, a2);
+				else if (ctx->focus)
+				{//Route typing into the focused text input.
+					wg = ctx->focus;
+					if (a1 == CH_BACKSPACE)
+					{
+						if (wg->val > 0)
+							wg->text[--wg->val] = 0;
+					}
+					else if (a1 == '\n')
+					{
+						ctx->focus = NULL;
+						if (wg->on_click)
+							(*wg->on_click)(wg); //Submit.
+					}
+					else if (' ' <= a1 < 0x7F && wg->val < DE_WIDGET_TEXT_LEN - 2)
+					{
+						wg->text[wg->val++] = a1;
+						wg->text[wg->val] = 0;
+					}
+				}
+				break;
+		}
+	}
+
+	return alive;
+}
+
+CDEWinCtx *DEWinInit(U8 *title, I64 pix_w, I64 pix_h)
+{//Turn the current (terminal) task into a centered widget window. Size is in
+//PIXELS: widgets lay out in pixels, so a cell count would change the window's
+//real size with the font.
+	I64 cols = (pix_w + FONT_WIDTH - 1) / FONT_WIDTH;
+	I64 rows = (pix_h + FONT_HEIGHT - 1) / FONT_HEIGHT;
+
+	CDEWinCtx *ctx = CAlloc(sizeof(CDEWinCtx));
+
+	//A raw Spawn()ed task owns no put/display doc; DocClear below writes
+	//through them. Spawn-launched widget apps close with their window instead
+	//of dropping back to a terminal prompt.
+	if (!DocPut)
+		DocTermNew;
+	LBts(&Fs->display_flags, DISPLAYf_SHOW);
+	ctx->task = Fs;
+	ctx->old_inhibit = Fs->win_inhibit;
+	StrCopy(Fs->task_title, title);
+	WinHorz(MaxI64(1, (TEXT_COLS - cols) / 2), MaxI64(1, (TEXT_COLS - cols) / 2) + cols - 1);
+	WinVert(MaxI64(1, (TEXT_ROWS - rows) / 2), MaxI64(1, (TEXT_ROWS - rows) / 2) + rows - 1);
+	//WIF_SELF_MS_L stays uninhibited: click-to-focus rides
+	//WinCursorPosSet->WinToTop, and the doc is empty so cursor repositioning is
+	//harmless. MS_L_D inhibit makes L_DOWN/L_UP deliver instantly, skipping the
+	//double-click timeout.
+	//WIF_SELF_CTRLS must be clear or the WinMgr skips every ctrl click and wheel
+	//event for this window, including the scroll bars below. WIG_TASK_DEFAULT
+	//sets it as part of its 0xFFFF block.
+	Fs->win_inhibit = (ctx->old_inhibit | WIF_FOCUS_TASK_MS_L_D) & ~WIF_SELF_CTRLS;
+	WinFocus;
+	//Focus does not raise: the task list is z-order, so a window spawned behind
+	//an existing one stays buried.
+	WinToTop;
+	WinZBufUpdate;
+	DocCursor(OFF);
+	DocClear;
+	Fs->user_data = ctx;
+	//Native window scroll bars: the thumb lives in the border, and the wheel and
+	//drag handlers already move vert_scroll.pos.
+	//DOCF_NO_SCROLL_BARS keeps DocRecalc out of them. Without it, every full
+	//refresh writes min/max/pos back from the doc, and this doc is empty, so the
+	//range collapses to 0 and the thumb snaps to the top.
+	if (DocPut)
+		DocPut->flags |= DOCF_NO_SCROLL_BARS;
+	WinScrollsInit(Fs);
+	Fs->vert_scroll.min = 0;
+	Fs->vert_scroll.pos = 0;
+	Fs->vert_scroll.max = 0;
+	Fs->draw_it = &DEWidgetsDrawIt;
+
+	return ctx;
+}
+
+U0 DEWinExit(CDEWinCtx *ctx)
+{
+	CDEWidget *wg = ctx->head, *next;
+
+	Fs->draw_it = NULL;
+	Fs->user_data = 0;
+	Fs->win_inhibit = ctx->old_inhibit;
+	while (wg)
+	{
+		next = wg->next;
+		Free(wg);
+		wg = next;
+	}
+	Free(ctx);
+	DocCursor(ON);
+	DocClear;
+}

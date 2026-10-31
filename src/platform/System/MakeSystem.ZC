@@ -1,0 +1,37 @@
+Cd(__DIR__);;
+#include "Externs"
+#include "Training"
+#include "Memory"
+#include "Math/MakeMath"
+#include "Media/MakeMediaCodec"
+#include "Gr/MakeGr"
+#include "Sound"
+#include "Audio/MakeAudio"
+#include "Media/MakeMedia"
+#include "BlkDev/MakeZBlkDev"
+#include "Menu"
+#include "Win"
+#include "WinMgr"
+#include "Debug"
+#include "::/System/God/GodExterns"
+#include "DolDoc/MakeDoc"
+LBts(&sys_run_level, RLf_DOC);
+#include "Ctrls/MakeCtrls"
+#include "InFile"
+#include "Registry"
+#include "AutoComplete/MakeAC"
+#include "God/MakeGod"
+#include "Hash"
+#include "TaskSettings"
+#include "PCILookUpSingle"
+#include "DevInfo"
+#include "Define"
+#include "WallPaper"
+#include "Mouse"
+//Last, and after DevInfo: VSerInit runs at include time and calls
+//PCIDevFind, which Externs.ZC only declares. An extern resolves when its
+//definition loads, so calling one earlier compiles and then faults with
+//UndefinedExtern.
+#include "VirtIOSerial"
+#include "Clip"			//the clipboard bridge over it; self-gating on VSerPresent
+Cd("..");;

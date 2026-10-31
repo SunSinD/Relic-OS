@@ -1,0 +1,553 @@
+// missiles
+//
+// position in 64ths of a tile; velocity added per 20Hz tick. gfx are CL2
+// under Missiles\, named by misfiledata mAnimName (misdat.cpp:136): a file
+// count of 1 is a single file, 8 or 16 is one file per facing suffixed 1..N.
+//
+// missile ids, the damage school table and D1PlrHurt live in D1Mon.
+
+#define D1_MAXMIS		48
+
+class CD1Mis
+{
+	I64	 type;
+	I64	 px;			//tile * 64
+	I64	 py;
+	I64	 vx;			//per tick, 64ths of a tile
+	I64	 vy;
+	I64	 dir16;
+	I64	 frame;
+	I64	 owner;			//-1 player, else monster index
+	I64	 dmg;			//64ths
+	I64	 range;			//ticks left
+	I64	 sx;			//origin tile
+	I64	 sy;
+	I64	 dist;			//tiles travelled (_midist counts ticks)
+	I64	 dmin;			//damage roll range in whole points, rolled at
+	I64	 dmax;			//impact (MonsterMHit). dmin < 0 = use dmg
+	Bool vs_plr;		//TARGET_PLAYERS (monsters + chest traps)
+	Bool active;
+};
+
+CD1Mis	d1_mis[D1_MAXMIS];
+Bool	d1_mis_init = FALSE;
+
+//one CL2 per facing per type, flat: type * 16 + facing
+U8	*d1_mis_gfx[D1_NMISTYPE * 16];
+I64	 d1_mis_nfr[D1_NMISTYPE];
+
+//misfiledata mAnimName; a %d marks a per-facing set
+U8 *d1_mis_file[D1_NMISTYPE] = {
+	"Missiles\\Arrows.CL2",		//MFILE_ARROWS
+	"Missiles\\Fireba%d.CL2",	//MFILE_FIREBA
+	"Missiles\\Fireba%d.CL2",	//MFILE_FIREBA, Fireball shares the bolt gfx
+	"Missiles\\Holy%d.CL2",		//MFILE_HOLY
+	"Missiles\\Flare.CL2",		//MFILE_FLARE
+	"Missiles\\Sklball%d.CL2",	//MFILE_SKLBALL
+	"Missiles\\Firerun%d.CL2",	//MFILE_FIRERUN
+	"Missiles\\Miniltng.CL2",	//MFILE_MINILTNG
+	"Missiles\\Magball%d.CL2",	//MFILE_MAGBALL
+	"Missiles\\Acidbf%d.CL2",	//MFILE_ACIDBF
+	"Missiles\\Thinlght.CL2"};	//MFILE_THINLGHT
+
+//misfiledata mAnimFAmt. Sklball ships 9 files; the ninth is the impact anim,
+//which this port does not draw, so only 1..8 are the facings.
+I64 d1_mis_ndir[D1_NMISTYPE] = {1, 16, 16, 16, 1, 8, 8, 1, 8, 16, 1};
+
+//Arrows.CL2 holds one frame per facing instead of an animation
+Bool d1_mis_dirframe[D1_NMISTYPE] = {TRUE, FALSE, FALSE, FALSE, FALSE, FALSE,
+	FALSE, FALSE, FALSE, FALSE, FALSE};
+
+//missiledata mResist (misdat.cpp:11)
+I64 d1_mis_school[D1_NMISTYPE] = {D1RES_NONE, D1RES_FIRE, D1RES_FIRE,
+	D1RES_NONE, D1RES_MAGIC, D1RES_MAGIC, D1RES_FIRE, D1RES_LIGHTNING,
+	D1RES_FIRE, D1RES_ACID, D1RES_LIGHTNING};
+
+//64ths of a tile per tick
+I64 d1_mis_speed[D1_NMISTYPE] = {48, 32, 32, 40, 32, 32, 32, 40, 32, 32, 40};
+
+//impact hits the eight neighbors for half (MI_Fireball, MI_Element)
+Bool d1_mis_splash[D1_NMISTYPE] = {FALSE, FALSE, TRUE, FALSE, FALSE, FALSE,
+	TRUE, FALSE, FALSE, FALSE, FALSE};
+
+//misfiledata mAnimWidth
+I64 d1_mis_width[D1_NMISTYPE] = {96, 96, 96, 96, 128, 96, 96, 64, 128, 96, 96};
+
+//screen-space unit vectors for the 16 facings, 0 = south (down), clockwise,
+//scaled by 256. screen y grows downward.
+I64 d1_dir16_x[16] = {0, -98, -181, -237, -256, -237, -181, -98,
+	0, 98, 181, 237, 256, 237, 181, 98};
+I64 d1_dir16_y[16] = {256, 237, 181, 98, 0, -98, -181, -237,
+	-256, -237, -181, -98, 0, 98, 181, 237};
+
+U0 D1MisInit()
+{
+	I64 t;
+	I64 d;
+	I64 n;
+	I64 size;
+	U8	path[48];
+	U8	*buf;
+
+	if (d1_mis_init)
+		return;
+
+	for (t = 0; t < D1_MAXMIS; t++)
+		d1_mis[t].active = FALSE;
+
+	for (t = 0; t < D1_NMISTYPE; t++)
+	{
+		d1_mis_nfr[t] = 1;
+		n = d1_mis_ndir[t];
+		for (d = 0; d < 16; d++)
+			d1_mis_gfx[t * 16 + d] = NULL;
+
+		for (d = 0; d < n; d++)
+		{
+			if (n == 1)
+				buf = D1MpqRead(d1_mis_file[t], &size);
+			else
+			{
+				StrPrint(path, d1_mis_file[t], d + 1);
+				buf = D1MpqRead(path, &size);
+			}
+			d1_mis_gfx[t * 16 + d] = buf;
+			if (buf && d == 0)
+				d1_mis_nfr[t] = D1CelNFrames(buf);
+		}
+	}
+
+	d1_mis_init = TRUE;
+}
+
+U0 D1MisClear()
+{
+	I64 i;
+
+	for (i = 0; i < D1_MAXMIS; i++)
+		d1_mis[i].active = FALSE;
+}
+
+I64 D1MisDir16(I64 tdx, I64 tdy)
+{
+	I64 sdx = (tdx - tdy) * 2;		//screen dx ~ 32 * per-tile
+	I64 sdy = tdx + tdy;			//screen dy ~ 16 * per-tile
+	I64 best = 0;
+	I64 best_d = 0x8000000000000000;
+	I64 d;
+	I64 i;
+
+	for (i = 0; i < 16; i++)
+	{
+		d = sdx * d1_dir16_x[i] + sdy * d1_dir16_y[i];
+		if (d > best_d)
+		{
+			best_d = d;
+			best   = i;
+		}
+	}
+	return best;
+}
+
+I64 D1MisSpawn(I64 type, I64 owner, I64 sx, I64 sy, I64 tx, I64 ty, I64 dmg)
+{//from tile sx,sy toward tile tx,ty. returns the slot, -1 when none is free
+	CD1Mis *ms = NULL;
+	I64	 slot = -1;
+	I64	 i;
+	I64	 dx;
+	I64	 dy;
+	I64	 len;
+	I64	 speed;
+
+	D1MisInit;
+
+	if (type < 0 || type >= D1_NMISTYPE)
+		return -1;
+
+	for (i = 0; i < D1_MAXMIS; i++)
+	{
+		if (!ms && !d1_mis[i].active)
+		{
+			ms   = &d1_mis[i];
+			slot = i;
+		}
+	}
+	if (!ms)
+		return -1;
+	if (sx == tx && sy == ty)
+		ty++;
+
+	dx = (tx - sx) * 64;
+	dy = (ty - sy) * 64;
+	len = 0;
+	while ((len + 1) * (len + 1) <= dx * dx + dy * dy)
+		len++;
+	if (len < 1)
+		len = 1;
+
+	speed = d1_mis_speed[type];
+
+	ms->type   = type;
+	ms->px     = sx * 64 + 32;
+	ms->py     = sy * 64 + 32;
+	ms->vx     = (dx * speed) / len;
+	ms->vy     = (dy * speed) / len;
+	ms->dir16  = D1MisDir16(tx - sx, ty - sy);
+	ms->frame  = 1;
+	ms->owner  = owner;
+	ms->dmg    = dmg;
+	ms->range  = 48;
+	ms->sx     = sx;
+	ms->sy     = sy;
+	ms->dist   = 0;
+	ms->dmin   = -1;
+	ms->dmax   = -1;
+	//owner >= 0 monster shot; owner == -2 chest/wall trap
+	ms->vs_plr = (owner >= 0 || owner == -2);
+	ms->active = TRUE;
+	return slot;
+}
+
+U0 D1MisSetDamRange(I64 slot, I64 dmin, I64 dmax)
+{//MonsterMHit rolls mindam..maxdam at impact, not at fire time
+	if (slot < 0 || slot >= D1_MAXMIS)
+		return;
+	if (dmax < dmin)
+		dmax = dmin;
+	d1_mis[slot].dmin = dmin;
+	d1_mis[slot].dmax = dmax;
+}
+
+U0 D1MisHitPlayer(CD1Mis *ms)
+{
+	I64 chance = 30 + 2 * d1_plr_lvl;
+	CD1MonType *t;
+
+	if (d1_plr_dead)
+		return;
+	if (ms->owner >= 0)
+	{
+		t = &d1_montypes[d1_mons[ms->owner].type];
+		chance = 30 + t->hit + 2 * t->mlvl - 2 * d1_plr_lvl - d1_plr_dex / 2;
+	}
+	if (chance < 15)
+		chance = 15;
+
+	if (D1Rnd(100) < chance)
+	{
+		D1PlrHurt(ms->dmg);
+		if (d1_opt_sfx)
+		{
+			if (D1SndRnd2())
+				D1SndPlay("Sfx\\Warrior\\Wario69b.wav");
+			else
+				D1SndPlay("Sfx\\Warrior\\Warior69.wav");
+		}
+	}
+}
+
+Bool D1MisCanHit(I64 type, I64 mi)
+{//MonsterMHit: Holy Bolt passes through anything that is not undead
+	if (type != D1MIS_HOLY)
+		return TRUE;
+	if (d1_mons[mi].type == D1_MT_DIABLO)
+		return TRUE;
+	return ToBool(d1_montypes[d1_mons[mi].type].mclass == D1MC_UNDEAD);
+}
+
+Bool D1MisSpellHit(I64 mi, I64 dist)
+{//MonsterMHit magic line (missiles.cpp:707) for a spell that carries no
+ //missile of its own: hper = _pMagic - (mLevel<<1) - dist + 50, +20 Sorcerer,
+ //clamped 5..95. a stoned monster cannot dodge.
+	CD1MonType *t = &d1_montypes[d1_mons[mi].type];
+	I64 hper = d1_plr_mag - (t->mlvl << 1) - dist + 50;
+
+	if (d1_plr_class == D1CL_SORCERER)
+		hper += 20;
+	if (hper < 5)
+		hper = 5;
+	if (hper > 95)
+		hper = 95;
+	if (d1_mons[mi].stone > 0)
+		return TRUE;
+	return ToBool(D1Rnd(100) < hper);
+}
+
+I64 D1MisPlrHitChance(CD1Mis *ms, I64 mi)
+{//MonsterMHit (missiles.cpp:679) hper for a player missile, clamped 5..95.
+ //missiledata mType 0 (arrows) uses the dexterity line with the (dist*dist)>>1
+ //range falloff; every other player missile uses the magic line.
+	CD1MonType *t = &d1_montypes[d1_mons[mi].type];
+	I64 dist = ms->dist;
+	I64 hper;
+
+	if (ms->type == D1MIS_ARROW)
+	{
+		hper = d1_plr_dex + D1PowToHit() + d1_plr_lvl - t->ac -
+			((dist * dist) >> 1) + 50;
+		if (d1_plr_class == D1CL_ROGUE)
+			hper += 20;
+		if (d1_plr_class == D1CL_WARRIOR)
+			hper += 10;
+	}
+	else
+	{
+		hper = d1_plr_mag - (t->mlvl << 1) - dist + 50;
+		if (d1_plr_class == D1CL_SORCERER)
+			hper += 20;
+	}
+	if (hper < 5)
+		hper = 5;
+	if (hper > 95)
+		hper = 95;
+	return hper;
+}
+
+I64 D1MisRollDam(CD1Mis *ms, I64 mi)
+{//MonsterMHit damage, 64ths. dmin < 0 = the caller pre-rolled into dmg
+	I64 dam;
+
+	if (ms->type == D1MIS_BONESPIRIT)
+		return d1_mons[mi].hp / 3;			//missiles.cpp:733
+	if (ms->dmin < 0)
+		return ms->dmg;
+	dam = ms->dmin + D1Rnd(ms->dmax - ms->dmin + 1);
+	if (ms->type == D1MIS_ARROW)
+	{//_pDamageMod full for the Rogue, halved for everyone else
+		if (d1_plr_class == D1CL_ROGUE)
+			dam += D1PlrDamageMod();
+		else
+			dam += D1PlrDamageMod() >> 1;
+	}
+	if (dam < 0)
+		dam = 0;
+	return dam << 6;
+}
+
+Bool D1MisPlrRollHit(CD1Mis *ms, I64 mi)
+{//MonsterMHit: hit = random_(69,100) < hper. a stoned monster cannot dodge
+	if (d1_mons[mi].stone > 0)
+		return TRUE;
+	return ToBool(D1Rnd(100) < D1MisPlrHitChance(ms, mi));
+}
+
+U0 D1MisImpact(CD1Mis *ms, I64 mi, I64 tx, I64 ty)
+{
+	I64 school = d1_mis_school[ms->type];
+	I64 dmg    = ms->dmg;
+	I64 d;
+	I64 nx;
+	I64 ny;
+	I64 ni;
+
+	if (mi >= 0)
+	{
+		dmg = D1MisRollDam(ms, mi);
+		D1MonHurtType(mi, dmg, school);
+	}
+
+	if (!d1_mis_splash[ms->type])
+		return;
+
+	//MI_Fireball (missiles.cpp:4059) detonates the whole 3x3 at full damage
+	for (d = 0; d < 8; d++)
+	{
+		nx = tx + d1_dir_dx[d];
+		ny = ty + d1_dir_dy[d];
+		ni = D1MonAtTile(nx, ny);
+		if (ni >= 0 && ni != mi)
+			D1MonHurtType(ni, D1MisRollDam(ms, ni), school);
+	}
+}
+
+U0 D1MisTick()
+{
+	CD1Mis *ms;
+	I64	 i;
+	I64	 tx;
+	I64	 ty;
+	I64	 ady;
+	I64	 mi;
+
+	for (i = 0; i < D1_MAXMIS; i++)
+	{
+		ms = &d1_mis[i];
+		if (ms->active)
+		{
+			ms->px += ms->vx;
+			ms->py += ms->vy;
+			ms->range--;
+			ms->frame++;
+			if (ms->frame > d1_mis_nfr[ms->type])
+				ms->frame = 1;
+
+			tx = ms->px / 64;
+			ty = ms->py / 64;
+
+			//_midist: distance from the origin tile
+			ms->dist = tx - ms->sx;
+			if (ms->dist < 0)
+				ms->dist = -ms->dist;
+			ady = ty - ms->sy;
+			if (ady < 0)
+				ady = -ady;
+			if (ady > ms->dist)
+				ms->dist = ady;
+
+			if (ms->range <= 0 || !D1Walkable(tx, ty))
+			{
+				//MI_Fireball detonates on a wall and on range-out; the splash
+				//sits on the last tile the missile occupied
+				if (d1_mis_splash[ms->type] && !ms->vs_plr)
+					D1MisImpact(ms, -1, (ms->px - ms->vx) / 64,
+						(ms->py - ms->vy) / 64);
+				if (d1_mis_school[ms->type] == D1RES_FIRE && d1_opt_sfx)
+					D1SndPlay("Sfx\\Misc\\Firimp2.wav");
+				ms->active = FALSE;
+			}
+			else
+			{
+				if (!ms->vs_plr)
+				{
+					mi = D1MonAtTile(tx, ty);
+					if (mi >= 0 && D1MisCanHit(ms->type, mi) &&
+						D1MisPlrRollHit(ms, mi))
+					{
+						D1MisImpact(ms, mi, tx, ty);
+						if (d1_mis_school[ms->type] == D1RES_FIRE &&
+							d1_opt_sfx)
+							D1SndPlay("Sfx\\Misc\\Firimp2.wav");
+						ms->active = FALSE;
+					}
+				}
+				else if (tx == d1_plr_tile_x && ty == d1_plr_tile_y)
+				{
+					D1MisHitPlayer(ms);
+					ms->active = FALSE;
+				}
+			}
+		}
+	}
+}
+
+U0 D1MisDrawOne(CD1Mis *ms)
+{
+	I64	 rx;
+	I64	 ry;
+	I64	 sx;
+	I64	 sy;
+	I64	 n;
+	I64	 f;
+	U8	*buf;
+
+	rx = ms->px - d1_view_x * 64 - 32;
+	ry = ms->py - d1_view_y * 64 - 32;
+	sx = d1_w / 2 + ((rx - ry) * 32) / 64 - d1_view_xoff;
+	sy = d1_vp_h / 2 + ((rx + ry) * 16) / 64 - d1_view_yoff + 16;
+
+	n = d1_mis_ndir[ms->type];
+	if (n == 1)
+		buf = d1_mis_gfx[ms->type * 16];
+	else if (n == 8)
+		buf = d1_mis_gfx[ms->type * 16 + (ms->dir16 >> 1)];
+	else
+		buf = d1_mis_gfx[ms->type * 16 + ms->dir16];
+
+	f = ms->frame;
+	if (d1_mis_dirframe[ms->type])
+		f = ms->dir16 + 1;
+
+	if (buf)
+	{
+		if (f > D1CelNFrames(buf))
+			f = 1;
+		D1Cl2Draw(sx - d1_mis_width[ms->type] / 2, sy, buf, f,
+			d1_mis_width[ms->type]);
+	}
+}
+
+U0 D1MisDrawAt(I64 x, I64 y)
+{//missiles on this tile paint with the cell (scrollrt). shade off.
+	CD1Mis *ms;
+	I64	 i;
+	I64	 tx;
+	I64	 ty;
+	U8	*save = d1_shade;
+
+	d1_shade = NULL;
+	for (i = 0; i < D1_MAXMIS; i++)
+	{
+		ms = &d1_mis[i];
+		if (ms->active)
+		{
+			tx = ms->px >> 6;
+			ty = ms->py >> 6;
+			if (tx == x && ty == y)
+				D1MisDrawOne(ms);
+		}
+	}
+	d1_shade = save;
+}
+
+U0 D1MisDrawAll()
+{//unused: cell insertion draws missiles
+	CD1Mis *ms;
+	I64	 i;
+
+	d1_shade = NULL;
+	for (i = 0; i < D1_MAXMIS; i++)
+	{
+		ms = &d1_mis[i];
+		if (ms->active)
+			D1MisDrawOne(ms);
+	}
+}
+
+U0 D1MisMonShoot(I64 mi)
+{//missile per monster AI in monster.cpp: MAI_Magma MIS_MAGMABALL, MAI_Acid
+ //MIS_ACID, MAI_Succ MIS_FLARE, MAI_Storm MIS_LIGHTCTRL2
+	CD1Mon	   *m = &d1_mons[mi];
+	CD1MonType *t = &d1_montypes[m->type];
+	I64 dmg = (t->dmin + D1Rnd(t->dmax - t->dmin + 1)) << 6;
+
+	if (t->missile < 0)
+		return;
+	D1MisSpawn(t->missile, mi, m->x, m->y, d1_plr_tile_x, d1_plr_tile_y, dmg);
+}
+
+U0 D1MisChestTrap(I64 ox, I64 oy, I64 trapk, I64 level)
+{//OperateChest AddMissile(..., TARGET_PLAYERS, -1, 0, 0) + IS_TRAP
+	I64 dmg = (10 + level * 2) << 6;
+	I64 mtype;
+	I64 d;
+	I64 tx;
+	I64 ty;
+
+	if (d1_opt_sfx)
+		D1SndPlay("Sfx\\Items\\Trap.wav");
+
+	if (trapk == 1)
+		mtype = D1MIS_FIREBOLT;		//MIS_FARROW uses fire bolt gfx
+	else if (trapk == 2)
+		mtype = D1MIS_LIGHTBOLT;
+	else
+		mtype = D1MIS_ARROW;
+
+	if (trapk == 2)
+	{//AddNova: eight bolts out of the chest
+		for (d = 0; d < 8; d++)
+		{
+			tx = ox + d1_dir_dx[d] * 6;
+			ty = oy + d1_dir_dy[d] * 6;
+			D1MisSpawn(mtype, -2, ox, oy, tx, ty, dmg);
+		}
+	}
+	//retail aims the last bolt at the player tile
+	D1MisSpawn(mtype, -2, ox, oy, d1_plr_tile_x, d1_plr_tile_y, dmg);
+}
+
+U0 D1MisHookInit()
+{
+	d1_mon_shoot_cb = &D1MisMonShoot;
+	d1_chest_trap_cb = &D1MisChestTrap;
+}

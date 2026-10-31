@@ -1,0 +1,4225 @@
+// app shell: window, input, frame loop.
+//
+// the blit runs in the draw_it callback on the window manager task, which must
+// never block.
+
+//cl_forwardspeed * cl_movespeedkey, the original's defaults. run exceeds
+//sv_maxspeed (320); the move code clamps it.
+#define QMOVE_SPEED		200.0	//world units per second
+
+//cl_yawspeed / cl_pitchspeed, the keyboard turn rates +left/+right/+lookup use
+#define QMOVE_TURN		140.0
+#define QMOVE_FAST		400.0
+#define QPITCH_LIMIT	89.0
+#define QDEFAULT_MAP	"maps/start.bsp"
+
+//entities are not in the PVS, so range-limit instead
+#define QENT_DRAW_DIST	2000.0
+#define QENT_LIGHT		170		//flat shade until models sample the lightmap
+
+#define QVIEW_HEIGHT	22.0	//eye height above the player origin
+
+//server tick: off the jiffy counter, not the render rate. QuakeC timings and
+//the physics were tuned against 72Hz.
+#define QSERVER_HZ			72.0
+#define QSERVER_STEP		(1.0 / QSERVER_HZ)
+//host.c clamps the frame delta to 0.2s; QSERVER_MAX_CATCHUP steps cover that
+//much game time, so the remainder carried between frames is under one step.
+#define QSERVER_MAX_ACCUM	0.2
+#define QSERVER_MAX_CATCHUP	16
+
+//view model sits at the eye - its verts already carry the offset. V_CalcRefdef
+//copies the view origin in and adds only bob.
+#define QVM_FORWARD		0.0
+#define QVM_RIGHT		0.0
+#define QVM_UP			0.0
+//R_SetupAliasLighting's floor for the view model:
+//    add = 72 - (lightcolor[0] + lightcolor[1] + lightcolor[2]);
+//per channel that is 24, so the gun is never fully black
+#define QVM_MINLIGHT	24
+
+CQVisState	*q_vis		= NULL;
+CQCanvas	*q_canvas	= NULL;
+
+F64	 q_origin[3];		//player origin, what physics moves
+F64	 q_view[3];			//eye position, origin plus the view height
+F64	 q_velocity[3];
+F64	 q_angles[3];
+Bool q_on_ground	= FALSE;
+Bool q_noclip		= FALSE;
+I64	 q_water_level	= 0;
+I64	 q_water_type	= 0;
+I64	 q_water_last	= 0;	//water level last frame, for surface crossings
+
+//the level the map's contents give, before QuakeC raises it - a ladder sets
+//waterlevel 2. the liquid sounds key off this, not the QuakeC value.
+I64	 q_water_real	= 0;
+
+I64	 q_items_last	= -1;
+I64	 q_items_flips	= 0;
+F64	 q_fov			= 90.0;
+I64	 q_blit_w		= 320;
+I64	 q_blit_h		= 240;
+I64	 q_blit_x		= 0;
+I64	 q_blit_y		= 0;
+Bool q_draw_entities = TRUE;
+Bool q_ready		= FALSE;
+F64	 q_fps			= 0.0;
+I64	 q_frame_count	= 0;
+
+Bool q_loading = FALSE;		//SCR_BeginLoadingPlaque / scr_drawloading
+
+U0 (*q_wm_draw_saved)(CTask *task, CDC *dc) = NULL;
+
+F64 q_t_mark		= 0.0;	//phase start, game task
+F64 q_t_blit_mark	= 0.0;	//phase start, wm task
+F64 q_t_srv_mark	= 0.0;
+F64 q_t_pres_mark	= 0.0;
+
+F64 q_t_input		= 0.0;
+F64 q_t_move		= 0.0;
+F64 q_t_part		= 0.0;
+F64 q_t_tail		= 0.0;
+F64 q_t_phase_mark	= 0.0;
+
+F64 q_t_music		= 0.0;
+
+U8  q_fps_shown[32];
+MemSet(q_fps_shown, 0, sizeof(q_fps_shown));
+
+U8  q_cdtrack_line[96];
+
+F64 q_t_render		= 0.0;
+F64 q_t_render_mark	= 0.0;
+
+F64 q_t_hiz			= 0.0;
+F64 q_t_stat		= 0.0;
+F64 q_t_vm			= 0.0;
+
+#define QSPEED_LINES	10
+#define QSPEED_LEN		192
+U8	 q_speed_line[QSPEED_LINES * QSPEED_LEN];
+F64	 q_speeds_at	= 0.0;
+Bool q_speeds_due	= TRUE;
+
+U8	*q_present_pix	= NULL;
+U32	*q_present_rgb	= NULL;
+I32	*q_present_dep	= NULL;
+I64	 q_present_w	= 0;
+I64	 q_present_h	= 0;
+Bool q_present_ok	= FALSE;
+CQCanvas q_present_shell;
+
+U0 QPresentInit()
+{//ZealC ignores a declaration initialiser on a global. these are handed to
+ //Free() the moment the canvas size disagrees.
+	q_present_pix = NULL;
+	q_present_rgb = NULL;
+	q_present_dep = NULL;
+	q_present_w   = 0;
+	q_present_h   = 0;
+	q_present_ok  = FALSE;
+	q_speeds_at   = 0.0;
+	q_speeds_due  = TRUE;
+
+	//declaration initialisers on globals are ignored
+	q_t_input      = 0.0;
+	q_t_move       = 0.0;
+	q_t_part       = 0.0;
+	q_t_tail       = 0.0;
+	q_t_phase_mark = 0.0;
+	q_t_render      = 0.0;
+	q_t_render_mark = 0.0;
+	q_t_hiz         = 0.0;
+	q_t_stat        = 0.0;
+	q_t_vm          = 0.0;
+	MemSet(q_speed_line, 0, QSPEED_LINES * QSPEED_LEN);
+}
+
+U0 QPresentFree()
+{
+	q_present_ok = FALSE;
+
+	while (q_blit_busy)
+		Yield;
+
+	QGuardFree(q_present_pix, q_present_w * q_present_h,
+		"present.pix");
+	QGuardFree(q_present_rgb, q_present_w * q_present_h * sizeof(U32),
+		"present.rgb");
+	QGuardFree(q_present_dep, q_present_w * q_present_h * sizeof(I32),
+		"present.dep");
+	q_present_pix = NULL;
+	q_present_rgb = NULL;
+	q_present_dep = NULL;
+}
+
+U0 QPresentFrame()
+{//snapshot the finished canvas. depth rides along - the blit reads it for
+ // anything fog did not already bake.
+	I64 n;
+
+	if (!q_canvas)
+		return;
+
+	q_t_pres_mark = tS;
+
+	QFogBakeCanvas(q_canvas);
+
+	n = q_canvas->width * q_canvas->height;
+
+	if (q_present_w != q_canvas->width || q_present_h != q_canvas->height)
+	{
+		q_present_ok = FALSE;
+		QPresentFree;
+		q_present_pix = QGuardAlloc(n);
+		q_present_rgb = QGuardAlloc(n * sizeof(U32));
+		q_present_dep = QGuardAlloc(n * sizeof(I32));
+		q_present_w   = q_canvas->width;
+		q_present_h   = q_canvas->height;
+	}
+
+	MemCopy(q_present_pix, q_canvas->pixels, n);
+	if (q_canvas->rgb)
+		MemCopy(q_present_rgb, q_canvas->rgb, n * sizeof(U32));
+	else
+		MemSet(q_present_rgb, 0, n * sizeof(U32));
+
+	if (!q_canvas->prefogged)
+		MemCopy(q_present_dep, q_canvas->depth, n * sizeof(I32));
+
+	MemCopy(&q_present_shell, q_canvas, sizeof(CQCanvas));
+	q_present_shell.pixels = q_present_pix;
+	q_present_shell.rgb    = q_present_rgb;
+	q_present_shell.depth  = q_present_dep;
+
+	q_present_ok = TRUE;
+
+	q_t_pres = tS - q_t_pres_mark;
+}
+F64 q_t_loop_mark	= 0.0;
+
+U0 QBlitMarginClear(CDC *dc, I64 bx, I64 by, I64 bw, I64 bh)
+{//black outside the blit rect.
+ //
+ // QDrawBlitFit writes only its own rectangle, so the letterbox margin keeps
+ // whatever was there. four bands, not the whole DC.
+	U32	*dst;
+	I64	 pitch = dc->width_internal;
+	I64	 x;
+	I64	 y;
+	I64	 x0 = bx;
+	I64	 x1 = bx + bw;
+
+	if (x0 < 0)				x0 = 0;
+	if (x1 > dc->width)		x1 = dc->width;
+
+	for (y = 0; y < dc->height; y++)
+	{
+		dst = dc->body + y * pitch;
+
+		if (y < by || y >= by + bh)
+		{
+			for (x = 0; x < dc->width; x++)
+				dst[x] = 0;
+
+			goto qbm_next;
+		}
+
+		for (x = 0; x < x0; x++)
+			dst[x] = 0;
+		for (x = x1; x < dc->width; x++)
+			dst[x] = 0;
+
+qbm_next:
+	}
+}
+
+U0 QDrawIt(CTask *task, CDC *dc)
+{//window manager task: copy only. every pointer is cleared before the owner
+ // frees it.
+	I64 bx;
+	I64 by;
+	I64 bw;
+	I64 bh;
+
+	if (!q_ready || !q_canvas)
+		return;
+
+	//rect from the DC, not from QCenterView's task->pix_* measurement - the two
+	//disagree after a resize, and the blit and the clear both address the DC
+	bw = dc->width;
+	bh = dc->height;
+
+	if (!q_opt_fullscreen && q_canvas->width > 0 && q_canvas->height > 0)
+	{
+		bh = (dc->width * q_canvas->height) / q_canvas->width;
+		if (bh > dc->height)
+		{
+			bh = dc->height;
+			bw = (dc->height * q_canvas->width) / q_canvas->height;
+		}
+	}
+
+	if (bw < 1)	bw = 1;
+	if (bh < 1)	bh = 1;
+
+	bx = (dc->width - bw) / 2;
+	by = (dc->height - bh) / 2;
+
+	QBlitMarginClear(dc, bx, by, bw, bh);
+
+	if (q_loading)
+	{
+		if (q_present_ok)
+			QDrawBlitFit(&q_present_shell, dc, bx, by, bw, bh);
+		return;
+	}
+
+	q_t_blit_mark = tS;
+	if (q_present_ok)
+		QDrawBlitFit(&q_present_shell, dc, bx, by, bw, bh);
+	q_t_blit = tS - q_t_blit_mark;
+
+
+}
+
+U0 QRenderEntities()
+{//brush models first, then alias. everything is depth tested.
+	CQEntity *e;
+	F64		  dist[3];
+	I64		  i;
+
+	//Model 0 is the world itself and is already drawn by the PVS path.
+	for (i = 0; i < q_num_entities; i++)
+	{
+		e = &q_entities[i];
+
+		if (e->brush_model > 0)
+		{
+			QDrawBrushModel(q_canvas, q_map, e->brush_model, e->origin);
+			q_ent_drawn++;
+		}
+	}
+
+	for (i = 0; i < q_num_entities; i++)
+	{
+		e = &q_entities[i];
+
+		if (e->mdl)
+		{
+			//PVS first, as SV_WriteEntitiesToClient does. distance is a backstop for what
+			//the vis data cannot answer for.
+			QVecSub(e->origin, q_origin, dist);
+			if (QVisPointVisible(q_vis, e->origin) &&
+				QVecLength(dist) < QENT_DRAW_DIST)
+			{
+				QMdlDraw(q_canvas, e->mdl, e->frame, e->origin,
+					e->angles[1], QLightPoint(q_map, e->origin, i));
+				q_ent_drawn++;
+			}
+		}
+	}
+}
+
+#define QSTUCK_STEPS	12		//consecutive refused steps before reporting
+#define QSTUCK_REPORTS	4
+
+F64 q_stuck_org[3];
+I64 q_stuck_steps	= 0;
+I64 q_stuck_said	= 0;
+U8  q_stuck_line[192];
+
+U0 QStuckInit()
+{
+	QVecSet(q_stuck_org, 0.0, 0.0, 0.0);
+	q_stuck_steps = 0;
+	q_stuck_said  = 0;
+}
+
+U0 QStuckCheck(F64 *wishdir, F64 wishspeed)
+{
+	F64		d[3];
+	F64		probe[3];
+	CQTrace	tr;
+	I64		blocker;
+
+	if (wishspeed <= 0.0 ||
+		(wishdir[0] == 0.0 && wishdir[1] == 0.0 && wishdir[2] == 0.0))
+	{
+		q_stuck_steps = 0;
+		QVecCopy(q_origin, q_stuck_org);
+		return;
+	}
+
+	QVecSub(q_origin, q_stuck_org, d);
+
+	if (QVecLength(d) > 0.5)
+	{
+		q_stuck_steps = 0;
+		QVecCopy(q_origin, q_stuck_org);
+		return;
+	}
+
+	q_stuck_steps++;
+
+	if (q_stuck_steps != QSTUCK_STEPS || q_stuck_said >= QSTUCK_REPORTS)
+		return;
+
+	QVecMA(q_origin, 4.0, wishdir, probe);
+	QTracePlayer(q_map, q_origin, probe, &tr);
+
+	if (tr.fraction < 1.0)
+	{
+		q_stuck_steps = 0;
+		return;
+	}
+
+	q_stuck_said++;
+
+	blocker = -1;
+	if (q_game_active && q_player_edict > 0)
+		blocker = QTestEntityPosition(q_map, q_player_edict);
+
+	StrPrint(q_stuck_line,
+		"stuck: at %.0f %.0f %.0f vel %.0f %.0f %.0f ground=%d water=%d\n",
+		q_origin[0], q_origin[1], q_origin[2],
+		q_velocity[0], q_velocity[1], q_velocity[2],
+		q_on_ground, q_water_level);
+	QLog(q_stuck_line);
+
+	if (blocker < 0)
+		QLog("stuck: player position is CLEAR - the move is being refused\n");
+	else if (blocker == 0)
+		QLog("stuck: player is embedded in the WORLD\n");
+	else
+	{
+		StrPrint(q_stuck_line, "stuck: embedded in edict %d (%s)\n", blocker,
+			QPrStr(QPrFieldI(blocker, q_fld_classname)));
+		QLog(q_stuck_line);
+	}
+
+	//repeat the move and report the trace that refuses it (ent -1 is the world)
+	QVecMA(q_origin, 4.0, wishdir, probe);
+	QTracePlayer(q_map, q_origin, probe, &tr);
+
+	StrPrint(q_stuck_line,
+		"stuck: probe frac=%.3f solid=%d/%d hit=%d ent=%d n=%.2f %.2f %.2f\n",
+		tr.fraction, tr.all_solid, tr.start_solid, tr.hit, tr.ent,
+		tr.plane_normal[0], tr.plane_normal[1], tr.plane_normal[2]);
+	QLog(q_stuck_line);
+
+	if (tr.ent > 0)
+	{
+		StrPrint(q_stuck_line, "stuck: blocked by edict %d (%s) solid=%d\n",
+			tr.ent, QPrStr(QPrFieldI(tr.ent, q_fld_classname)),
+			ToI64(QPrFieldF(tr.ent, q_fld_solid)));
+		QLog(q_stuck_line);
+
+		StrPrint(q_stuck_line,
+			"stuck:   bmodel=%d org %.0f %.0f %.0f  mins %.0f %.0f %.0f  maxs %.0f %.0f %.0f\n",
+			QClipBrushModel(ToI64(QPrFieldF(tr.ent, q_fld_modelindex))),
+			QPrFieldF(tr.ent, q_fld_origin + 0),
+			QPrFieldF(tr.ent, q_fld_origin + 1),
+			QPrFieldF(tr.ent, q_fld_origin + 2),
+			QPrFieldF(tr.ent, q_fld_mins + 0),
+			QPrFieldF(tr.ent, q_fld_mins + 1),
+			QPrFieldF(tr.ent, q_fld_mins + 2),
+			QPrFieldF(tr.ent, q_fld_maxs + 0),
+			QPrFieldF(tr.ent, q_fld_maxs + 1),
+			QPrFieldF(tr.ent, q_fld_maxs + 2));
+		QLog(q_stuck_line);
+	}
+
+	QLogFlush;
+}
+
+// V_UpdatePalette blends four shifts, each a destination colour plus a percent,
+// applied in sequence so a hit while underwater reads as both.
+//
+//   CONTENTS - eye submersion (QLiquidView)
+//   DAMAGE   - red, scaled by damage taken, decays at 150/sec
+//   BONUS    - pickup flash, decays at 100/sec
+//   POWERUP  - quad blue, invulnerability yellow, suit green
+#define QCS_DAMAGE_RATE		150.0
+#define QCS_BONUS_RATE		100.0
+
+//powerup bits from defs.qc. 4096 is IT_AXE, always held - do not use it for a
+//powerup test.
+//
+//    IT_AXE             4096      IT_INVISIBILITY   524288
+//    IT_SUPERHEALTH    16384      IT_INVULNERABILITY 1048576
+//    IT_KEY1          131072      IT_SUIT          2097152
+//    IT_KEY2          262144      IT_QUAD          4194304
+#define QIT_INVISIBILITY	524288
+#define QIT_INVULNERABILITY	1048576
+#define QIT_SUIT			2097152
+#define QIT_QUAD			4194304
+
+F64 q_cs_dmg_pct	= 0.0;
+F64 q_cs_bonus_pct	= 0.0;
+
+U0 QCShiftInit()
+{
+	q_cs_dmg_pct   = 0.0;
+	q_cs_bonus_pct = 0.0;
+}
+
+U0 QCShiftDamage(F64 count)
+{//V_ParseDamage: percent += 3*count, clamped to 150.
+	q_cs_dmg_pct += 3.0 * count;
+
+	if (q_cs_dmg_pct < 0.0)
+		q_cs_dmg_pct = 0.0;
+	if (q_cs_dmg_pct > 150.0)
+		q_cs_dmg_pct = 150.0;
+}
+
+U0 QCShiftBonus()
+{//V_BonusFlash: the pickup flash is a fixed colour at 50 percent.
+	q_cs_bonus_pct = 50.0;
+}
+
+U0 QCShiftUpdate(F64 dt)
+{//Decay both flashes. The original uses host_frametime for exactly this.
+	q_cs_dmg_pct -= dt * QCS_DAMAGE_RATE;
+	if (q_cs_dmg_pct < 0.0)
+		q_cs_dmg_pct = 0.0;
+
+	q_cs_bonus_pct -= dt * QCS_BONUS_RATE;
+	if (q_cs_bonus_pct < 0.0)
+		q_cs_bonus_pct = 0.0;
+}
+
+U0 QCShiftAdd(F64 *_r, F64 *_g, F64 *_b, F64 *_a,
+	F64 dr, F64 dg, F64 db, F64 percent)
+{//one shift folded into the running blend, exactly as V_CalcBlend does it
+ //
+ //    a2 = percent/255      <- 255, not 100. the percents are 0..255
+ //    a  = a + a2*(1-a)
+ //    a2 = a2/a
+ //    r  = r*(1-a2) + destcolor*a2
+ //
+	F64 a2;
+
+	if (percent <= 0.0)
+		return;
+
+	a2 = percent / 255.0;
+	if (a2 > 1.0)
+		a2 = 1.0;
+
+	*_a = *_a + a2 * (1.0 - *_a);
+	if (*_a <= 0.0)
+		return;
+
+	a2 = a2 / *_a;
+
+	*_r = *_r * (1.0 - a2) + dr * a2;
+	*_g = *_g * (1.0 - a2) + dg * a2;
+	*_b = *_b * (1.0 - a2) + db * a2;
+}
+
+U0 QCShiftBlend(I64 *_r, I64 *_g, I64 *_b, I64 *_a)
+{//V_CalcBlend. contents, damage, bonus, powerup, in that order
+ //
+ //in: the CONTENTS shift, destcolor in _r.._b and its percent in _a
+ //out: the folded tint, alpha 0..255
+	F64 r = 0.0;
+	F64 g = 0.0;
+	F64 b = 0.0;
+	F64 a = 0.0;
+	I64 items = 0;
+
+	//V_CalcPowerupCshift reads cl.items, off svc_clientdata
+	if (QClientMode)
+		items = q_cl.items;
+	else if (q_player_active && q_player_edict > 0 && q_fld_items >= 0)
+		items = ToI64(QPrFieldF(q_player_edict, q_fld_items));
+
+	QCShiftAdd(&r, &g, &b, &a,
+		ToF64(*_r), ToF64(*_g), ToF64(*_b), ToF64(*_a));
+
+	//V_ParseDamage caps its own percent at 150
+	QCShiftAdd(&r, &g, &b, &a, 255.0, 0.0, 0.0, q_cs_dmg_pct);
+
+	QCShiftAdd(&r, &g, &b, &a, 215.0, 186.0, 69.0, q_cs_bonus_pct);
+
+	//V_CalcPowerupCshift is an if/else chain - one shift only, this order
+	if (items & QIT_QUAD)
+		QCShiftAdd(&r, &g, &b, &a, 0.0, 0.0, 255.0, 30.0);
+	else if (items & QIT_SUIT)
+		QCShiftAdd(&r, &g, &b, &a, 0.0, 255.0, 0.0, 20.0);
+	else if (items & QIT_INVISIBILITY)
+		QCShiftAdd(&r, &g, &b, &a, 100.0, 100.0, 100.0, 100.0);
+	else if (items & QIT_INVULNERABILITY)
+		QCShiftAdd(&r, &g, &b, &a, 255.0, 255.0, 0.0, 30.0);
+
+	if (a > 1.0)
+		a = 1.0;
+	if (a < 0.0)
+		a = 0.0;
+
+	*_r = ClampI64(ToI64(r), 0, 255);
+	*_g = ClampI64(ToI64(g), 0, 255);
+	*_b = ClampI64(ToI64(b), 0, 255);
+	*_a = ClampI64(ToI64(a * 255.0), 0, 255);
+}
+
+//  punchangle  - QuakeC sets .punchangle on fire (shotgun uses -2 pitch)
+//  damage kick - V_ParseDamage turns a hit into roll and pitch, directed by
+//                where the damage came from
+//
+//cvar defaults below are the original's.
+#define QKICK_ROLL		0.6
+#define QKICK_PITCH		0.6
+#define QKICK_TIME		0.5
+
+F64 q_dmg_roll		= 0.0;
+F64 q_dmg_pitch		= 0.0;
+F64 q_dmg_time		= 0.0;
+F64 q_punch[3];
+F64 q_dmg_last		= 0.0;	//dmg_take+dmg_save seen last frame
+I64 q_con_return_state = QST_PLAYING;	//state the console was opened from
+
+I64 q_net_mismatch = 0;
+
+F64 q_join_last_try = 0.0;
+U8  q_join_line[96];
+F64 q_heap_check_last = 0.0;
+U8  q_heap_check_line[48];
+
+F64 q_tick_log_last = 0.0;
+I64 q_tick_log_n    = 0;
+U8  q_tick_line[160];
+
+U8  q_surf_stat_line[128];
+
+U0 QViewKickInit()
+{
+	q_dmg_roll  = 0.0;
+	q_dmg_pitch = 0.0;
+	q_dmg_time  = 0.0;
+	q_dmg_last  = 0.0;
+	QVecSet(q_punch, 0.0, 0.0, 0.0);
+}
+
+U0 QViewKickUpdate(F64 dt)
+{
+	F64 from[3];
+	F64 fwd[3];
+	F64 rgt[3];
+	F64 upv[3];
+	F64 dir[3];
+	F64 count;
+	F64 side;
+	F64 len;
+	I64 inflictor;
+	I64 j;
+
+	if (!q_player_active || q_player_edict <= 0)
+	{
+		QViewKickInit;
+		return;
+	}
+
+	//weapon punch. read straight off the edict - the field is the current kick.
+	//DropPunchAngle recovers it each client think.
+	if (q_fld_punchangle >= 0)
+	{
+		for (j = 0; j < 3; j++)
+			q_punch[j] = QPrFieldF(q_player_edict, q_fld_punchangle + j);
+	}
+
+	//damage kick. thin client: QuakeC never writes local dmg_take, svc_damage
+	//parks the hit in q_net_damage_* (V_ParseDamage's inputs).
+	if (q_net_damage_pending)
+	{
+		count = ToF64(q_net_damage_take) + ToF64(q_net_damage_save);
+		if (count < 10.0)
+			count = 10.0;
+		if (count > 255.0)
+			count = 255.0;
+
+		QCShiftDamage(count);
+
+		QVecSub(q_net_damage_from, q_origin, dir);
+		len = QVecLength(dir);
+		if (len > 0.0)
+		{
+			QVecScale(dir, 1.0 / len, dir);
+			QAngleVectors(q_angles, fwd, rgt, upv);
+			side        = QVecDot(dir, rgt);
+			q_dmg_roll  = count * side * QKICK_ROLL;
+			side        = QVecDot(dir, fwd);
+			q_dmg_pitch = count * side * QKICK_PITCH;
+			q_dmg_time  = QKICK_TIME;
+		}
+
+		q_net_damage_pending = FALSE;
+		q_net_damage_take    = 0;
+		q_net_damage_save    = 0;
+	}
+	else if (q_fld_dmg_take >= 0 && q_fld_dmg_save >= 0)
+	{
+		count = QPrFieldF(q_player_edict, q_fld_dmg_take) +
+				QPrFieldF(q_player_edict, q_fld_dmg_save);
+
+		if (count > 0.0 && count != q_dmg_last)
+		{
+			if (count < 10.0)
+				count = 10.0;
+
+			//V_ParseDamage reads armour and blood as bytes - cap at 255.
+			if (count > 255.0)
+				count = 255.0;
+
+			QCShiftDamage(count);
+
+			inflictor = 0;
+			if (q_fld_dmg_inflictor >= 0)
+				inflictor = QPrEdictNum(
+					QPrFieldI(q_player_edict, q_fld_dmg_inflictor));
+
+			if (inflictor > 0)
+			{
+				for (j = 0; j < 3; j++)
+					from[j] = QPrFieldF(inflictor, q_fld_origin + j);
+
+				QVecSub(from, q_origin, dir);
+				len = QVecLength(dir);
+
+				if (len > 0.0)
+				{
+					QVecScale(dir, 1.0 / len, dir);
+					QAngleVectors(q_angles, fwd, rgt, upv);
+
+					side        = QVecDot(dir, rgt);
+					q_dmg_roll  = count * side * QKICK_ROLL;
+
+					side        = QVecDot(dir, fwd);
+					q_dmg_pitch = count * side * QKICK_PITCH;
+
+					q_dmg_time  = QKICK_TIME;
+				}
+			}
+		}
+
+		q_dmg_last = count;
+
+		//SV_WriteClientdataToMessage clears these after sending
+		if (count > 0.0)
+		{
+			QPrSetFieldF(q_player_edict, q_fld_dmg_take, 0.0);
+			QPrSetFieldF(q_player_edict, q_fld_dmg_save, 0.0);
+			q_dmg_last = 0.0;
+		}
+	}
+
+	//thin client: punchangle arrives in clientdata, already decayed by the host
+	if (q_udp_ready && !q_udp_server)
+	{
+		for (j = 0; j < 3; j++)
+			q_punch[j] = q_cl.punchangle[j];
+	}
+
+	if (q_dmg_time > 0.0)
+	{
+		q_dmg_time -= dt;
+		if (q_dmg_time < 0.0)
+			q_dmg_time = 0.0;
+	}
+
+
+	QCShiftUpdate(dt);
+}
+
+//V_AddIdle: three sines. v_idlescale is 0 in stock Quake, so this is off by
+//default.
+#define QIDLE_ROLL_CYCLE	0.5
+#define QIDLE_PITCH_CYCLE	1.0
+#define QIDLE_YAW_CYCLE		2.0
+#define QIDLE_ROLL_LEVEL	0.1
+#define QIDLE_PITCH_LEVEL	0.3
+#define QIDLE_YAW_LEVEL		0.3
+
+F64 q_idle_scale = 0.0;		//v_idlescale
+
+U0 QViewAddIdle(F64 *angles)
+{
+	if (q_idle_scale == 0.0)
+		return;
+
+	angles[2] += q_idle_scale * Sin(tS * QIDLE_ROLL_CYCLE) * QIDLE_ROLL_LEVEL;
+	angles[0] += q_idle_scale * Sin(tS * QIDLE_PITCH_CYCLE) * QIDLE_PITCH_LEVEL;
+	angles[1] += q_idle_scale * Sin(tS * QIDLE_YAW_CYCLE) * QIDLE_YAW_LEVEL;
+}
+
+U0 QViewApplyKick(F64 *angles)
+{
+	F64 frac;
+
+	angles[0] += q_punch[0];
+	angles[1] += q_punch[1];
+	angles[2] += q_punch[2];
+
+	if (q_dmg_time > 0.0)
+	{
+		frac = q_dmg_time / QKICK_TIME;
+		angles[2] += frac * q_dmg_roll;
+		angles[0] += frac * q_dmg_pitch;
+	}
+
+	QViewAddIdle(angles);
+}
+
+// view-only: applied to the render copy of the angles, never to q_angles, which
+// feeds .v_angle and would lean the player's aim with the camera.
+
+#define QBOB_AMOUNT		0.02	//bob per unit of horizontal speed
+#define QBOB_CYCLE		0.6		//seconds for a full step cycle
+#define QBOB_UP			0.5		//fraction of the cycle spent rising
+#define QROLL_ANGLE		2.0		//degrees of lean at full strafe
+#define QROLL_SPEED		200.0	//strafe speed at which the lean maxes out
+
+F64 q_bob_time	= 0.0;	//accumulated walking time, not wall-clock time
+F64 q_bob_value	= 0.0;	//last computed bob, held while airborne
+F64 q_bob_prev	= 0.0;	//real time of the previous update
+
+U0 QViewBobUpdate()
+{//V_CalcBob. called once per frame: it is read twice, for the eye and for the
+ // weapon.
+ //
+ // airborne holds the last value (original: if (onground == -1) return bob;).
+ // the cycle runs on accumulated walking time, not wall-clock.
+	F64 cycle;
+	F64 bob;
+	F64 speed;
+	F64 dt;
+
+	dt         = tS - q_bob_prev;
+	q_bob_prev = tS;
+
+	if (dt < 0.0 || dt > 0.25)
+		dt = 0.0;
+
+	if (!q_on_ground)
+		return;
+
+	q_bob_time += dt;
+
+	cycle = q_bob_time - ToF64(ToI64(q_bob_time / QBOB_CYCLE)) * QBOB_CYCLE;
+	cycle /= QBOB_CYCLE;
+
+	if (cycle < QBOB_UP)
+		cycle = pi * cycle / QBOB_UP;
+	else
+		cycle = pi + pi * (cycle - QBOB_UP) / (1.0 - QBOB_UP);
+
+	speed = Sqrt(q_velocity[0] * q_velocity[0] +
+				 q_velocity[1] * q_velocity[1]);
+
+	bob = speed * QBOB_AMOUNT;
+	bob = bob * 0.3 + bob * 0.7 * Sin(cycle);
+
+	if (bob > 4.0)
+		bob = 4.0;
+	if (bob < -7.0)
+		bob = -7.0;
+
+	q_bob_value = bob;
+}
+
+F64 QViewBob()
+{
+	return q_bob_value;
+}
+
+F64 q_view_oldz	= 0.0;	//eye height being caught up to after a step
+F64 q_step_prev	= 0.0;
+
+F64 QViewStepOffset()
+{//V_CalcRefdef stair smoothing: the eye chases the new height at 80 units/sec,
+ //never lagging more than 12 behind. up only - falling must be immediate, or
+ //the ground appears to come up to meet the player.
+	F64 dt = tS - q_step_prev;
+
+	q_step_prev = tS;
+
+	if (dt < 0.0 || dt > 0.25)
+		dt = 0.0;
+
+	if (!q_on_ground || q_origin[2] - q_view_oldz <= 0.0)
+	{
+		q_view_oldz = q_origin[2];
+		return 0.0;
+	}
+
+	q_view_oldz += dt * 80.0;
+
+	if (q_view_oldz > q_origin[2])
+		q_view_oldz = q_origin[2];
+	if (q_origin[2] - q_view_oldz > 12.0)
+		q_view_oldz = q_origin[2] - 12.0;
+
+	return q_view_oldz - q_origin[2];
+}
+
+F64 QViewRoll(F64 *angles, F64 *velocity)
+{
+	F64 fwd[3];
+	F64 rgt[3];
+	F64 upv[3];
+	F64 side;
+	F64 sign;
+
+	QAngleVectors(angles, fwd, rgt, upv);
+	side = QVecDot(velocity, rgt);
+
+	if (side < 0.0)
+	{
+		sign = -1.0;
+		side = -side;
+	}
+	else
+		sign = 1.0;
+
+	if (side < QROLL_SPEED)
+		side = side * QROLL_ANGLE / QROLL_SPEED;
+	else
+		side = QROLL_ANGLE;
+
+	return side * sign;
+}
+
+
+U0 QLiquidView()
+{//screen wash, view warp and the surface-crossing sounds.
+ // tints are the original's, folded into the palette rather than blended per
+ // pixel - 8bpp indices cannot be averaged.
+	I64 r = 0;
+	I64 g = 0;
+	I64 b = 0;
+	I64 a = 0;
+
+	if (q_water_level >= 3)
+	{
+		switch (q_water_type)
+		{
+			case QCONTENTS_LAVA:
+				r = 255; g = 80;  b = 0;  a = 150;
+				break;
+			case QCONTENTS_SLIME:
+				r = 0;   g = 25;  b = 5;  a = 150;
+				break;
+			default:
+				r = 130; g = 80;  b = 50; a = 128;
+				break;
+		}
+
+		q_warp_amount = 4.0;
+	}
+	else
+	{
+		//dry eye: the v_cshift base stands in for cshift_empty
+		r = q_cshift_base_r;
+		g = q_cshift_base_g;
+		b = q_cshift_base_b;
+		a = q_cshift_base_a;
+
+		q_warp_amount = 0.0;
+	}
+
+	q_warp_time = tS;
+
+	QCShiftBlend(&r, &g, &b, &a);
+
+	QPalSetTint(r, g, b, a);
+
+	//edged against last frame. real contents, not the QuakeC value: climbing a
+	//ladder is not a splash.
+	if (q_water_real > 0 && q_water_last == 0)
+	{
+		if (q_water_type == QCONTENTS_LAVA)
+			QSndPlayAt("player/inlava.wav", q_view, 1.0, 0.0);
+		else if (q_water_type == QCONTENTS_SLIME)
+			QSndPlayAt("player/slimbrn2.wav", q_view, 1.0, 0.0);
+		else
+			QSndPlayAt("player/inh2o.wav", q_view, 1.0, 0.0);
+	}
+	else if (q_water_real == 0 && q_water_last > 0)
+		QSndPlayAt("misc/outwater.wav", q_view, 1.0, 0.0);
+
+	q_water_last = q_water_real;
+}
+
+U0 QDrawEntityPass(I64 pass)
+{//the entity dispatch, run twice per frame: brush models before the world so
+ // their depth rejects what the PVS admitted behind them, point entities after
+	I64 skip_ent;
+
+	if (!q_draw_entities || !q_opt_drawents)
+		return;
+
+	if (!q_game_active && !QClientMode)
+		return;
+
+	if (QClientMode)
+	{
+		//svc_setview names this client's body; 0 draws everyone.
+		skip_ent = q_cl_viewent;
+		//no distance cull on the wire path for MP - DM spawns on e1m1 are often >2000
+		//apart
+		QNetDrawEntities(q_canvas, q_map, q_view, 10000.0, skip_ent, pass);
+	}
+	else if (QCvarGet("cl_netdraw") != 0.0)
+		QNetDrawEntities(q_canvas, q_map, q_view, QENT_DRAW_DIST,
+			q_player_edict, pass);
+	else if (q_udp_ready && q_udp_server)
+	{
+		QGameDrawEntities(q_canvas, q_map, q_view, 10000.0, pass);
+	}
+	else
+		QGameDrawEntities(q_canvas, q_map, q_view, QENT_DRAW_DIST, pass);
+}
+
+U0 QRenderFrame()
+{
+	I64		 show_i;
+	F64		 show_ms;
+	F64		 show_r;
+	I64		 show_vofs;
+	F64		 show_fov;
+	U8		*pf;
+	U8		*ps;
+	U8		*pr;
+	U8		*pl;
+	F64		 forward[3];
+	F64		 right[3];
+	F64		 up[3];
+	F64		 fov_y;
+	F64		 view_angles[3];
+	F64		 saved_idle;
+	F64		 chase_f[3];
+	F64		 chase_r[3];
+	F64		 chase_u[3];
+	F64		 chase_want[3];
+	F64		 chase_zero[3];
+	CQTrace	 chase_tr;
+	CQMdl	*vm_mdl;
+	F64		 vm_depth;
+	F64		 snd_fwd[3];
+	F64		 snd_right[3];
+	I64		 vm_frame;
+	I64		 vm_light;
+	I64		 vm_prev;
+	F64		 vm_blend;
+	I64		 i;
+	Bool	 vm_show;
+	I64		 cap_n;
+	F64		 cap_el;
+	F64		 cap_w;
+	F64		 cap_r;
+	F64		 cap_f;
+	F64		 cap_fps;
+	I64		 cap_prep;
+	I64		 cap_cache;
+
+	QAngleVectors(q_angles, forward, right, up);
+	fov_y = QDrawFovY(QDrawAdaptFovX(q_fov, q_canvas->width, q_canvas->height),
+		q_canvas->width, q_canvas->height);
+
+	q_sky_time = tS;
+
+	QViewBobUpdate;
+
+	QVecCopy(q_origin, q_view);
+
+	//eye height is QuakeC's .view_ofs, not a constant - it drops on death and
+	//shifts in liquid. QVIEW_HEIGHT is the fallback with no player entity.
+	if (q_game_active)
+		q_view[2] += QPlayerViewHeight + QViewBob + QViewStepOffset;
+	else
+		q_view[2] += QVIEW_HEIGHT + QViewBob + QViewStepOffset;
+
+	q_view[0] += 1.0 / 32.0;
+	q_view[1] += 1.0 / 32.0;
+	q_view[2] += 1.0 / 32.0;
+
+	//Chase_Update. not at intermission, where the view belongs to the
+	//info_intermission spot, and not in a demo, whose camera is the recorded one.
+	if (QCvarGet("chase_active") != 0.0 && !q_intermission && !q_demo_playing &&
+		QMapValid(q_map, "QChaseUpdate"))
+	{
+		QVecSet(chase_zero, 0.0, 0.0, 0.0);
+		QAngleVectors(q_angles, chase_f, chase_r, chase_u);
+
+		for (i = 0; i < 3; i++)
+			chase_want[i] = q_view[i]
+				- chase_f[i] * QCvarGet("chase_back")
+				+ chase_r[i] * QCvarGet("chase_right")
+				+ chase_u[i] * QCvarGet("chase_up");
+
+		QTraceEntity(q_map, q_view, chase_want, chase_zero, chase_zero,
+			q_player_edict, TRUE, &chase_tr);
+
+		for (i = 0; i < 3; i++)
+			q_view[i] = chase_tr.end_pos[i];
+
+		if (chase_tr.fraction < 1.0)
+		{
+			for (i = 0; i < 3; i++)
+				q_view[i] += chase_tr.plane_normal[i] * 4.0;
+		}
+	}
+
+	QVecCopy(q_angles, view_angles);
+
+	//V_CalcIntermissionRefdef: idle sway at scale 1, no roll, kicks or bob.
+	if (q_intermission)
+	{
+		saved_idle   = q_idle_scale;
+		q_idle_scale = 1.0;
+		view_angles[2] = 0.0;
+		QViewAddIdle(view_angles);
+		q_idle_scale = saved_idle;
+	}
+	else
+	{
+		view_angles[2] = QViewRoll(q_angles, q_velocity);
+
+		QViewApplyKick(view_angles);
+	}
+
+	//V_CalcRefdef sets roll to 80 and returns early once health hits zero
+	if (q_game_active && QPlayerDead)
+		view_angles[2] = 80.0;
+
+	QAngleVectors(view_angles, snd_fwd, snd_right, NULL);
+	QSndListener(q_view, snd_right);
+
+	if (QClientMode)
+		q_snd_viewent = q_cl_viewent;
+	else
+		q_snd_viewent = q_player_edict;
+
+	//S_Update: re-aim everything still playing.
+	QSndUpdate;
+
+	//light styles step at 10Hz off the game clock; ambients retrigger as their
+	//previous instance runs out.
+	QLightAnimate(q_game_time);
+	QTurbFrame(tS);
+
+	if (q_game_active)
+		QGameEntityLights(tS);
+
+	QLightFrame(tS);
+
+	//R_PushDlights: mark which faces each light reaches once, before anything is
+	//drawn.
+	q_ambient_light = ToI64(QCvarGet("r_ambient"));
+
+	q_far_clip = QCvarGet("gl_farclip");
+	if (q_far_clip < QFAR_CLIP_MIN)
+		q_far_clip = QFAR_CLIP_MIN;
+	QPushDlights(q_map, tS);
+
+	QSurfCacheSetMap(q_map);
+	q_surf_frame++;
+
+	QSurfJobReap;
+
+	QSndAmbientUpdate(q_game_time);
+
+	//S_UpdateAmbientSounds: per-leaf wind and water. passed the leaf and the
+	//cvars because QSound.ZC compiles before both.
+	if (QMapValid(q_map, "QSndLeafAmbients"))
+		QSndLeafAmbients(q_map, QVisLeafForPoint(q_map, q_view),
+			QCvarGet("ambient_level"), QCvarGet("ambient_fade"), tS);
+
+	QLiquidView;
+
+	QDrawClear(q_canvas, 0);
+	//SCR_CalcRefdef before the projection, so the view rect it picks is what the
+	//projection centres on. sb_lines, not a fixed 24, and in on-screen rows rather
+	//than 320x200.
+	QDrawSetViewRect(q_canvas, QCvarGet("viewsize"),
+		QSbarLinesScaled(q_canvas));
+	//SCR_ToggleZoom_f: the zoom is a smoothstepped ramp between fov and
+	//scr_zoomfov - see QZoomUpdate / QZoomFov.
+	show_fov = QZoomFov(q_fov);
+
+	//SCR_CalcRefdef: the cvar is a 4:3 fov, the renderer wants this screen's
+	show_fov = QDrawAdaptFovX(show_fov, q_canvas->width, q_canvas->height);
+
+	fov_y = QDrawFovY(show_fov, q_canvas->width, q_canvas->height);
+
+	QDrawSetView(q_canvas, q_view, view_angles, show_fov);
+
+	if (!QMapValid(q_map, "QRenderFrame") || !q_vis)
+	{
+		QSbarDraw(q_canvas);
+		return;
+	}
+
+	q_lpc_frame_now++;
+
+	q_t_mark = tS;
+	QVisPrepare(q_vis, q_view, forward, right, up, show_fov, fov_y);
+	q_t_vis += tS - q_t_mark;
+
+	q_draw_vis = q_vis;
+
+	if (q_opt_debugtex)
+	{
+		q_probe_iz  = -1.0;
+		q_probe_hit = FALSE;
+		q_probe_req = TRUE;
+		q_probe_arm = TRUE;
+	}
+
+	if (q_probe_req && q_probe_arm)
+	{
+		q_probe_x   = q_canvas->vx + q_canvas->vw / 2;
+		q_probe_y   = q_canvas->vy + q_canvas->vh / 2;
+		q_probe_arm = FALSE;
+
+		q_probe_col_y0 = q_probe_y - QPROBE_COL / 2;
+		if (q_probe_col_y0 < q_canvas->vy)
+			q_probe_col_y0 = q_canvas->vy;
+		if (q_probe_col_y0 + QPROBE_COL > q_canvas->vy + q_canvas->vh)
+			q_probe_col_y0 = q_canvas->vy + q_canvas->vh - QPROBE_COL;
+	}
+
+	//brush models before the world: vis is built on the static BSP and knows
+	//nothing about door entities, so facing a closed door still admits the room.
+	q_t_mark = tS;
+	QVisGather(q_vis);
+	q_t_vis += tS - q_t_mark;
+
+	q_t_mark = tS;
+	QDrawWorld(q_canvas, q_map, q_vis);
+	q_t_world += tS - q_t_mark;
+
+	q_t_mark = tS;
+	QHizBuild(q_canvas);
+	q_t_hiz  = tS - q_t_mark;
+
+	q_t_stat = 0.0;
+	q_t_vm   = 0.0;
+
+	q_t_mark = tS;
+	QDrawEntityPass(QEPASS_BRUSH);
+	q_t_brush = tS - q_t_mark;
+	q_t_ents += q_t_brush;
+
+	if (q_draw_entities)
+	{
+		//the map's own entity lump still holds triggers, and InitTrigger clears
+		//modelindex, so a real client is never told about one.
+		if (q_game_active || QClientMode)
+		{
+			q_t_mark = tS;
+			QDrawEntityPass(QEPASS_POINT);
+			q_t_ents += tS - q_t_mark;
+			q_t_mark = tS;
+			QGameDrawStatics(q_canvas, q_map);
+			//CL_UpdateTEnts re-anchors the local bolt before drawing.
+			if (q_udp_ready && !q_udp_server || q_demo_playing)
+				QBiBeamsFollow(q_cl_viewent);
+			else
+				QBiBeamsFollow(q_player_edict);
+
+			QBiDrawBeams(q_canvas, tS);
+			q_t_stat = tS - q_t_mark;
+		}
+		else
+		{
+			q_t_mark = tS;
+			QRenderEntities;
+			q_t_ents += tS - q_t_mark;
+		}
+	}
+
+	if (q_opt_drawparts)
+	{
+		q_t_mark = tS;
+		QPartDraw(q_canvas, tS);
+		q_t_ents += tS - q_t_mark;
+	}
+
+	//weapon last, over everything. QuakeC owns the model and the frame.
+	//
+	//hidden at intermission: execute_changelevel zeroes the player's modelindex.
+	//client side, dead is cl.stats[STAT_HEALTH].
+	if (QClientMode)
+		vm_show = ToBool(q_cl.health > 0 && !q_intermission);
+	else
+		vm_show = ToBool(q_player_active && !QPlayerDead && !q_intermission);
+
+	//R_IsViewModelVisible:
+	//    if (!r_drawviewmodel.value || !r_drawentities.value ||
+	//        chase_active.value || scr_viewsize.value >= 130)
+	//        return false;
+	//130 is the top of the range, named PHOTO on Ironwail's options page: no gun,
+	//no crosshair, no fps, no HUD.
+	if (QCvarGet("viewsize") >= 130.0)
+		vm_show = FALSE;
+
+	if (QCvarGet("chase_active") != 0.0 || !q_opt_drawents)
+		vm_show = FALSE;
+
+	if (vm_show)
+	{
+		vm_mdl = NULL;
+		vm_frame = QPlayerWeaponFrame;
+
+		//thin client: weaponmodel on the wire is a precache index, not a QuakeC string
+		if (QClientMode && q_cl.weaponmodel > 0 &&
+			q_cl.weaponmodel < q_precache_model_count)
+		{
+			vm_mdl   = q_precache_mdl[q_cl.weaponmodel];
+			vm_frame = q_cl.weaponframe;
+		}
+
+		if (!vm_mdl)
+			vm_mdl = QBiFindModel(QPlayerWeaponModel);
+
+		if (vm_mdl)
+		{
+			//camera space, so camera and model rotations cancel: no angles.
+			//V_CalcRefdef gives eye and gun the same viewheight + bob, leaving
+			//    view->origin[i] += forward[i] * bob * 0.4;
+			//depth 1.0 is the software world range; 1/0.3 is GLQuake's.
+			if (q_opt_gunclip)
+				vm_depth = 1.0 / 0.3;
+			else
+				vm_depth = 1.0;
+
+			//R_SetupAliasLighting: one lightmap sample per frame at the view origin, the
+			//same call every other alias model makes.
+			vm_light = QLightPoint(q_map, q_view);
+
+			//"if the initial trace is completely black, try again from above"
+			//- R_LightPoint retries at half the model height for origins that
+			//sit a little under the floor
+			if (vm_light <= 0)
+				vm_light = QLightPoint(q_map, q_origin);
+
+			if (vm_light < QVM_MINLIGHT)
+				vm_light = QVM_MINLIGHT;
+
+			//the viewmodel is not an edict, so it gets its own lerp slot - key 0 is the
+			//world and never used by QLerpPose otherwise
+			vm_blend = QLerpPose(QLPC_VIEWMODEL, vm_frame, tS, &vm_prev);
+
+			q_t_mark = tS;
+			if (!q_cl_novm)
+				QMdlDrawViewBanded(q_canvas, vm_mdl, vm_frame,
+					QVM_FORWARD + QViewBob * 0.4, QVM_RIGHT, QVM_UP,
+					vm_light, vm_depth, vm_prev, vm_blend);
+			q_t_vm = tS - q_t_mark;
+		}
+	}
+
+	if (!q_intermission)
+		QSbarCrosshair(q_canvas);
+
+	//SCR_UpdateScreen's split: intermission 1 is the stat sheet alone, and only the
+	//finale (2) pairs its plaque with the centerprint.
+	if (!q_intermission || q_finale)
+		QSbarCenterPrint(q_canvas);
+
+	//Sbar_IntermissionOverlay: a deathmatch shows the rankings at intermission
+	if (q_intermission && !q_finale && (q_cl_gametype == QGAME_DEATHMATCH))
+	{
+		QSbarDrawScoreboard(q_canvas);
+	}
+	else
+	{
+		//the stat sheet reads cl.completed_time, frozen when the level ended
+		QSbarIntermission(q_canvas, q_completed_time);
+	}
+
+	if (!q_intermission)
+	{
+		q_t_mark = tS;
+		QSbarTileClear(q_canvas);
+		QSbarDraw(q_canvas);
+		q_t_hud += tS - q_t_mark;
+	}
+
+	//TAB deathmatch scoreboard (SCR_DrawScoreboard / Sbar_DeathmatchOverlay).
+	if (q_scoreboard_show)
+		QSbarDrawScoreboard(q_canvas);
+
+	if (q_probe_req)
+	{
+		q_probe_req = FALSE;
+		q_probe_line2[0] = 0;
+
+		if (!q_probe_hit)
+		{
+			StrPrint(q_probe_line1, "nothing drawn at crosshair");
+			q_probe_show = 300;
+			if (!q_opt_debugtex)
+				QConPrint(q_probe_line1);
+		}
+		else if (q_probe_sky)
+		{
+			StrPrint(q_probe_line1, "SKYBOX tx=%d", q_probe_texel);
+			StrPrint(q_probe_line2, "skyloaded=%d rgb=%d",
+				q_sky_loaded, ToI64(q_probe_rgb));
+			q_probe_show = 300;
+			if (!q_opt_debugtex)
+			{
+				QConPrint(q_probe_line1);
+				QConPrint(q_probe_line2);
+			}
+		}
+		else
+		{
+			//ZealC has no ?: so each flag picks its word first
+			if (q_probe_fence)
+				pf = " fence";
+			else
+				pf = "";
+
+			if (q_probe_surf)
+				ps = " cached";
+			else
+				ps = " direct";
+
+			if (q_probe_rgb)
+				pr = " truecolor";
+			else
+				pr = " 8bpp";
+
+			if (q_probe_lit)
+				pl = " lit-rgb";
+			else
+				pl = " lit-none";
+
+
+			StrPrint(q_probe_line1, "%s tx=%d mip=%d%s%s%s%s",
+				q_probe_tex, q_probe_texel, q_probe_mip, pf, ps, pr, pl);
+			StrPrint(q_probe_line2,
+				"lit=%06X raw=%06X lm=%dx%d off=%d sty=%d l=%d ent=%d",
+				q_probe_argb, q_probe_rawrgb, q_probe_lmw, q_probe_lmh,
+				q_probe_lmoff, q_probe_style, q_probe_light, q_probe_ent);
+
+			q_probe_show = 300;
+
+			if (!q_opt_debugtex)
+			{
+				QConPrint(q_probe_line1);
+				QConPrint(q_probe_line2);
+			}
+		}
+	}
+
+	if (q_probe_col_req)
+	{
+		q_probe_col_req = FALSE;
+
+		QConPrint("y    texture         lit    raw    ty  mip off      z");
+		for (q_probe_col_i = 0; q_probe_col_i < QPROBE_COL; q_probe_col_i++)
+		{
+			if (!q_probe_col_tex[q_probe_col_i * 16])
+				StrPrint(q_probe_col_line, "%d   -", q_probe_col_y0 + q_probe_col_i);
+			else
+				StrPrint(q_probe_col_line,
+					"%d   %s %06X %06X %d %d %d %d %X",
+					q_probe_col_y0 + q_probe_col_i,
+					&q_probe_col_tex[q_probe_col_i * 16],
+					q_probe_col_argb[q_probe_col_i], q_probe_col_raw[q_probe_col_i],
+					q_probe_col_ty[q_probe_col_i], q_probe_col_mip[q_probe_col_i],
+					q_probe_col_off[q_probe_col_i], q_probe_col_own[q_probe_col_i],
+					q_probe_col_ptr[q_probe_col_i]);
+
+			QConPrint(q_probe_col_line);
+		}
+	}
+
+	if (q_opt_fps && QCvarGet("viewsize") < 130.0)
+	{
+		q_fps_frames++;
+
+		if (tS - q_fps_window >= 0.25)
+		{
+			if (tS > q_fps_window)
+				q_fps_value = ToF64(q_fps_frames) / (tS - q_fps_window);
+			q_fps_window = tS;
+			q_fps_frames = 0;
+		}
+
+		StrPrint(q_fps_line, "%d fps", ToI64(q_fps_value + 0.5));
+		QStrCopy(q_fps_shown, q_fps_line, 32);
+		QStrDrawAlt(q_canvas, q_canvas->width - 64, 8, q_fps_line);
+	}
+
+	//SCR_DrawSpeed. horizontal only, as Ironwail measures it. walk is 200, run
+	//clamps to sv_maxspeed 320.
+	if (QCvarGet("scr_showspeed") != 0.0 && QCvarGet("viewsize") < 130.0)
+	{
+		StrPrint(q_fps_line, "%d ups",
+			ToI64(Sqrt(q_velocity[0] * q_velocity[0] +
+					   q_velocity[1] * q_velocity[1]) + 0.5));
+		QStrDrawAlt(q_canvas, q_canvas->width - 64,
+			8 + ToI64(QCvarGet("scr_showfps") != 0.0 || q_opt_fps) * 10,
+			q_fps_line);
+	}
+
+
+	cap_fps = 0.0;
+	if (q_t_loop > 0.0)
+		cap_fps = 1.0 / q_t_loop;
+	QSpeedsCapSample(q_t_world, q_t_render, cap_fps);
+
+	if (q_opt_speeds && q_vis)
+	{
+		q_speeds_due = ToBool(tS - q_speeds_at >= 0.25);
+		if (q_speeds_due)
+			q_speeds_at = tS;
+
+		show_vofs = -2;
+		if (q_map->leafs && q_vis->view_leaf >= 0 &&
+			q_vis->view_leaf < q_map->num_leafs)
+			show_vofs = q_map->leafs[q_vis->view_leaf].vis_offset;
+
+		StrPrint(q_fps_line,
+			"faces %d  nodes %d/%d  pvs %d/%d marks %d  hiz %d  occ %d/%d",
+			q_vis->face_count, q_vis->nodes_culled, q_vis->nodes_visited,
+			q_vis->leafs_marked, q_map->num_leafs, q_vis->marks_touched,
+			q_hiz_culled, q_occ_rejected, q_occ_tested);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[0 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 24, &q_speed_line[0 * QSPEED_LEN]);
+
+		StrPrint(q_fps_line,
+			"ents %d  bmod %d/%df  builds %d (mip %d tex %d light %d steal %d flush %d evict %d)  cache %dMB",
+			q_ent_drawn, q_bm_drawn, q_bm_faces,
+			q_surf_builds_frame, q_surf_bmip, q_surf_btex,
+			q_surf_blight, q_surf_steal, q_surf_flush,
+			q_surf_evicts_frame,
+			q_surf_bytes / 1048576);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[1 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 32, &q_speed_line[1 * QSPEED_LEN]);
+
+		StrPrint(q_fps_line,
+			"px cached %dk  slow %dk  occ %dk  simd %dk  screen %dk  "
+			"span %d%% face %d%% row %d%%  bin %dk  prep %d.%dM/%dc cache %d.%dM",
+			q_px_rgb / 1000, q_px_slow / 1000, q_px_occ / 1000,
+			q_px_simd / 1000,
+			q_canvas->vw * q_canvas->vh / 1000,
+			q_tsc_span * 100 / q_tsc_world,
+			q_tsc_face * 100 / q_tsc_world,
+			(q_tsc_world - q_tsc_span - q_tsc_face) * 100 / q_tsc_world,
+			q_bin_entries / 1000,
+			q_tsc_prep / 1000000, q_tsc_prep / 100000 % 10,
+			q_prep_chunks,
+			q_tsc_cache / 1000000, q_tsc_cache / 100000 % 10);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[2 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 40, &q_speed_line[2 * QSPEED_LEN]);
+
+		//tenths of a millisecond. blit is last frame's, measured on the wm task, and is
+		//the only phase not inside this function.
+		StrPrint(q_fps_line,
+			"ms vis %d.%d world %d.%d ents %d.%d (bm %d.%d) hud %d.%d blit %d.%d",
+			ToI64(q_t_vis * 1000.0),   ToI64(q_t_vis * 10000.0) % 10,
+			ToI64(q_t_world * 1000.0), ToI64(q_t_world * 10000.0) % 10,
+			ToI64(q_t_ents * 1000.0),  ToI64(q_t_ents * 10000.0) % 10,
+			ToI64(q_t_brush * 1000.0), ToI64(q_t_brush * 10000.0) % 10,
+			ToI64(q_t_hud * 1000.0),   ToI64(q_t_hud * 10000.0) % 10,
+			ToI64(q_t_blit * 1000.0),  ToI64(q_t_blit * 10000.0) % 10);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[3 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 48, &q_speed_line[3 * QSPEED_LEN]);
+
+		show_r = q_t_render - q_t_vis - q_t_world - q_t_ents - q_t_hud -
+			q_t_clear - q_t_hiz - q_t_stat - q_t_vm;
+
+		show_ms = q_t_loop - q_t_vis - q_t_world - q_t_ents - q_t_srv -
+			q_t_hud - q_t_clear - q_t_pres - q_t_input - q_t_move -
+			q_t_part - q_t_tail - q_t_hiz - q_t_stat - q_t_vm - q_t_music;
+		StrPrint(q_fps_line,
+			"ms srv %d.%d clear %d.%d pres %d.%d loop %d.%d rest %d.%d",
+			ToI64(q_t_srv * 1000.0),   ToI64(q_t_srv * 10000.0) % 10,
+			ToI64(q_t_clear * 1000.0), ToI64(q_t_clear * 10000.0) % 10,
+			ToI64(q_t_pres * 1000.0),  ToI64(q_t_pres * 10000.0) % 10,
+			ToI64(q_t_loop * 1000.0),  ToI64(q_t_loop * 10000.0) % 10,
+			ToI64(show_ms * 1000.0),   ToI64(show_ms * 10000.0) % 10);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[4 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 56, &q_speed_line[4 * QSPEED_LEN]);
+
+		StrPrint(q_fps_line,
+			"ms tail %d.%d render %d.%d untimed %d.%d  hiz %d.%d stat %d.%d vm %d.%d music %d.%d in %d.%d mv %d.%d part %d.%d",
+			ToI64(q_t_tail * 1000.0),   ToI64(q_t_tail * 10000.0) % 10,
+			ToI64(q_t_render * 1000.0), ToI64(q_t_render * 10000.0) % 10,
+			ToI64(show_r * 1000.0),     ToI64(show_r * 10000.0) % 10,
+			ToI64(q_t_hiz * 1000.0),    ToI64(q_t_hiz * 10000.0) % 10,
+			ToI64(q_t_stat * 1000.0),   ToI64(q_t_stat * 10000.0) % 10,
+			ToI64(q_t_vm * 1000.0),     ToI64(q_t_vm * 10000.0) % 10,
+			ToI64(q_t_music * 1000.0),  ToI64(q_t_music * 10000.0) % 10,
+			ToI64(q_t_input * 1000.0),  ToI64(q_t_input * 10000.0) % 10,
+			ToI64(q_t_move * 1000.0),   ToI64(q_t_move * 10000.0) % 10,
+			ToI64(q_t_part * 1000.0),   ToI64(q_t_part * 10000.0) % 10);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[6 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 72, &q_speed_line[6 * QSPEED_LEN]);
+
+		StrPrint(q_fps_line, "qc %dk stmts (hud %dk)  hudpx %dk/%d miss %d  worst %dk in %s",
+			q_pr_stmts / 1000, q_cs_stmts / 1000,
+			q_cs_px / 1000, q_cs_calls, q_cs_miss,
+			q_pr_stmts_worst / 1000,
+			QPrFuncName(q_pr_worst_fn));
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[5 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 64, &q_speed_line[5 * QSPEED_LEN]);
+
+		QBiProfLine(q_fps_line);
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[7 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		if (!q_speeds_caponly)
+			QStrDrawAlt(q_canvas, 8, 80, &q_speed_line[7 * QSPEED_LEN]);
+
+		cap_n = q_cap_n;
+		if (cap_n < 1)
+			cap_n = 1;
+		cap_w = q_cap_world_sum / ToF64(cap_n);
+		cap_r = q_cap_rend_sum / ToF64(cap_n);
+		cap_f = q_cap_fps_sum / ToF64(cap_n);
+
+		q_fps_line[0] = 0;
+		if (q_cap_run)
+		{
+			cap_el = tS - q_cap_start;
+			if (cap_el < 0.0)
+				cap_el = 0.0;
+			StrPrint(q_fps_line, "capture %d.%ds/%d.%ds  %d frames - hold still",
+				ToI64(cap_el),    ToI64(cap_el * 10.0) % 10,
+				ToI64(q_cap_len), ToI64(q_cap_len * 10.0) % 10,
+				q_cap_n);
+		}
+		else if (q_cap_have)
+		{
+			StrPrint(q_fps_line,
+				"cap %d.%ds %df  world %d.%d/%d.%d/%d.%d  render %d.%d/%d.%d/%d.%d  fps %d/%d/%d",
+				ToI64(q_cap_took), ToI64(q_cap_took * 10.0) % 10, q_cap_n,
+				ToI64(q_cap_world_lo * 1000.0),
+				ToI64(q_cap_world_lo * 10000.0) % 10,
+				ToI64(cap_w * 1000.0), ToI64(cap_w * 10000.0) % 10,
+				ToI64(q_cap_world_hi * 1000.0),
+				ToI64(q_cap_world_hi * 10000.0) % 10,
+				ToI64(q_cap_rend_lo * 1000.0),
+				ToI64(q_cap_rend_lo * 10000.0) % 10,
+				ToI64(cap_r * 1000.0), ToI64(cap_r * 10000.0) % 10,
+				ToI64(q_cap_rend_hi * 1000.0),
+				ToI64(q_cap_rend_hi * 10000.0) % 10,
+				ToI64(q_cap_fps_lo + 0.5), ToI64(cap_f + 0.5),
+				ToI64(q_cap_fps_hi + 0.5));
+		}
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[8 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		QStrDrawAlt(q_canvas, 8, 88, &q_speed_line[8 * QSPEED_LEN]);
+
+		cap_prep  = q_cap_prep_sum / cap_n;
+		cap_cache = q_cap_cache_sum / cap_n;
+
+		q_fps_line[0] = 0;
+		if (q_cap_have)
+		{
+			StrPrint(q_fps_line,
+				"cap avg  span %d%% face %d%% row %d%%  prep %d.%dM/%dc cache %d.%dM",
+				q_cap_span_sum / cap_n, q_cap_face_sum / cap_n,
+				q_cap_row_sum / cap_n,
+				cap_prep / 1000000, (cap_prep / 100000) % 10,
+				q_cap_chunk_sum / cap_n,
+				cap_cache / 1000000, (cap_cache / 100000) % 10);
+		}
+		if (q_speeds_due)
+			QStrCopy(&q_speed_line[9 * QSPEED_LEN], q_fps_line,
+				QSPEED_LEN);
+		QStrDrawAlt(q_canvas, 8, 96, &q_speed_line[9 * QSPEED_LEN]);
+	}
+
+	if (q_opt_showents)
+	{
+		for (show_i = 0; show_i < q_showents_n; show_i++)
+			QStrDrawAlt(q_canvas, 8, 48 + show_i * 8,
+				&q_showents[show_i * QSHOWENTS_LEN]);
+	}
+
+	if (q_probe_show > 0 || q_opt_debugtex)
+	{
+		if (q_probe_show > 0)
+			q_probe_show--;
+		QStrDrawAlt(q_canvas, 8, 8, q_probe_line1);
+		if (q_probe_line2[0])
+			QStrDrawAlt(q_canvas, 8, 8 + QCHAR_H + 1, q_probe_line2);
+	}
+
+	if (q_state == QST_CONSOLE)
+		QConDraw(q_canvas);
+	else
+		QConDrawNotify(q_canvas);
+}
+
+U0 QSpeedsRedraw(CQCanvas *c)
+{
+	I64 i;
+
+	if (!c)
+		return;
+
+	if (q_opt_fps && QCvarGet("viewsize") < 130.0)
+		QStrDrawAlt(c, c->width - 64, 8, q_fps_shown);
+
+	if (!q_opt_speeds)
+		return;
+
+	for (i = 0; i < QSPEED_LINES; i++)
+		QStrDrawAlt(c, 8, 24 + 8 * i, &q_speed_line[i * QSPEED_LEN]);
+}
+
+U0 QNoRenderHud()
+{//cl_norender: the fps counter and the latched r_speeds, without the world.
+ // q_map and q_vis go NULL while a level is torn down and the frame loop keeps
+ // running.
+	if (!q_canvas || !q_ready || !q_map || !q_vis)
+		return;
+
+	QDrawClear(q_canvas, 0);
+
+	q_fps_frames++;
+	if (tS - q_fps_window >= 0.25)
+	{
+		if (tS > q_fps_window)
+			q_fps_value = ToF64(q_fps_frames) / (tS - q_fps_window);
+		q_fps_window = tS;
+		q_fps_frames = 0;
+	}
+
+	StrPrint(q_fps_line, "%d fps", ToI64(q_fps_value + 0.5));
+	QStrCopy(q_fps_shown, q_fps_line, 32);
+
+	QSpeedsRedraw(q_canvas);
+}
+
+U0 QCenterView(CTask *task)
+{//aspect-preserving fit, centred
+	I64 w = task->pix_width;
+	I64 h = task->pix_height;
+	I64 cw;
+	I64 ch;
+
+	if (!q_canvas)
+		return;
+
+	cw = q_canvas->width;
+	ch = q_canvas->height;
+
+	if (q_opt_fullscreen)
+	{
+		//the canvas is stretched to the client rect, so render size and window size are
+		//independent. the rect is the screen rounded down to whole character cells.
+		q_blit_w = w;
+		q_blit_h = h;
+	}
+	else
+	{
+		q_blit_w = w;
+		q_blit_h = (w * ch) / cw;
+
+		if (q_blit_h > h)
+		{
+			q_blit_h = h;
+			q_blit_w = (h * cw) / ch;
+		}
+	}
+
+	if (q_blit_w < 1) q_blit_w = 1;
+	if (q_blit_h < 1) q_blit_h = 1;
+
+	q_blit_x = (w - q_blit_w) / 2;
+	q_blit_y = (h - q_blit_h) / 2;
+}
+
+U0 QApplyVideo()
+{//rebuild the render target and resize the window. the compositor reads the
+ // canvas through draw_it, so the same drain-before-free that teardown needs
+ // applies here.
+	CQCanvas *old;
+	I64		  w = q_res_w[q_opt_res];
+	I64		  h = q_res_h[q_opt_res];
+
+	q_ready     = FALSE;
+	Fs->draw_it = NULL;
+	Sleep(60);
+
+	old          = q_canvas;
+	q_canvas     = NULL;
+	q_present_ok = FALSE;
+	QDrawFree(old);
+
+	q_canvas = QDrawNew(w, h);
+
+	if (q_opt_fullscreen)
+	{
+		//edge to edge, as HL1 does: stock WinMax skips row 0 and the last text row
+		WinBorder(OFF);
+		WinHorz(0, TEXT_COLS - 1);
+		WinVert(0, TEXT_ROWS - 1);
+	}
+	else
+	{
+		WinBorder(ON);
+		WinHorz(2, 2 + (w / FONT_WIDTH));
+		WinVert(2, 2 + (h / FONT_HEIGHT));
+	}
+
+	QCenterView(Fs);
+
+	Fs->draw_it = &QDrawIt;
+	q_res_dirty = FALSE;
+}
+
+Bool QLoadMap(U8 *mapname)
+{
+	I64 ent_count;
+	I64 mdl_count;
+	U8  line[256];
+
+	if (q_vis)
+	{
+		QVisFree(q_vis);
+		q_vis      = NULL;
+		q_draw_vis = NULL;
+	}
+	if (q_map)
+	{
+		QBSPFree(q_map);
+		q_map = NULL;
+	}
+
+	q_ext_loaded  = 0;
+	q_ext_bytes   = 0;
+	q_ext_base[0] = 0;
+
+	q_map = QBSPLoad(mapname);
+	if (!q_map)
+		return FALSE;
+
+	QStrCopy(q_map_name, mapname, 96);
+
+	//trail memory is keyed by edict number, which the next map reuses
+	QPartTrailReset;
+
+	//worldspawn "sky" → gfx/env set (Ironwail Sky_NewMap)
+	QSkyNewMap(q_map);
+
+	q_vis = QVisNew(q_map);
+
+	QLightCacheClear;
+	QLerpClear;
+	QClipLinkClear;
+
+	//the area tree is sized from the world's bounds, so it is rebuilt per map.
+	//QGameLinkAll fills it on the first frame.
+	QAreaClear(q_map);
+
+	//order matters - models resolve against the parsed list
+	ent_count = QEntParse(q_map);
+	mdl_count = QEntLoadModels;
+
+	QHeapCheck("after QBSPLoad");
+
+	StrPrint(line, "map %s: %d entities, %d static models\n",
+		mapname, ent_count, mdl_count);
+	QLog(line);
+
+	StrPrint(line, "maps/%s.bsp: %d entities", mapname, ent_count);
+	QConPrint(line);
+
+	//makestatic and ambientsound write into sv.signon while the map's spawn
+	//functions run.
+	QSvClearSignon;
+
+	if (q_demo_playing)
+	{
+		QGameShutdown;
+
+		QNetStatesClear;
+		QNetClientClear;
+	}
+
+	//bring up the QuakeC world. without the bytecode the game falls back to the
+	//static entity list, which renders but never thinks.
+	else if (QGameInit(q_map))
+	{
+		StrPrint(line, "QuakeC: %d spawn functions ran, %d edicts live\n",
+			q_game_spawned, q_pr_num_edicts);
+		QLog(line);
+
+		QGameLoadMark("spawn done");
+
+		//csprogs.dat rides the same paks; reload with the server progs so the stat
+		//field offsets track it
+		QCsqcLoad;
+		QGameLoadMark("csqc done");
+
+		//baselines are signon, not datagram: every later delta is measured from them
+		QNetStatesClear;
+		QNetClientClear;
+
+		//the local player is client 0, in the same slot table as the remotes.
+		QSvClientsClear;
+		QSvAddClient(0, TRUE, q_player_edict, q_game_time);
+
+		//worldspawn's .sounds is the CD track. must follow QNetClientClear above.
+		if (q_fld_sounds >= 0)
+			q_cl_cdtrack = ToI64(QPrFieldF(0, q_fld_sounds));
+
+		QMsgClear(&q_net_send);
+
+		QNetWriteIdentity(&q_net_send, 0, q_setup_name,
+			q_setup_top, q_setup_bottom);
+
+		//SV_CreateBaseline: once into sv.signon after the spawn
+		QNetWriteBaselines(&q_sv_signon);
+		QMsgAppendIfRoom(&q_net_send, &q_sv_signon, QNET_MAX_MSG);
+
+		QNetSendToClient(&q_net_send);
+		QNetClientFrame;
+
+		StrPrint(line, "net: %d baselines, %d bytes signon, name '%s'\n",
+			q_net_num_ents, q_net_send.len, q_cl_name);
+		QLog(line);
+	}
+	else
+		QLog("QuakeC: FAILED to load - entities will be static\n");
+
+	//PutClientInServer chooses the spawn point, so q_origin is replaced by whatever
+	//the game logic decided.
+	if (q_game_active)
+	{
+		if (QPlayerSpawn(q_origin, q_angles, q_setup_name))
+		{
+			//slot state first - QSvApplyClientColors resolves .colormap through the slot
+			//table
+			if (q_sv_clients[0].active && q_sv_clients[0].local)
+			{
+				q_sv_clients[0].top    = q_setup_top & 15;
+				q_sv_clients[0].bottom = q_setup_bottom & 15;
+				QStrCopy(q_sv_clients[0].name, q_setup_name, 32);
+			}
+
+			QSvApplyClientColors(q_player_edict, q_setup_top, q_setup_bottom);
+
+			StrPrint(line, "player: edict %d, health %3.0f\n",
+				q_player_edict, QPlayerHealth);
+			QLog(line);
+		}
+		else
+			QLog("player: FAILED to spawn as a client\n");
+	}
+
+	QLogFlush;
+	"Quake: %d entities, %d alias models\n", ent_count, mdl_count;
+
+	QVecSet(q_velocity, 0.0, 0.0, 0.0);
+	q_on_ground = FALSE;
+
+	if (!QEntFindPlayerStart(q_map, q_origin, q_angles))
+	{
+		"Quake: no info_player_start, using model bounds (noclip on)\n";
+		q_noclip = TRUE;
+		q_origin[0] = (q_map->models[0].mins[0] + q_map->models[0].maxs[0]) * 0.5;
+		q_origin[1] = (q_map->models[0].mins[1] + q_map->models[0].maxs[1]) * 0.5;
+		q_origin[2] = (q_map->models[0].mins[2] + q_map->models[0].maxs[2]) * 0.5;
+		QVecSet(q_angles, 0.0, 0.0, 0.0);
+	}
+
+	//globals aren't zeroed
+	QVecCopy(q_origin, q_old_origin);
+
+	//the local client is served without a svc_serverinfo round trip, so the server
+	//resolution publishes cl.gametype here. a remote client and a demo keep the
+	//value their QSVC_SERVERINFO parse read.
+	if (!QClientMode)
+		q_cl_gametype = QSvGameType;
+
+	return TRUE;
+}
+
+#define QSAVE_PATH		"::/Apps/QuakePlus/QSAVE1.SAV"
+#define QSAVE_PATH_OLD	"QSAVE1.SAV"
+
+U8 *QSavePathRead()
+{
+	if (FileFind(QSAVE_PATH))
+		return QSAVE_PATH;
+
+	if (FileFind(QSAVE_PATH_OLD))
+		return QSAVE_PATH_OLD;
+
+	return QSAVE_PATH;
+}
+
+Bool QSaveGame()
+{//Quicksave. one slot.
+	return QSaveWrite(QSAVE_PATH, q_map_name, q_game_time, q_origin,
+		q_velocity, q_angles, q_on_ground, q_water_level, q_water_type);
+}
+
+Bool QLoadGame()
+{//load the save's map, then pour the saved world into it. spawn functions are
+ // not run.
+	U8 mapname[96];
+	U8 line[160];
+	U8 *path = QSavePathRead;
+
+	if (!QSaveReadHeader(path, mapname))
+		return FALSE;
+
+	QSndStopAll;
+
+	QGameShutdown;
+	QEntFree;
+
+	if (q_vis)
+	{
+		QVisFree(q_vis);
+		q_vis      = NULL;
+		q_draw_vis = NULL;
+	}
+	if (q_map)
+	{
+		QBSPFree(q_map);
+		q_map = NULL;
+	}
+
+	if (!QLoadMap(mapname))
+	{
+		StrPrint(line, "load: %s failed to load\n", mapname);
+		QLog(line);
+		QSaveDiscard;
+		return FALSE;
+	}
+
+	QSvClearSignon;
+
+	if (!QGameInit(q_map, FALSE))
+	{
+		QLog("load: progs.dat failed to come up\n");
+		QSaveDiscard;
+		return FALSE;
+	}
+
+	QCsqcLoad;
+
+	if (!QSaveRestore(&q_game_time, q_origin, q_velocity, q_angles,
+		&q_on_ground, &q_water_level, &q_water_type))
+	{
+		QLog("load: restore failed\n");
+		return FALSE;
+	}
+
+	//a restored world is a new world to the protocol - fresh baselines
+	QNetStatesClear;
+	QNetClientClear;
+	QMsgClear(&q_net_send);
+	QNetWriteBaselines(&q_sv_signon);
+	QMsgAppendIfRoom(&q_net_send, &q_sv_signon, QNET_MAX_MSG);
+	QNetSendToClient(&q_net_send);
+	QNetClientFrame;
+
+	QVecCopy(q_origin, q_old_origin);
+	q_world_warned = FALSE;
+	QBiIntermissionClear;
+
+	StrPrint(line, "load: %s at %.0f %.0f %.0f\n", mapname,
+		q_origin[0], q_origin[1], q_origin[2]);
+	QLog(line);
+	QLogFlush;
+
+	return TRUE;
+}
+
+Bool QPakMountOne(U8 *dir, I64 index)
+{//mount dir/pakN, trying both cases. id1 ships PAK0.PAK, a mission pack dropped
+ // in by hand is usually pak0.pak and FileFind will not find the other.
+	U8 pakname[64];
+
+	StrPrint(pakname, "::/Apps/QuakePlus/%s/PAK%d.PAK", dir, index);
+	if (FileFind(pakname))
+		return QPakMount(pakname, dir);
+
+	StrPrint(pakname, "::/Apps/QuakePlus/%s/pak%d.pak", dir, index);
+	if (FileFind(pakname))
+		return QPakMount(pakname, dir);
+
+	return FALSE;
+}
+
+U0 QPakMountGame()
+{//COM_AddGameDirectory: id1 first, then the mod on top. loose files under the
+ //mod dir still resolve when there is no pak0 (qbj3). QPakData searches mod
+ //paks → mod loose → id1 paks → id1 loose
+	I64	i;
+	I64	mod_paks = 0;
+	U8	line[96];
+
+	q_pak_game_mounted = TRUE;
+
+	if (!QPakMountOne("id1", 0))
+		return;
+
+	i = 1;
+	while (i < QPAK_MAX_PAKS && QPakMountOne("id1", i))
+		i++;
+
+	if (!q_game_dir[0])
+		return;
+
+	i = 0;
+	while (i < QPAK_MAX_PAKS && QPakMountOne(q_game_dir, i))
+	{
+		mod_paks++;
+		i++;
+	}
+
+	if (!mod_paks)
+		QLog("gamedir: no paks, loose files only\n");
+	else
+	{
+		StrPrint(line, "gamedir: mounted %d pak(s) for %s\n",
+			mod_paks, q_game_dir);
+		QLog(line);
+	}
+}
+
+U0 QCfgApplyParked()
+{//the settings that live in cvars. QCfgLoad runs before QCvarInit and before
+ // any quake.rc; -1 means the key was absent from the file.
+	QCvarSet("crosshair", ToF64(q_opt_crosshair_user));
+
+	if (q_cfg_viewsize >= 0)
+		QCvarSet("viewsize", ToF64(q_cfg_viewsize));
+
+	if (q_cfg_farclip >= QFAR_CLIP_MIN)
+		QCvarSet("gl_farclip", ToF64(q_cfg_farclip));
+
+	if (q_cfg_run >= 0)
+	{
+		//M_AdjustSliders moves the two speeds together
+		if (q_cfg_run)
+		{
+			QCvarSet("cl_forwardspeed", 400.0);
+			QCvarSet("cl_backspeed", 400.0);
+		}
+		else
+		{
+			QCvarSet("cl_forwardspeed", 200.0);
+			QCvarSet("cl_backspeed", 200.0);
+		}
+	}
+
+	//invert is the sign of m_pitch, so the magnitude survives the round trip
+	if (q_cfg_invert >= 0)
+	{
+		if (q_cfg_invert && QCvarGet("m_pitch") > 0.0)
+			QCvarSet("m_pitch", -QCvarGet("m_pitch"));
+		else if (!q_cfg_invert && QCvarGet("m_pitch") < 0.0)
+			QCvarSet("m_pitch", -QCvarGet("m_pitch"));
+	}
+}
+
+U0 QCfgReloadAfterGameCfgs()
+{//run after any quake.rc exec, startup or gamedir switch.
+ //
+ // quake.rc runs default.cfg then config.cfg, so the mod's settings land last.
+	if (!FileFind(QCFG_PATH) && !FileFind(QCFG_PATH_OLD))
+		return;
+
+	QCfgLoad;
+	QCfgApplyParked;
+}
+
+Bool QGameDirSwitch(U8 *dir)
+{//"game <dir>" with no restart.
+ //
+ // every lookup hands back a pointer into the archive, so nothing may hold one
+ // when the paks go.
+	U8	line[96];
+
+	if (!dir)
+		return FALSE;
+
+	q_ready = FALSE;
+	Sleep(60);
+
+	QDemoStop;
+	q_demo_loop = FALSE;
+
+	QGameShutdown;
+	QEntFree;
+
+	QSurfCacheFlush;
+	QSurfCacheSetMap(NULL);
+
+	if (q_vis)
+	{
+		QVisFree(q_vis);
+		q_vis      = NULL;
+		q_draw_vis = NULL;
+	}
+	if (q_map)
+	{
+		QSkyFree;
+		QBSPFree(q_map);
+		q_map = NULL;
+	}
+
+	QMusicFree;
+	QMusicPendFree;
+	QSndFree;
+
+	QCsqcFree;
+
+	QMdlCacheFree;
+	QMdlPreviewFree;
+
+	QPakUnmountAll;
+
+	QStrCopy(q_game_dir, dir, 32);
+	QPakMountGame;
+
+	//gfx/pop.lmp is COM_CheckRegistered's test and lives in the paks the switch
+	//replaced
+	QCvarSet("registered", ToF64(QPakFind("gfx/pop.lmp") != NULL));
+
+	QConExecStartupCfgs;
+	QCfgReloadAfterGameCfgs;
+
+	if (!QPalLoad)
+	{
+		QLog("gamedir: palette missing, cannot continue\n");
+		return FALSE;
+	}
+
+	QWadInit;
+	QSbarInit;
+	QMenuInit;
+
+	QNetStatesClear;
+	QNetClientClear;
+	QBiFreePrecache;
+
+	q_menu_ingame = FALSE;
+	q_menu_page   = QPAGE_MAIN;
+	q_state       = QST_MENU;
+	q_map_name[0] = 0;
+
+	QPresentFrame;
+	q_ready = TRUE;
+
+	//no ternary in ZealC
+	if (dir[0])
+		StrPrint(line, "gamedir: now %s\n", dir);
+	else
+		StrPrint(line, "gamedir: now id1\n");
+	QLog(line);
+	QConPrint(line);
+	QCfgSave;
+
+	return TRUE;
+}
+
+Bool QChangeLevel(U8 *mapname)
+{//tear the world down and bring up the next map, carrying the player's
+ // inventory. runs between frames, never inside a think.
+	U8  path[96];
+	U8  line[160];
+	I64 ci;
+
+	//svs survives SV_SpawnServer: connected players follow the server to the next
+	//map
+	q_sv_keep_clients = TRUE;
+
+	QGameSaveParms;
+
+	//S_StopAllSounds at server spawn: voices reference the old world's entities and
+	//positions
+	QSndStopAll;
+
+	QGameShutdown;
+	QEntFree;
+
+	if (q_vis)
+	{
+		QVisFree(q_vis);
+		q_vis      = NULL;
+		q_draw_vis = NULL;
+	}
+	if (q_map)
+	{
+		QBSPFree(q_map);
+		q_map = NULL;
+	}
+
+	//SCR_BeginLoadingPlaque: paint the plaque once, before anything is freed
+	if (q_canvas)
+	{
+		QDrawClear(q_canvas, 0);
+		if (q_pic_conback.pixels)
+			QPicDrawFill(q_canvas, &q_pic_conback);
+		QSbarLoadingPlaque(q_canvas);
+		q_loading = TRUE;
+
+		q_canvas->prefogged = TRUE;
+		QPresentFrame;
+	}
+
+	if (!StrNICompare(mapname, "maps/", 5))
+		QStrCopy(path, mapname, 96);
+	else
+		StrPrint(path, "maps/%s.bsp", mapname);
+
+	if (!QLoadMap(path))
+	{
+		q_sv_keep_clients = FALSE;
+		q_loading = FALSE;
+		StrPrint(line, "changelevel: %s failed to load\n", path);
+		QLog(line);
+		return FALSE;
+	}
+
+	q_sv_keep_clients = FALSE;
+	q_loading = FALSE;
+
+	QVecSet(q_velocity, 0.0, 0.0, 0.0);
+	q_water_level  = 0;
+	q_water_real   = 0;
+	q_items_last   = -1;
+	q_items_flips  = 0;
+	q_water_last   = 0;
+	q_water_type   = 0;
+	q_on_ground    = FALSE;
+	q_world_warned = FALSE;
+
+	//no second spawn - QLoadMap already ran SetNewParms, ClientConnect and
+	//PutClientInServer. colours still need reapplying: the slot table was rebuilt.
+	if (q_game_active)
+	{
+		QSvApplyClientColors(q_player_edict, q_setup_top, q_setup_bottom);
+		if (q_sv_clients[0].active && q_sv_clients[0].local)
+		{
+			q_sv_clients[0].top    = q_setup_top & 15;
+			q_sv_clients[0].bottom = q_setup_bottom & 15;
+			QStrCopy(q_sv_clients[0].name, q_setup_name, 32);
+		}
+	}
+
+	//SV_SpawnServer's tail: every connected client is sent the new serverinfo and
+	//put back to signon 1, so it reloads and walks prespawn/spawn/begin again.
+	if (q_udp_ready && q_udp_server)
+	{
+		for (ci = 0; ci < QSV_MAX_CLIENTS; ci++)
+		{
+			if (!q_sv_clients[ci].active || q_sv_clients[ci].local)
+				goto qcl_next_client;
+
+			q_sv_clients[ci].edict   = ci + 1;
+			q_sv_clients[ci].spawned = FALSE;
+			q_sv_clients[ci].signon  = 0;
+
+			q_sv_clients[ci].sent_ident = FALSE;
+
+			QNetSendServerInfo(ci);
+
+qcl_next_client:
+		}
+	}
+
+	QVecCopy(q_origin, q_old_origin);
+
+	StrPrint(line, "changelevel: spawned at %.0f %.0f %.0f\n",
+		q_origin[0], q_origin[1], q_origin[2]);
+	QLog(line);
+
+	//serverflags selects the spawn spot: SelectSpawnPoint only considers
+	//info_player_start2 when it is non-zero. the mod sets bit 21 (SVFL_RESPAWNING),
+	//disjoint from the spot's default mask.
+	if (q_ofs_serverflags >= 0 && q_fld_origin >= 0)
+	{
+		StrPrint(line, "changelevel: serverflags %d, edict 1 at %.0f %.0f %.0f\n",
+			ToI64(QPrGetF(q_ofs_serverflags)),
+			QPrFieldF(1, q_fld_origin),
+			QPrFieldF(1, q_fld_origin + 1),
+			QPrFieldF(1, q_fld_origin + 2));
+		QLog(line);
+	}
+
+	//log only - the original prints nothing to the player on a level change.
+	StrPrint(line, "changelevel -> %s\n", path);
+	QLog(line);
+	QLogFlush;
+
+	return TRUE;
+}
+
+U0 QClientPrecacheRebuild()
+{//CL_ParseServerInfo precache resolution, deferred until after the map load it
+ // depends on. replayed in wire order.
+	U8	*name;
+	I64	 j;
+
+	QBiFreePrecache;
+
+	//slot 0 is no model; slot 1 is the map, already loaded
+	q_precache_model[0]    = NULL;
+	q_precache_mdl[0]      = NULL;
+	q_precache_model_count = 1;
+
+	for (j = 0; j < q_cl_model_count; j++)
+	{
+		name = q_cl_model_names + j * QCL_PRECACHE_NAME;
+		if (j == 0)
+		{
+			QStrCopy(q_world_model_name, name, 96);
+			q_precache_model[1] = q_world_model_name;
+			q_precache_mdl[1]   = NULL;
+			q_precache_model_count = 2;
+		}
+		else
+			QBiPrecacheModel(name);
+	}
+
+	for (j = 0; j < q_cl_sound_count; j++)
+		q_precache_sound[j] = q_cl_sound_names + j * QCL_PRECACHE_NAME;
+	q_precache_sound_count = q_cl_sound_count;
+
+	StrPrint(q_join_line, "client: %d models, %d sounds precached\n",
+		q_precache_model_count, q_precache_sound_count);
+	QLog(q_join_line);
+}
+
+#define QINPUT_DRAIN_MAX	1024
+
+U0 QInputDrain()
+{//consume queued key messages.
+ //
+ // input is read as raw state through kbd.down_bitmap, so MessageGet is never
+ // called and a session's worth of KEY_DOWN/UP pairs piles up. on return the
+ // terminal drains that backlog as typed input.
+	I64 ch;
+	I64 sc;
+	I64 guard = 0;
+	I64 t0    = TSCGet;
+
+	while (guard < QINPUT_DRAIN_MAX && KeyScan(&ch, &sc))
+		guard++;
+
+	q_drain_tsc   = TSCGet - t0;
+	q_drain_msgs  = guard;
+	q_drain_capped = ToBool(guard >= QINPUT_DRAIN_MAX);
+}
+
+U0 QInputDrainAll()
+{//the same drain for exit, where it has to finish the job. drain until the queue
+ // reports empty, with a ceiling far above any real backlog, and repeat because
+ // messages can still be posted between passes.
+	I64 ch;
+	I64 sc;
+	I64 guard;
+	I64 pass;
+
+	for (pass = 0; pass < 4; pass++)
+	{
+		guard = 0;
+		while (guard < 65536 && KeyScan(&ch, &sc))
+			guard++;
+
+		if (!guard)
+			break;
+
+		Sleep(10);
+	}
+}
+
+F64 q_host_ui_accum = 0.0;
+
+U0 QSvHostTickInit()
+{//globals aren't zeroed
+	q_host_ui_accum = 0.0;
+}
+
+U0 QSvHostTick(F64 dt)
+{//Host_Frame runs Host_ServerFrame whenever sv.active. key_dest decides where
+ // input goes and what gets drawn, never whether the world runs.
+ //
+ // no local input here: CL_SendCmd builds an empty move while a menu owns the
+ // keyboard.
+	I64 steps = 0;
+	I64 k;
+	F64 nomove[3];
+
+	q_t_srv_mark = tS;
+
+	if (!q_game_active)
+		return;
+
+	if (q_demo_playing)
+		return;
+
+	q_host_ui_accum += dt;
+	if (q_host_ui_accum > QSERVER_MAX_ACCUM)
+		q_host_ui_accum = QSERVER_MAX_ACCUM;
+	else if (q_host_ui_accum < 0.0)
+		q_host_ui_accum = 0.0;
+
+	QVecSet(nomove, 0.0, 0.0, 0.0);
+
+	while (q_host_ui_accum >= QSERVER_STEP && steps < QSERVER_MAX_CATCHUP)
+	{
+		//SV_Physics runs SV_Physics_Client for every client. QGameFrame covers the
+		//world only, and the local move lives in the frame loop the menu skips.
+		if (q_game_active && q_player_edict > 0)
+		{
+			QDropPunchAngle(q_player_edict, QSERVER_STEP);
+
+			//empty move, as CL_SendCmd builds when the menu owns the keyboard
+			QPlayerPreThink(q_origin, q_velocity, q_angles, q_on_ground,
+				FALSE, FALSE, 0);
+
+			//QuakeC may have raised waterlevel in PreThink - ladders do
+			if (q_pre_water_level > q_water_level)
+				q_water_level = q_pre_water_level;
+
+			if (!q_noclip && QPlayerWalking)
+				QPlayerMove(q_map, q_origin, q_velocity, nomove, 0.0,
+					FALSE, QSERVER_STEP, &q_on_ground, q_water_level,
+					QPlayerWaterJump(q_velocity, q_game_time), q_angles,
+					q_player_edict);
+
+			for (k = 0; k < 3; k++)
+				QPrSetFieldF(q_player_edict, q_fld_origin + k, q_origin[k]);
+		}
+
+		//NET_Poll is unconditional in Host_Frame. this call is the only place a
+		//remote's clc_move is parsed.
+		QNetServerReadClient(q_player_edict, q_game_time);
+
+		//SV_RunClients precedes SV_Physics: every client is stepped before any
+		//pusher moves.
+		QSvRunClients(QSERVER_STEP, q_game_time);
+
+		QGameFrame(QSERVER_STEP);
+
+		if (q_game_active && q_player_edict > 0)
+		{
+			for (k = 0; k < 3; k++)
+				q_origin[k] = QPrFieldF(q_player_edict, q_fld_origin + k);
+
+			QPlayerTouchTriggers(q_origin, q_velocity);
+			QPlayerPostThink(q_origin, q_velocity, q_angles,
+				q_on_ground, q_water_level, q_water_type);
+			QSvRunEntityThink(q_player_edict);
+		}
+
+		QNetServerFrame(q_player_edict, q_game_time);
+
+		q_host_ui_accum -= QSERVER_STEP;
+		steps++;
+	}
+
+	q_t_srv = tS - q_t_srv_mark;
+}
+
+U0 QGameLoop()
+{
+	Bool cdchg = FALSE;
+
+	F64  forward[3];
+	F64  right[3];
+	F64  up[3];
+	F64  move[3];
+	F64  speed;
+	F64  net_fwd;
+	F64  net_side;
+	F64  now;
+	F64  last;
+	F64  dt;
+	F64  fps_time;
+	F64  surf_stat_time;
+
+	I64  sc_tilde	= Char2ScanCode('`');
+	I64  sc_minus	= Char2ScanCode('-');
+	I64  sc_equals	= Char2ScanCode('=');
+	I64  sc_y		= Char2ScanCode('y');
+	I64  sc_u		= Char2ScanCode('u');
+	I64  dx;
+	I64  dy;
+	I64  fps_frames   = 0;
+	I64  impulse      = 0;
+	I64  impulse_down = 0;	//number key held this frame, 0 = none
+	I64  impulse_last = 0;	//and the previous frame, for the edge
+	I64  i            = 0;
+	I64  menu_sc      = 0;
+	I64  last_menu_sc = 0;
+	I64  menu_i;
+	Bool attack       = FALSE;
+	Bool jump         = FALSE;
+	Bool esc_held     = FALSE;
+	Bool start_game   = FALSE;
+	Bool tilde_held   = FALSE;
+	I64  wheel_dz     = 0;
+	Bool q_load_request = FALSE;
+	F64  srv_accum    = 0.0;
+	I64  srv_steps    = 0;
+
+	//Game time comes from the kernel tick, not from frame timing.
+	last     = ToF64(counts.jiffies) / ToF64(JIFFY_FREQ);
+	fps_time = last;
+	surf_stat_time = last;
+
+	while (TRUE)
+	{
+		if (q_t_phase_mark > 0.0)
+			q_t_tail = tS - q_t_phase_mark;
+
+		q_t_loop      = tS - q_t_loop_mark;
+		q_t_loop_mark = tS;
+		q_t_srv       = 0.0;
+
+		q_t_music     = 0.0;
+
+		q_pr_stmts       = 0;
+		q_pr_stmts_worst = 0;
+		q_pr_worst_fn    = 0;
+
+		q_bi_tsc   = 0;
+		q_bi_calls = 0;
+		q_bi_scan  = 0;
+
+		q_clip_traces = 0;
+		q_clip_cand   = 0;
+		MemSet(q_bi_prof_tsc,   0, QPR_MAX_BUILTIN * sizeof(I64));
+		MemSet(q_bi_prof_calls, 0, QPR_MAX_BUILTIN * sizeof(I64));
+
+		now  = ToF64(counts.jiffies) / ToF64(JIFFY_FREQ);
+		dt   = now - last;
+		last = now;
+
+		if (dt > 0.1)
+			dt = 0.1;
+
+		//SCR_UpdateZoom, advanced on the frame clock like the original's
+		//(cl.time - cl.oldtime). runs in every state.
+		QZoomUpdate(dt);
+
+		//freeze mip selection for the length of a zoom ramp - every frame of the ramp
+		//rescales the mip ratio. see QMipForRatio.
+		q_mip_frozen = ToBool(q_mip_zoom_hold && q_zoom_dir != 0.0);
+
+		//Sky_SetupFrame - the cloud drift advances on the frame clock
+		QSkyWindFrame(tS);
+
+		if (q_res_dirty)
+			QApplyVideo;
+
+		q_t_phase_mark = tS;
+		QInputDrain;
+
+		//no hardcoded -, =, F2 or F3 here: default.cfg binds sizedown/sizeup and
+		//menu_save/menu_load to them, and a hardcoded poll alongside the bind runs both.
+		if (q_menu_save_req)
+		{
+			q_menu_save_req = FALSE;
+			if (q_game_active)
+				QSaveGame;
+		}
+
+		if (q_menu_load_req)
+		{
+			q_menu_load_req = FALSE;
+			q_load_request  = TRUE;
+		}
+
+		if (q_load_request)
+		{
+			q_load_request = FALSE;
+			QLoadGame;
+			goto ql_next_frame;
+		}
+
+		//joining: the network runs outside the in-game tick. an unjoined client sits in
+		//the menu, where the tick never runs. the request repeats because a datagram
+		//can be lost, and keeps last_msg fresh while the map loads.
+		if (q_udp_ready && !q_udp_server &&
+			(!q_menu_ingame || q_change_pending || !q_game_active))
+		{
+			if (tS - q_join_last_try > 1.0)
+			{
+				q_join_last_try = tS;
+
+				if (!QNetUdpPeerResolved)
+					QNetUdpArpProbe;
+
+				QNetClientSendConnect(q_setup_name, q_setup_top, q_setup_bottom);
+			}
+
+			QNetClientFrame;
+		}
+
+		//Host_Frame calls CL_ReadFromServer unconditionally: the console and menu
+		//states skip the frame tail, so pump here.
+		if (q_demo_playing)
+		{
+			if (q_change_pending)
+			{
+				q_change_pending = FALSE;
+				if (QChangeLevel(q_change_map))
+					QClientPrecacheRebuild;
+				else
+				{
+					QLog("demo: level failed to load, stopping\n");
+					q_demo_loop = FALSE;
+					QDemoStop;
+				}
+			}
+
+			QNetClientFrame;
+
+			if (q_demo_playing)
+			{
+				if (q_cl_viewent > 0 && q_cl_viewent < QNET_MAX_ENTS)
+					QVecCopy(q_net_cl[q_cl_viewent].origin, q_origin);
+				QVecCopy(q_demo_angles, q_angles);
+			}
+
+			if (!q_demo_playing && !q_game_active)
+			{
+				q_change_pending = FALSE;
+
+				q_menu_ingame = FALSE;
+				q_menu_page   = QPAGE_MAIN;
+				q_state       = QST_MENU;
+			}
+		}
+
+		//the server named a level: load it, then continue stock signon (prespawn ->
+		//spawn -> begin). play is not entered until signon 4.
+		if (q_net_join_pending)
+		{
+			q_net_join_pending = FALSE;
+
+			if (q_demo_playing || (q_udp_ready && !q_udp_server))
+			{
+				if (q_demo_playing)
+					StrPrint(q_join_line, "demo: %s, level %s\n",
+						q_demo_name, q_net_join_map);
+				else
+					StrPrint(q_join_line, "net: joining, server level %s\n",
+						q_net_join_map);
+				QLog(q_join_line);
+
+				QStrCopy(q_change_map, q_net_join_map, 64);
+				q_change_pending = TRUE;
+				q_menu_ingame    = TRUE;
+				if (!q_demo_playing || q_state != QST_MENU)
+					q_state = QST_PLAYING;
+			}
+		}
+
+		q_kb_console_sc = sc_tilde;
+
+		//tilde drops the console, as in the original
+		if (Bt(kbd.down_bitmap, sc_tilde))
+		{
+			if (!tilde_held)
+			{
+				tilde_held = TRUE;
+
+				q_con_want_toggle = TRUE;
+			}
+		}
+		else
+			tilde_held = FALSE;
+
+		//messagemode (Y) / messagemode2 (U); TAB scoreboard
+		q_scoreboard_show = FALSE;
+		if (q_state == QST_PLAYING && !q_msg_mode)
+		{
+			if (QConKeyEdge(sc_y))
+				QMsgModeBegin(FALSE);
+			else if (QConKeyEdge(sc_u))
+				QMsgModeBegin(TRUE);
+
+			if (Bt(kbd.down_bitmap, SC_TAB))
+				q_scoreboard_show = TRUE;
+		}
+
+		//ESC toggles the menu; quitting is a menu choice
+		if (Bt(kbd.down_bitmap, SC_ESC))
+		{
+			if (!esc_held)
+			{
+				esc_held = TRUE;
+
+				//arriving at a menu page sets m_entersound, which M_Draw plays as
+				//misc/menu2.wav
+				if (q_msg_mode)
+					QMsgModeCancel;
+				else if (q_state == QST_PLAYING)
+				{
+					q_state = QST_MENU;
+					QMenuSound(QMSND_ENTER);
+				}
+				else if (q_state == QST_CONSOLE)
+				{
+					//Key_Console passes ESC straight to M_ToggleMenu_f.
+					q_state     = QST_MENU;
+					q_menu_page = QPAGE_MAIN;
+					QMenuSound(QMSND_ENTER);
+				}
+				else if (q_menu_page != QPAGE_MAIN)
+				{
+					q_menu_page = QPAGE_MAIN;	//back out of a submenu first
+					QMenuSound(QMSND_ENTER);
+				}
+				else if (q_menu_ingame)
+					q_state = QST_PLAYING;
+			}
+		}
+		else
+			esc_held = FALSE;
+
+		if (q_gamedir_pending)
+		{
+			q_gamedir_pending = FALSE;
+			q_change_pending  = FALSE;
+			QGameDirSwitch(q_gamedir_next);
+			goto ql_next_frame;
+		}
+
+		if (q_con_want_toggle)
+		{
+			q_con_want_toggle = FALSE;
+
+			if (q_state == QST_CONSOLE)
+			{
+				if (q_menu_ingame)
+					q_state = QST_PLAYING;
+				else
+				{
+					q_state     = QST_MENU;
+					q_menu_page = QPAGE_MAIN;
+				}
+			}
+			else
+			{
+				q_state = QST_CONSOLE;
+
+				QConInputReset;
+			}
+		}
+
+		if (q_con_want_msg && q_state != QST_CONSOLE && !q_msg_mode)
+		{
+			QMsgModeBegin(ToBool(q_con_want_msg == 2));
+			q_con_want_msg = 0;
+		}
+
+		if (q_con_want_center)
+		{
+			q_con_want_center = FALSE;
+			q_angles[0]       = 0.0;
+		}
+
+		if (q_con_want_menu)
+		{
+			q_con_want_menu = FALSE;
+
+			if (q_state == QST_MENU && q_con_want_page < 0)
+			{
+				if (q_menu_ingame)
+					q_state = QST_PLAYING;
+			}
+			else
+			{
+				q_state = QST_MENU;
+
+				if (q_con_want_page >= 0)
+					q_menu_page = q_con_want_page;
+				else
+					q_menu_page = QPAGE_MAIN;
+			}
+
+			q_con_want_page = -1;
+		}
+
+		if (q_con_want_viewpos)
+		{
+			q_con_want_viewpos = FALSE;
+			StrPrint(q_fps_line, "%d %d %d : %d",
+				ToI64(q_origin[0]), ToI64(q_origin[1]), ToI64(q_origin[2]),
+				ToI64(q_angles[1]));
+			QConPrint(q_fps_line);
+		}
+
+		if (q_state == QST_CONSOLE)
+		{
+			QConInput;
+
+			if (q_con_want_noclip)
+			{
+				q_noclip = !q_noclip;
+				QVecSet(q_velocity, 0.0, 0.0, 0.0);
+				q_con_want_noclip = FALSE;
+			}
+
+			if (q_con_fov_want != 0.0)
+			{
+				q_fov          = q_con_fov_want;
+				q_con_fov_want = 0.0;
+			}
+
+			if (q_con_want_save)
+			{
+				q_con_want_save = FALSE;
+				q_con_save_ok   = QSaveGame;
+			}
+
+			if (q_con_want_load)
+			{
+				q_con_want_load = FALSE;
+				q_load_request  = TRUE;
+			}
+
+			if (q_con_want_quit)
+				break;
+
+		}
+
+		//console opened from the menu: no world to render behind it. QRenderFrame draws
+		//the console at its tail and needs a map, so the menu art stands in.
+		if (q_state == QST_CONSOLE && !q_menu_ingame)
+		{
+			QSvHostTick(dt);
+
+			QMenuDraw(q_canvas);
+
+			QSpeedsRedraw(q_canvas);
+			QConDraw(q_canvas);
+			QCenterView(Fs);
+			QPresentFrame;
+	q_ready = TRUE;
+
+			LBts(&Fs->task_flags, TASKf_IDLE);
+			Yield;
+			LBtr(&Fs->task_flags, TASKf_IDLE);
+			goto ql_next_frame;
+		}
+
+		if (q_state == QST_MENU)
+		{
+			menu_sc = 0;
+
+			if (q_keys_capture)
+			{
+				for (menu_i = 1; menu_i < 256; menu_i++)
+				{
+					if (Bt(kbd.down_bitmap, menu_i))
+					{
+						menu_sc = menu_i;
+						menu_i  = 256;
+					}
+				}
+			}
+			else
+			{
+				if (Bt(kbd.down_bitmap, SC_CURSOR_UP))		menu_sc = SC_CURSOR_UP;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_DOWN))	menu_sc = SC_CURSOR_DOWN;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_LEFT))	menu_sc = SC_CURSOR_LEFT;
+				if (Bt(kbd.down_bitmap, SC_CURSOR_RIGHT))	menu_sc = SC_CURSOR_RIGHT;
+				if (Bt(kbd.down_bitmap, SC_ENTER))			menu_sc = SC_ENTER;
+			}
+
+			QSetupInput;
+			QLanInput;
+
+			if (menu_sc && menu_sc != last_menu_sc && !q_setup_editing &&
+				!q_lan_editing)
+			{
+				if (QMenuKey(menu_sc, &start_game))
+				{
+					if (start_game)
+					{
+						//cls.demonum = -1: any choice cancels the attract loop
+						QDemoStop;
+						q_demo_loop = FALSE;
+
+						q_menu_ingame = TRUE;
+						q_state       = QST_PLAYING;
+					}
+				}
+			}
+			last_menu_sc = menu_sc;
+
+			//multiplayer new game: the map must restart so items spawn with deathmatch
+			//already active
+			if (q_mp_start_dm)
+			{
+				//cls.demonum = -1, before the map switch or the demo pump keeps serving its own
+				//changelevels over the top of the new game
+				QDemoStop;
+				q_demo_loop = FALSE;
+
+				q_mp_start_dm = FALSE;
+				q_menu_ingame = TRUE;
+				q_state       = QST_PLAYING;
+			}
+
+			if (q_quit_request)
+				break;
+
+			QSvHostTick(dt);
+
+			//render the frozen world first, so QMenuBackdrop has something to dither over.
+			//timed on this path too, so menu and play frames compare on an equal view.
+			if (q_cl_automove)
+				q_angles[1] = QAngleNorm(q_angles[1] + 90.0 * dt);
+
+			q_t_render = 0.0;
+			if (q_menu_ingame && q_map && q_vis)
+			{
+				q_t_render_mark = tS;
+				QRenderFrame;
+				q_t_render = tS - q_t_render_mark;
+			}
+
+			QMenuDraw(q_canvas);
+
+			QSpeedsRedraw(q_canvas);
+			QCenterView(Fs);
+			QPresentFrame;
+	q_ready = TRUE;
+
+			q_t_phase_mark = tS;
+
+			LBts(&Fs->task_flags, TASKf_IDLE);
+			Yield;
+			LBtr(&Fs->task_flags, TASKf_IDLE);
+			goto ql_next_frame;
+		}
+
+		if (q_cl_noinput)
+		{
+			QVecSet(move, 0.0, 0.0, 0.0);
+			speed   = 0.0;
+			jump    = FALSE;
+			attack  = FALSE;
+			impulse = 0;
+
+			MouseRawReset;
+			goto ql_after_input;
+		}
+
+		//mouse: read deltas and the wheel before the reset clears them. drained even
+		//while typing, or they pile up and lurch the view when the console closes.
+		dx = mouse_hard.raw_data.x;
+		dy = mouse_hard.raw_data.y;
+
+		//wheel is raw_data.z, already a per-frame delta. mouse.pos.z is never updated
+		//in raw mode.
+		wheel_dz = mouse_hard.raw_data.z;
+
+		//raw_bttns is a latch, set only on a frame carrying a packet; bttns is the
+		//level. a held button on a still mouse sends nothing, so fire needs both.
+		attack = ToBool(mouse_hard.raw_bttns[0] || mouse_hard.bttns[0] ||
+			q_btn[QBTN_ATTACK]);
+
+		//synthetic keys for the bind table. buttons are level, the wheel is a one-frame
+		//edge - Key_Event queues MWHEELUP down and up together.
+		QVKeyFrame(ToBool(mouse_hard.raw_bttns[0] || mouse_hard.bttns[0]),
+			ToBool(mouse_hard.raw_bttns[1] || mouse_hard.bttns[1]),
+			ToBool(mouse_hard.raw_bttns[2] || mouse_hard.bttns[2]),
+			wheel_dz);
+
+		MouseRawReset;
+
+		if (q_cl_noinput)
+		{
+			dx       = 0;
+			dy       = 0;
+			wheel_dz = 0;
+			attack   = FALSE;
+		}
+
+		if (q_state != QST_PLAYING || q_msg_mode)
+		{
+			dx       = 0;
+			dy       = 0;
+			wheel_dz = 0;
+			attack   = FALSE;
+		}
+
+		//V_CalcIntermissionRefdef reads the parked entity's angles every frame
+		if (q_intermission)
+		{
+			dx = 0;
+			dy = 0;
+		}
+
+		//m_pitch carries invert in its sign, as the original does
+		q_angles[1] -= ToF64(dx) * q_opt_sensitivity;
+		if (QCvarGet("m_pitch") < 0.0)
+			q_angles[0] -= ToF64(dy) * q_opt_sensitivity;
+		else
+			q_angles[0] += ToF64(dy) * q_opt_sensitivity;
+
+		if (q_angles[0] > QPITCH_LIMIT)
+			q_angles[0] = QPITCH_LIMIT;
+		if (q_angles[0] < -QPITCH_LIMIT)
+			q_angles[0] = -QPITCH_LIMIT;
+
+		q_angles[1] = QAngleNorm(q_angles[1]);
+
+		QKeyBindFrame(ToBool(q_msg_mode || q_state == QST_CONSOLE ||
+			q_state == QST_MENU));
+
+		//weapon select, edge triggered: CL_SendMove zeroes in_impulse straight after
+		//transmitting it, and resending makes the cycle impulses unusable.
+		impulse      = 0;
+		impulse_down = 0;
+
+		for (i = 1; i <= 8; i++)
+		{
+			if (Bt(kbd.down_bitmap, Char2ScanCode('0' + i)))
+			{
+				impulse_down = i;
+				if (i != impulse_last)
+					impulse = i;
+			}
+		}
+
+		impulse_last = impulse_down;
+
+
+
+
+		q_t_input = tS - q_t_phase_mark;
+
+		q_t_phase_mark = tS;
+		QAngleVectors(q_angles, forward, right, up);
+		QVecSet(move, 0.0, 0.0, 0.0);
+		//Stock clc_move shorts are view-relative (forwardmove/sidemove/upmove).
+		net_fwd  = 0.0;
+		net_side = 0.0;
+
+		jump = q_btn[QBTN_JUMP];
+
+		if (q_msg_mode || q_state == QST_CONSOLE)
+		{
+			if (q_msg_mode)
+				QMsgModeInput;
+			impulse = 0;
+			attack  = FALSE;
+			jump    = FALSE;
+		}
+		//a dead player has no input. SV_ClientThink bails before the move:
+		//    if (movetype == MOVETYPE_NONE) return;
+		//    if (health <= 0) return;
+		else if (q_game_active && QPlayerFrozen)
+		{
+			//movement only - PlayerDeathThink waits on a button release then a press to
+			//respawn. SV_ClientThink returns before the move, but after the buttons.
+			impulse = 0;
+		}
+		else
+		{
+			if (q_btn[QBTN_FORWARD])
+			{
+				QVecAdd(move, forward, move);
+				net_fwd += 1.0;
+			}
+			if (q_btn[QBTN_BACK])
+			{
+				QVecSub(move, forward, move);
+				net_fwd -= 1.0;
+			}
+			if (q_btn[QBTN_MOVERIGHT])
+			{
+				QVecAdd(move, right, move);
+				net_side += 1.0;
+			}
+			if (q_btn[QBTN_MOVELEFT])
+			{
+				QVecSub(move, right, move);
+				net_side -= 1.0;
+			}
+
+			//+left / +right turn, they do not strafe unless +strafe is held
+			if (q_btn[QBTN_LEFT])
+			{
+				if (q_btn[QBTN_STRAFE])
+				{
+					QVecSub(move, right, move);
+					net_side -= 1.0;
+				}
+				else
+					q_angles[1] += QMOVE_TURN * QSERVER_STEP;
+			}
+			if (q_btn[QBTN_RIGHT])
+			{
+				if (q_btn[QBTN_STRAFE])
+				{
+					QVecAdd(move, right, move);
+					net_side += 1.0;
+				}
+				else
+					q_angles[1] -= QMOVE_TURN * QSERVER_STEP;
+			}
+
+			//+lookup / +lookdown, the keyboard pitch pair
+			if (q_btn[QBTN_LOOKUP])
+				q_angles[0] -= QMOVE_TURN * QSERVER_STEP;
+			if (q_btn[QBTN_LOOKDOWN])
+				q_angles[0] += QMOVE_TURN * QSERVER_STEP;
+
+			//+moveup / +movedown are the swim keys, and a ladder reads them
+			if (q_btn[QBTN_MOVEUP])
+				move[2] += 1.0;
+			if (q_btn[QBTN_MOVEDOWN])
+				move[2] -= 1.0;
+		}
+
+		//cl_forwardspeed is the always-run setting - no separate flag. shift is the
+		//speed key and swaps whichever way it is set.
+		speed = QCvarGet("cl_forwardspeed");
+		if (speed < QMOVE_SPEED)
+			speed = QMOVE_SPEED;
+
+		if (q_btn[QBTN_SPEED])
+		{
+			if (speed >= QMOVE_FAST)
+				speed = QMOVE_SPEED;
+			else
+				speed = QMOVE_FAST;
+		}
+
+		if (q_noclip)
+		{
+			QVecSet(q_velocity, 0.0, 0.0, 0.0);
+			if (QVecLength(move) > 0.0)
+			{
+				QVecNormalize(move);
+				QVecMA(q_origin, speed * dt, move, q_origin);
+			}
+		}
+		else
+		{
+			q_water_level = QWaterLevelGet(q_map, q_origin, &q_water_type);
+			QPlayerWater(q_water_level, q_water_type);
+			q_water_real = q_water_level;
+
+			//ladders. QuakeC raises waterlevel in PlayerPreThink, which runs later in this
+			//frame, so trust the value the previous PreThink left, as SV_AirMove reads
+			//sv_player->v.waterlevel.
+			if (q_pre_water_level > q_water_level)
+				q_water_level = q_pre_water_level;
+
+			//flatten the wish out of water. swimming keeps z, which is the lift.
+			if (q_water_level < 2)
+				move[2] = 0.0;
+
+			if (QVecLength(move) > 0.0)
+				QVecNormalize(move);
+		}
+
+		//a console impulse lands AFTER the suppression above: Host_Impulse_f queues it
+		//whatever key_dest is.
+		if (q_con_impulse_want)
+		{
+			impulse            = q_con_impulse_want;
+			q_con_impulse_want = 0;
+		}
+
+		//console heapcheck 1 only - the sweep walks every live allocation.
+		if (q_heap_check_on && tS - q_heap_check_last > 1.0)
+		{
+			q_heap_check_last = tS;
+			StrPrint(q_heap_check_line, "in game f%d", q_frame_count);
+			QHeapCheck(q_heap_check_line);
+		}
+
+		//server frames at a fixed rate, rendering free. catch-up is capped.
+		if (q_net_active && q_udp_server && tS - q_tick_log_last > 1.0)
+		{
+			q_tick_log_last = tS;
+
+			if (q_tick_log_n < 120)
+			{
+				q_tick_log_n++;
+
+				StrPrint(q_tick_line,
+					"tick: state %d act %d self %d rem %d org(%.0f %.0f) "
+					"mv(%.0f %.0f) sig %d\n",
+					q_state, QSvFlagI(q_game_active), q_player_edict,
+					q_sv_clients[1].edict,
+					q_sv_clients[1].origin[0], q_sv_clients[1].origin[1],
+					q_sv_clients[1].cmd[0], q_sv_clients[1].cmd[1],
+					q_sv_clients[1].signon);
+				QLog(q_tick_line);
+				QLogFlush;
+			}
+		}
+
+ql_after_input:
+		if (q_cl_automove)
+			q_angles[1] = QAngleNorm(q_angles[1] + 90.0 * dt);
+
+		srv_accum += dt;
+		if (srv_accum > QSERVER_MAX_ACCUM)
+			srv_accum = QSERVER_MAX_ACCUM;
+		else if (srv_accum < 0.0)
+			srv_accum = 0.0;
+		srv_steps  = 0;
+
+		q_t_move     = tS - q_t_phase_mark;
+		q_t_srv_mark = tS;
+		if (q_cl_nosrv)
+			srv_accum = 0.0;
+
+		while (srv_accum >= QSERVER_STEP && srv_steps < QSERVER_MAX_CATCHUP)
+		{
+			//QCheckStuck traces before QPlayerMove has set the pass entity, so set one here
+			q_move_pass = q_player_edict;
+
+			if (!q_noclip && q_map)
+				QCheckStuck(q_map, q_origin, q_old_origin);
+
+
+			//demo playback owns the frame: no input, no move, no think. vanilla has no
+			//prediction either - V_CalcRefdef puts the view on cl_entities[cl.viewentity].
+			if (q_demo_playing)
+			{
+				if (q_cl_viewent > 0 && q_cl_viewent < QNET_MAX_ENTS)
+					QVecCopy(q_net_cl[q_cl_viewent].origin, q_origin);
+
+				QVecCopy(q_demo_angles, q_angles);
+				QVecSet(q_velocity, 0.0, 0.0, 0.0);
+				q_on_ground = TRUE;
+			}
+			else if (q_game_active)
+			{
+				//CL_SendMove then SV_ReadClientMove: angles, buttons and impulse reach the
+				//edict serialised. the move vector round-trips for symmetry, but the engine
+				//still applies its own copy.
+				if (q_net_active)
+				{
+					//stock: CL_SendMove only after SIGNONS (4). a listen host never walks UDP
+					//signon, so q_cl_signon stays 0.
+					if (!q_udp_ready || q_udp_server || q_cl_signon >= 4)
+					{
+						QNetClientSendMove(q_angles,
+							net_fwd * speed, net_side * speed, 0.0,
+							attack, jump,
+							impulse, q_game_time);
+					}
+
+					QNetServerReadClient(q_player_edict, q_game_time);
+				}
+
+				//SV_ClientThink opens with this
+				QDropPunchAngle(q_player_edict, QSERVER_STEP);
+
+				QPlayerPreThink(q_origin, q_velocity, q_angles, q_on_ground,
+					attack, jump, impulse);
+
+				//consumed: catch-up runs several ticks per rendered frame and the original's
+				//impulse rides one move message only.
+				impulse = 0;
+
+				//a ladder sets waterlevel 2 in PreThink so the mover swims the player up the
+				//rungs
+				if (q_pre_water_level > q_water_level)
+					q_water_level = q_pre_water_level;
+
+				//QuakeC owns jumping - PlayerJump set the vertical velocity in pre-think.
+				//WALK players only: SV_Physics_Client hands a TOSS corpse to the entity pass.
+				if (!q_noclip && QPlayerWalking)
+					QPlayerMove(q_map, q_origin, q_velocity, move, speed,
+						FALSE, QSERVER_STEP, &q_on_ground, q_water_level,
+						QPlayerWaterJump(q_velocity, q_game_time), q_angles,
+						q_player_edict);
+
+				//publish .groundentity - a platform only carries riders it can identify
+				if (q_player_edict > 0 && q_fld_groundentity >= 0)
+					QPrSetFieldI(q_player_edict, q_fld_groundentity,
+						QPrEdictValue(q_ground_entity));
+
+				//thin client: a guest's world comes off the wire via QNetClientFrame +
+				//cl_netdraw; local motion is still predicted below.
+				//
+				//publish the post-move position before the pushers run. PreThink wrote the
+				//pre-move origin, so a pusher would test the player a tick behind. in the
+				//original sv_player->v.origin is the position.
+				if (q_game_active && q_player_edict > 0)
+				{
+					for (i = 0; i < 3; i++)
+					{
+						QPrSetFieldF(q_player_edict, q_fld_origin + i,
+							q_origin[i]);
+						QPrSetFieldF(q_player_edict, q_fld_velocity + i,
+							q_velocity[i]);
+					}
+				}
+
+				//SV_RunClients precedes SV_Physics: every client is stepped before
+				//any pusher moves.
+				if (q_net_active && q_player_edict > 0 &&
+					q_udp_ready && q_udp_server)
+					QSvRunClients(QSERVER_STEP, q_game_time);
+
+				if (!QClientMode)
+					QGameFrame(QSERVER_STEP);
+
+				if (q_game_active && q_player_edict > 0)
+				{
+					for (i = 0; i < 3; i++)
+					{
+						q_origin[i]   = QPrFieldF(q_player_edict,
+											q_fld_origin + i);
+						q_velocity[i] = QPrFieldF(q_player_edict,
+											q_fld_velocity + i);
+					}
+				}
+
+				QPlayerTouchTriggers(q_origin, q_velocity);
+				QPlayerPostThink(q_origin, q_velocity, q_angles,
+					q_on_ground, q_water_level, q_water_type);
+				if (q_player_edict > 0)
+					QSvRunEntityThink(q_player_edict);
+				QStuckCheck(move, speed);
+
+				QConDrainProgs;
+				QConDrainStuff;
+
+				if (q_con_want_bf)
+				{
+					q_con_want_bf = FALSE;
+					QCShiftBonus;
+				}
+
+				//the client/server boundary: SV_SendClientDatagram runs here, with the world
+				//settled for the tick. the renderer still reads the world directly, so
+				//QNetVerify has a known-good reference to compare the reconstruction against.
+				if (q_net_active && q_player_edict > 0)
+				{
+					if (q_udp_server || !q_udp_ready)
+						QNetServerFrame(q_player_edict, q_game_time);
+
+					QNetClientFrame;
+
+					QNetSyncLocalFromClient;
+
+					QConDrainProgs;
+
+					if (q_udp_server || !q_udp_ready)
+					{
+						q_net_mismatch        = QNetVerify(q_player_edict);
+						q_net_mismatch_report = q_net_mismatch;
+					}
+				}
+
+				//AFTER the wire: a guest's hit kick reads q_net_damage_pending from svc_damage
+				//parsed above. the host still gets dmg_* from the edict.
+				QViewKickUpdate(QSERVER_STEP);
+
+				if (q_udp_ready && !q_udp_server)
+					Yield;
+			}
+			else if (!q_noclip)
+			{
+				QPlayerMove(q_map, q_origin, q_velocity, move, speed,
+					jump, QSERVER_STEP,
+					&q_on_ground, q_water_level, FALSE, q_angles,
+					q_player_edict);
+			}
+
+			srv_accum -= QSERVER_STEP;
+			srv_steps++;
+		}
+
+		q_t_srv = tS - q_t_srv_mark;
+
+		//music has no loop flag in the mixer, so it is retriggered when the track runs
+		//out. this also advances an ogg/mp3 decode by one slice. QSound compiles before
+		//the cvar table, so the codec flags are fed here.
+		//
+		//once per rendered frame, outside the server catch-up loop.
+		//
+		//the table is checked before the value: an undefined cvar reads 0, which would
+		//disable the codec instead of leaving QMusicReset's default.
+		if (QCvarIndex("cdmp3") >= 0)
+			q_music_mp3_on = ToBool(QCvarGet("cdmp3") != 0.0);
+		if (QCvarIndex("cdogg") >= 0)
+			q_music_ogg_on = ToBool(QCvarGet("cdogg") != 0.0);
+		if (QCvarIndex("cdmt") >= 0)
+			q_music_mt = ToBool(QCvarGet("cdmt") != 0.0);
+
+		//worldspawn's sounds field, set by QLoadMap for the local client and by the
+		//svc_cdtrack parse for a remote. QMusicPlay is idempotent for the playing track.
+		q_t_phase_mark = tS;
+
+		if (q_cl_cdtrack_new >= 0)
+		{
+			StrPrint(q_cdtrack_line, "cdtrack: track %d\n", q_cl_cdtrack_new);
+			QConPrint(q_cdtrack_line);
+			q_cl_cdtrack_new = -1;
+			cdchg = TRUE;
+		}
+
+		if (q_cl_cdtrack > 0)
+			QMusicPlay(q_cl_cdtrack, tS);
+
+		if (cdchg)
+		{
+			cdchg = FALSE;
+			StrPrint(q_cdtrack_line, "cdtrack: %s\n", q_music_status);
+			QConPrint(q_cdtrack_line);
+		}
+
+		if (!q_cl_nomusic)
+			QMusicUpdate(tS);
+
+		if (q_music_clip > 0 && !q_music_clip_said)
+		{
+			q_music_clip_said = TRUE;
+			StrPrint(q_cdtrack_line, "cdtrack: %d samples clipped\n",
+				q_music_clip);
+			QConPrint(q_cdtrack_line);
+		}
+
+		q_t_music = tS - q_t_phase_mark;
+
+		//Particles age on the render clock, not the game clock.
+		q_t_phase_mark = tS;
+		if (!q_cl_nopart)
+			QPartUpdate(dt, tS);
+		q_t_part = tS - q_t_phase_mark;
+
+		QCenterView(Fs);
+
+		q_t_render_mark = tS;
+		if (q_cl_norender)
+			QNoRenderHud;
+		else
+			QRenderFrame;
+		q_t_render = tS - q_t_render_mark;
+
+		QPresentFrame;
+		q_ready = TRUE;
+
+		q_t_phase_mark = tS;
+
+		q_frame_count++;
+		fps_frames++;
+		if (now - fps_time >= 0.5)
+		{
+			q_fps      = ToF64(fps_frames) / (now - fps_time);
+			fps_frames = 0;
+			fps_time   = now;
+		}
+
+		if (q_diag && q_player_active && q_fld_items >= 0)
+		{
+			i = ToI64(QPrFieldF(q_player_edict, q_fld_items));
+			if (i != q_items_last)
+			{
+				if (q_items_flips < 60)
+				{
+					StrPrint(q_surf_stat_line,
+						"items: %d -> %d (xor %d) at t %d/1000\n",
+						q_items_last, i, q_items_last ^ i,
+						ToI64(q_game_time * 1000.0));
+					QLog(q_surf_stat_line);
+				}
+				q_items_flips++;
+				q_items_last = i;
+			}
+		}
+
+		if (now - surf_stat_time >= 1.0)
+		{
+			if (q_diag && (q_surf_peak_builds > 0 || q_surf_peak_evicts > 0))
+			{
+				StrPrint(q_surf_stat_line,
+					"surf: peak built %d (cap %d)  peak evicted %d  %d KB  mt %d/%d  fps %d\n",
+					q_surf_peak_builds, q_surf_build_max, q_surf_peak_evicts,
+					q_surf_bytes >> 10, q_surf_job_live, q_surf_mt_builds,
+					ToI64(q_fps));
+				QLog(q_surf_stat_line);
+
+				q_surf_peak_builds = 0;
+				q_surf_peak_evicts = 0;
+			}
+			QGuardCheck(q_present_pix, q_present_w * q_present_h,
+				"present.pix");
+			QGuardCheck(q_present_rgb, q_present_w * q_present_h * sizeof(U32),
+				"present.rgb");
+			QGuardCheck(q_present_dep, q_present_w * q_present_h * sizeof(I32),
+				"present.dep");
+			if (q_canvas)
+			{
+				QGuardCheck(q_canvas->pixels,
+					q_canvas->width * q_canvas->height, "canvas.pixels");
+				QGuardCheck(q_canvas->depth,
+					q_canvas->width * q_canvas->height * sizeof(I32),
+					"canvas.depth");
+				QGuardCheck(q_canvas->rgb,
+					q_canvas->width * q_canvas->height * sizeof(U32),
+					"canvas.rgb");
+			}
+
+			if (!q_diag)
+				goto qd_tick_done;
+
+			StrPrint(q_surf_stat_line,
+				"tick: sky phase %d/1000 blend %d/1000  water real %d pre %d eff %d\n",
+				ToI64(q_skywind_t1 * 1000.0),
+				ToI64(q_skywind_bl * 1000.0),
+				q_water_real, q_pre_water_level, q_water_level);
+			QLog(q_surf_stat_line);
+
+			if (q_player_active && q_fld_items >= 0)
+			{
+				StrPrint(q_surf_stat_line,
+					"tick: csqc time %d/1000  items %d  weapon %d\n",
+					ToI64(q_game_time * 1000.0),
+					ToI64(QPrFieldF(q_player_edict, q_fld_items)),
+					ToI64(QPrFieldF(q_player_edict, q_fld_weapon)));
+				QLog(q_surf_stat_line);
+			}
+
+			StrPrint(q_surf_stat_line,
+				"tick: blit %d,%d %dx%d  pix %dx%d  win %d,%d-%d,%d cell %dx%d\n",
+				q_blit_x, q_blit_y, q_blit_w, q_blit_h,
+				Fs->pix_width, Fs->pix_height,
+				Fs->win_left, Fs->win_top, Fs->win_right, Fs->win_bottom,
+				(Fs->win_right - Fs->win_left + 1) * FONT_WIDTH,
+				(Fs->win_bottom - Fs->win_top + 1) * FONT_HEIGHT);
+			QLog(q_surf_stat_line);
+
+			QLogFlush;
+
+qd_tick_done:
+			surf_stat_time = now;
+		}
+
+		//a level change is requested from inside a think, so it is serviced here,
+		//between frames. a death restart reloads the same map with no carried
+		//inventory, and goes first.
+		if (q_restart_pending)
+		{
+			q_restart_pending = FALSE;
+			QGameClearParms;
+			QChangeLevel(q_map_name);
+			goto ql_next_frame;
+		}
+
+		//"game <dir>" is serviced between frames like a changelevel, and before it,
+		//because it invalidates every archive the map would load from.
+		if (q_gamedir_pending)
+		{
+			q_gamedir_pending = FALSE;
+			q_change_pending  = FALSE;
+			QGameDirSwitch(q_gamedir_next);
+			goto ql_next_frame;
+		}
+
+		if (q_change_pending && !q_demo_playing)
+		{
+			q_change_pending = FALSE;
+			if (QChangeLevel(q_change_map))
+			{
+				q_menu_ingame = TRUE;
+				if (q_state == QST_MENU)
+					q_state = QST_PLAYING;
+			}
+
+			//Guest: after map load, reply to signonnum 1 with "prespawn".
+			if (q_udp_ready && !q_udp_server && q_net_need_prespawn)
+			{
+				q_net_need_prespawn = FALSE;
+				QLog("net: cl -> prespawn (map loaded)\n");
+				QLogFlush;
+				QNetClientSendStringCmd("prespawn");
+			}
+		}
+
+		LBts(&Fs->task_flags, TASKf_IDLE);
+		Yield;
+		LBtr(&Fs->task_flags, TASKf_IDLE);
+
+ql_next_frame:
+	}
+}
+
+//Quake renders over the whole window, so the terminal text has to go. it must
+//not be the shell's own document: DocClear frees every entry and the shell's
+//lexer keeps cur_entry pointing into them.
+CDoc *q_doc			 = NULL;
+CDoc *q_doc_old_put	 = NULL;
+CDoc *q_doc_old_disp = NULL;
+
+U0 QDocInit()
+{//declaration initialisers on globals are ignored
+	q_doc		  = NULL;
+	q_doc_old_put = NULL;
+	q_doc_old_disp = NULL;
+}
+
+U0 QDocTake()
+{//render into a private scratch document, leaving the shell's untouched
+	q_doc_old_put  = DocPut;
+	q_doc_old_disp = DocDisplay;
+
+	q_doc = DocNew;
+	if (!q_doc)
+		return;
+
+	Fs->put_doc = Fs->display_doc = q_doc;
+}
+
+U0 QDocGiveBack()
+{
+	if (!q_doc)
+		return;
+
+	if (q_doc_old_put)
+		Fs->put_doc = q_doc_old_put;
+	if (q_doc_old_disp)
+		Fs->display_doc = q_doc_old_disp;
+
+	q_doc_old_put  = NULL;
+	q_doc_old_disp = NULL;
+}
+
+U0 QDocFree()
+{
+	if (q_doc)
+		DocDel(q_doc);
+	q_doc = NULL;
+}
+
+U0 QDocCursorPark()
+{//park the terminal's document cursor at the end.
+ //
+ // the cursor is left wherever the last write or click put it, which in DolDoc
+ // is a real editing position, not a prompt. anything typed after is inserted
+ // into existing text.
+	CDoc *doc;
+
+	doc = Fs->put_doc;
+	if (!doc)
+		return;
+
+	//DocBottom, not a hand-rolled cur_entry assignment: it takes the lock and calls
+	//DocRecalc.
+	DocBottom(doc);
+}
+
+U0 Quake(U8 *mapname = QDEFAULT_MAP)
+{
+	CQCanvas	*canvas			= NULL;
+	CQVisState	*vis			= NULL;
+	CQMap		*map			= NULL;
+	Bool		 raw_was_on		= FALSE;
+	Bool		 demo_boot		= FALSE;
+	Bool		 final_active	= FALSE;
+	I64			 final_edicts	= 0;
+	I64			 final_thinks	= 0;
+	I64			 final_models	= 0;
+	I64			 final_snd		= 0;
+	I64			 final_drop		= 0;
+	I64			 final_move_ok	= 0;
+	I64			 final_move_fail = 0;
+	I64			 final_errors	= 0;
+	F64			 final_time		= 0.0;
+	U8			 line[256];
+	U8			 pakname[64];
+	I64			 i;
+
+	QLogInit;
+	QLogReset;
+	QDocInit;
+	QGuardInit;
+
+	QHeapCheck("entry");
+
+	QPakInit;
+	QSkyInit;
+	QSndInit;
+	QPartInit;
+	QClipInit;
+
+	QPresentInit;
+	QCsqcInit;
+	QBtnClear;
+	QKeyNamesInit;
+	QKeysTableInit;
+	QDrawStateInit;
+	QDrawMTInit;
+	QPrStateInit;
+
+	//ZealC ignores declaration initialisers on globals
+	q_draw_entities   = TRUE;
+	q_opt_drawbrush   = TRUE;
+	q_snd_enabled     = TRUE;
+	q_log_echo        = FALSE;
+	q_disk_writes     = TRUE;
+
+	//QCvarIndex loops on this and QCfgLoad runs before QCvarInit
+	q_cvar_count      = 0;
+	q_cfg_exec        = FALSE;
+	q_bi_dprint       = FALSE;
+	q_con_return_state = 0;
+	q_frame_count     = 0;
+	q_map_gen         = 0;
+	q_t_frame         = 0.0;
+	q_bob_time        = 0.0;
+
+	q_warp_amount     = 0.0;
+	q_warp_time       = 0.0;
+	q_sky_time        = 0.0;
+
+	q_cfg_saves       = 0;
+	q_cs_flap_said    = 0;
+	q_cs_frames       = 0;
+	q_find_reports    = 0;
+	q_light_clamped   = 0;
+	q_light_fast      = 0;
+	q_light_slow      = 0;
+	q_lpc_hits        = 0;
+	q_lpc_miss        = 0;
+	q_map_bad_reports = 0;
+	q_move_fail       = 0;
+	q_move_ok         = 0;
+	q_net_ent_log     = 0;
+	q_net_overflow_said = 0;
+	q_pr_errors       = 0;
+	q_pr_reported     = 0;
+	q_snd_reports     = 0;
+	q_stuck_reports   = 0;
+	q_stuff_logged    = 0;
+	q_te_count        = 0;
+	q_tick_log_n      = 0;
+	q_unknown_logged  = 0;
+	q_yaw_reports     = 0;
+
+	//ZealC ignores declaration initialisers on globals
+	QGameGateInit;
+	QAreaClear(NULL);			//count 0 is the linear fallback
+
+	q_sv_protocol   = QNET_PROTOCOL_FITZ;
+	q_cl_protocol   = QNET_PROTOCOL_FITZ;
+	q_wm_draw_saved = NULL;
+	q_clip_traces   = 0;
+	q_clip_cand     = 0;
+
+	//declaration initialisers on globals are ignored
+	q_pre_water_level = -1;
+
+	//vis compiles before the rasterizer, so the walk reaches the depth buffer
+	//through this hook. off by default, see q_occworld.
+	q_vis_occ  = &QHizNodeHidden;
+
+	//same reason: QProgs compiles before the console
+	q_pr_print = &QConPrint;
+
+	//the mod HUD, when its csprogs.dat exists. QSbar compiles before QCsqc
+	q_sbar_cs_hook = &QCsqcDrawHud;
+
+	//ZealC does not honour a declaration initialiser on a global, and every pointer
+	//below is handed to Free() at teardown.
+	q_music_frames     = NULL;
+	q_music_count      = 0;
+	q_music_rate       = QSND_RATE;
+	q_music_track      = 0;
+	q_save_buf         = NULL;
+	q_mdl_preview      = NULL;
+	q_mdl_preview_skin = NULL;
+	q_mdl_preview_src  = NULL;
+	q_mdl_preview_top  = -1;
+	q_mdl_preview_bottom = -1;
+	q_vis              = NULL;
+	q_map              = NULL;
+	q_entities         = NULL;
+	q_num_entities     = 0;
+	q_cl_gametype      = QGAME_COOP;
+	QSvMaxClientsSet(1);	//svs.maxclients, until a menu start raises it
+
+	//the input pass reads these before any map load
+	QVecSet(q_origin,   0.0, 0.0, 0.0);
+	QVecSet(q_view,     0.0, 0.0, 0.0);
+	QVecSet(q_velocity, 0.0, 0.0, 0.0);
+	QVecSet(q_angles,   0.0, 0.0, 0.0);
+
+	QMdlCacheInit;
+	QBiBspCacheInit;
+	QSurfCacheInit;
+	QMusicReset;
+	QPlayerStateInit;
+	QSvHostTickInit;
+	QClientParmsInit;
+	QDemoInit;
+	QConHistoryInit;
+	QLightInit;
+	QTurbInit;
+	QNetInit;
+	QNetUdpInit;
+	QNetStatesClear;
+	QNetClockInit;
+	QSetupDefaults;
+	QCfgLoad;
+
+	if (QCvarGet("scr_fov") >= 10.0 && QCvarGet("scr_fov") <= 170.0)
+		q_fov = QCvarGet("scr_fov");
+
+	QViewKickInit;
+	QCShiftInit;
+	QStuckInit;
+
+	//cvars once, before anything can read them - not in QBiInit, which runs again
+	//on every map load.
+	QCvarInit;
+
+	QCfgApplyParked;
+
+	q_snd_master = ToF64(q_opt_volume) / 100.0;
+	QMusicApplyVolume;
+
+	//COM_AddGameDirectory walks pak%i until one is missing. PAK0 is byte-identical
+	//between shareware and registered; episodes 2-4 and gfx/pop.lmp live in the
+	//later paks.
+	if (!FileFind("::/Apps/QuakePlus/id1/PAK0.PAK") &&
+		!FileFind("::/Apps/QuakePlus/id1/pak0.pak"))
+	{
+		"Quake: PAK0.PAK not found. See ::/Apps/QuakePlus/README.md\n";
+		return;
+	}
+
+	QPakMountGame;
+
+	if (q_game_dir[0])
+	{
+		StrPrint(pakname, "Quake: gamedir %s\n", q_game_dir);
+		"%s", pakname;
+	}
+
+	//Host_Init execs quake.rc once the search path is up and the cvars exist
+	QConExecStartupCfgs;
+	QCfgReloadAfterGameCfgs;
+
+	//COM_CheckRegistered: gfx/pop.lmp is the test.
+	//trigger_onlyregistered_touch reads cvar("registered").
+	if (QPakFind("gfx/pop.lmp"))
+	{
+		QCvarSet("registered", 1.0);
+		"Quake: registered version.\n";
+	}
+	else
+		"Quake: shareware version.\n";
+
+	if (!QPalLoad)
+	{
+		"Quake: palette load failed\n";
+		return;
+	}
+
+	QWadInit;
+	QSbarInit;
+	QMenuInit;
+
+	//a stock boot loads no playable map: quake.rc's startdemos supplies the world,
+	//each demo naming its own level in svc_serverinfo.
+	demo_boot = FALSE;
+	if (QCvarGet("demoloop") != 0.0)
+		demo_boot = QDemoNextInLoop;
+
+	if (demo_boot)
+		QLog("demo: attract loop started\n");
+
+	//explicit, not initialisers - a global's declaration initialiser is not
+	//honoured.
+	q_state       = QST_MENU;
+	q_menu_ingame = FALSE;
+
+	//globals are not zeroed
+	if (!demo_boot)
+	{
+		q_map = NULL;
+		q_vis = NULL;
+	}
+
+	q_canvas = QDrawNew(q_res_w[q_opt_res], q_res_h[q_opt_res]);
+	q_ready  = FALSE;
+
+	QHeapCheck("startup");
+
+	MenuPush(
+		"File {"
+		"  Exit(,CH_ESC);"
+		"}"
+	);
+	SettingsPush;
+
+	try
+	{
+		//a raw Spawn()ed task owns no put/display doc, and everything below writes
+		//through them.
+		if (!DocPut)
+			DocTermNew;
+
+		//WIG_USER_TASK_DEFAULT is what a real terminal runs with. WIG_TASK_DEFAULT is
+		//0xFFFF less two bits and inhibits focus, clicks and the task list.
+		Fs->win_inhibit = WIG_USER_TASK_DEFAULT | WIF_SELF_GRAB_SCROLL |
+						  WIF_FOCUS_TASK_MENU;
+
+		AutoComplete;
+		WinBorder;
+		WinMax;
+		DocCursor;
+		QDocTake;
+		DocClear;
+
+		QCenterView(Fs);
+
+		//raw mode gives relative deltas and keeps clicks off the window manager. must
+		//be turned back off on every exit path.
+		raw_was_on = MouseRaw(TRUE);
+		MouseRawReset;
+
+		Fs->draw_it = &QDrawIt;
+
+		//the DE wallpaper draws on the wm task with no covered-window test. parked
+		//under an opaque canvas, restored in teardown.
+		q_wm_draw_saved = sys_winmgr_task->draw_it;
+		sys_winmgr_task->draw_it = NULL;
+
+		//the DE builds its taskbar from tasks carrying DISPLAYf_SHOW (DE.ZC
+		//DEBarRebuild), and a raw Spawn()ed task does not have it. set after draw_it.
+		LBts(&Fs->display_flags, DISPLAYf_SHOW);
+
+		WinFocus;
+		WinToTop;
+		WinZBufUpdate;
+
+		//raw_data.z is a delta the frame loop's MouseRawReset clears, not a position
+		MouseRawReset;
+
+		//MouseRawReset does not touch the button levels
+		mouse_hard.bttns[0] = FALSE;
+		mouse_hard.bttns[1] = FALSE;
+		mouse_hard.bttns[2] = FALSE;
+
+		QGameLoop;
+	}
+	catch
+		PutExcept;
+
+	//teardown: detaching draw_it is not enough - an already-entered QDrawIt keeps
+	//running. stop it drawing, detach, let the in-flight call drain, then free.
+	q_ready     = FALSE;
+	Fs->draw_it = NULL;
+
+	//the DE owns this pointer
+	sys_winmgr_task->draw_it = q_wm_draw_saved;
+	q_wm_draw_saved          = NULL;
+
+	Sleep(100);
+
+	//clear each global before releasing it, so a late QDrawIt sees NULL.
+	canvas   = q_canvas;
+	q_canvas = NULL;
+	vis      = q_vis;
+	q_vis    = NULL;
+	map      = q_map;
+	q_map    = NULL;
+
+	if (!raw_was_on)
+		MouseRaw(FALSE);
+
+	QDocGiveBack;
+
+	SettingsPop;
+	MenuPop;
+
+	//save on quit, as the original writes config.cfg
+	QCfgSave;
+
+	final_active  = q_game_active;
+	final_edicts  = q_pr_num_edicts;
+	final_thinks  = q_game_thinks;
+	final_time    = q_game_time;
+	final_models  = q_precache_model_count;
+
+	final_snd      = q_snd_played;
+	final_drop     = q_snd_dropped;
+	final_move_ok  = q_move_ok;
+	final_move_fail = q_move_fail;
+	final_errors    = q_pr_errors;
+
+	QHeapCheck("teardown");
+
+	QLog("teardown: begin\n");
+	QLogFlush;
+
+	//the QuakeC world points at the map, so it goes first.
+	QGameShutdown;
+	QLog("teardown: QGameShutdown ok\n");
+	QLogFlush;
+
+	QMusicFree;
+	QMusicPendFree;
+	QSndFree;
+	QLog("teardown: QSndFree ok\n");
+	QLogFlush;
+
+	//the socket is registered with the net stack, not this task - it outlives the
+	//app if it is not closed.
+	QNetUdpClose;
+	QMdlPreviewFree;
+	QLog("teardown: net/preview ok\n");
+	QLogFlush;
+
+	QEntFree;
+	QLog("teardown: QEntFree ok\n");
+	QLogFlush;
+
+	QSurfCacheFlush;
+	QSurfCacheSetMap(NULL);
+	QLog("teardown: QSurfCacheFlush ok\n");
+	QLogFlush;
+
+	QPresentFree;
+	QDrawFree(canvas);
+	QLog("teardown: QDrawFree ok\n");
+	QLogFlush;
+
+	QVisFree(vis);
+	QLog("teardown: QVisFree ok\n");
+	QLogFlush;
+
+	QBSPFree(map);
+	QLog("teardown: QBSPFree ok\n");
+
+	//last: the precache and the static entity list both point into it.
+	QMdlCacheFree;
+	QLog("teardown: QMdlCacheFree ok\n");
+	QLogFlush;
+
+	StrPrint(line, "exit: %d frames rendered\n", q_frame_count);
+	QLog(line);
+
+	StrPrint(line, "guard: %d broken, %d blocks still live\n",
+		q_guard_bad, q_guard_n);
+	QLog(line);
+
+	StrPrint(line, "items: %d changes\n", q_items_flips);
+	QLog(line);
+
+	if (q_log_dropped)
+	{
+		StrPrint(line, "log: %d lines dropped at the %d KB cap\n",
+			q_log_dropped, QLOG_HARD_MAX >> 10);
+		QLog(line);
+	}
+
+	if (q_trace_seen || q_trace_log)
+	{
+		StrPrint(line,
+			"tracetrace: %d traces seen, longest %d units, %d budget left\n",
+			q_trace_seen, ToI64(q_trace_maxlen), q_trace_log);
+		QLog(line);
+	}
+
+	StrPrint(line, "surf: %d builds, %d by workers on %d cores\n",
+		q_surf_builds, q_surf_mt_builds, q_surf_mt_cores);
+	QLog(line);
+
+	if (final_active)
+	{
+		StrPrint(line, "QuakeC: %d edicts, %d models precached\n",
+			final_edicts, final_models);
+		QLog(line);
+		StrPrint(line, "QuakeC: %d thinks over %4.1f s of game time\n",
+			final_thinks, final_time);
+		QLog(line);
+
+		StrPrint(line, "sound: %d played, %d dropped (%d channels)\n",
+			final_snd, final_drop, QSND_DYNAMIC_CHANNELS);
+		QLog(line);
+
+
+
+
+		StrPrint(line, "QuakeC errors: %d\n", final_errors);
+		QLog(line);
+
+		if (final_thinks == 0)
+			QLog("QuakeC: WARNING - nothing ever thought. Check nextthink.\n");
+	}
+	else
+		QLog("QuakeC: did not load - entities were static\n");
+
+	QHeapCheck("returning");
+
+	QLog("teardown: returning\n");
+	QLogFlush;
+
+	"\nLog written to ::/Apps/QuakePlus/QUAKELOG.TXT\n";
+
+	QLogFlush(TRUE);
+	QInputDrainAll;
+	QDocCursorPark;
+
+	//the shell's lexer holds cur_entry into the terminal document and rebuilds the
+	//task title from it every iteration:
+	//
+	//    doc_e = cc->lex_include_stack->cur_entry;
+	//    while (doc_e != doc && ptr2 < ptr3)
+	//        switch (doc_e->type_u8) ...
+	//
+	//QDocTake makes that safe: the DocClear at startup falls on a scratch document.
+	Fs->title_src = TTS_LOCKED_CONST;
+
+	Sleep(200);
+
+	QDocFree;
+
+}

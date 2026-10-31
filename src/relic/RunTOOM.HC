@@ -1,4 +1,4 @@
-// RunTOOM.HC — DOOM/TOOM launch (included from GamesLauncher.HC / RelicDesktop heap).
+// RunTOOM.HC: DOOM/TOOM launch (included from GamesLauncher.HC / RelicDesktop heap).
 //
 // Pink screen fix: never GrBlot(,0,0,doom_scrn) then Refresh on this task.
 // RelicDoomBegin sets draw_it=&DrawDesktop; DrawDesktop blits RELIC_DOOM_SCRN.

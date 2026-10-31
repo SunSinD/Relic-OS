@@ -1,0 +1,506 @@
+// id PAK archive reader, COM_LoadPackFile
+//
+// header: "PACK", dir offset, dir length. dir entry is 64 bytes -
+// 56-byte NUL-padded path, i32 offset, i32 size.
+//
+// the whole archive stays resident (PAK0 is ~18MB): ZealOS FileRead has no
+// seek, so lookups return interior pointers instead of copying.
+
+#define HLPAK_MAX_PAKS	8
+
+class CHLPakEntry
+{
+	U8	name[56];
+	I64	offset;
+	I64	size;
+};
+
+class CHLPak
+{
+	U8			*data;
+	I64			 data_size;
+	CHLPakEntry	*files;
+	I64			 num_files;
+};
+
+CHLPak	*hl_paks[HLPAK_MAX_PAKS];
+I64		 hl_pak_count = 0;
+
+
+#define HLFILE_CACHE_MAX	512
+
+class CHLFileCache
+{
+	U8	 name[80];
+	U8	*data;
+	I64	 size;
+};
+
+CHLFileCache	hl_file_cache[HLFILE_CACHE_MAX];
+I64				hl_file_count = 0;
+
+Bool			hl_file_trace = FALSE;
+
+U8				hl_file_last_try[160];
+
+U8				hl_pak_game_dir[32];
+
+U8				hl_game_root[64];
+
+U0 HLSetGameRoot(U8 *root)
+{
+	I64 i = 0;
+
+	if (!root || !root[0])
+		root = "::/Apps/HL1";
+
+	while (i < 63 && root[i])
+	{
+		hl_game_root[i] = root[i];
+		i++;
+	}
+
+	while (i > 0 && (hl_game_root[i - 1] == '/' ||
+					 hl_game_root[i - 1] == '\\'))
+		i--;
+
+	hl_game_root[i] = 0;
+}
+
+HLSetGameRoot(NULL);
+
+U0 HLPakSetGameDir(U8 *dir)
+{
+	I64 i = 0;
+
+	if (dir)
+	{
+		while (i < 31 && dir[i])
+		{
+			hl_pak_game_dir[i] = dir[i];
+			i++;
+		}
+	}
+
+	hl_pak_game_dir[i] = 0;
+}
+
+U0 HLPakInit()
+{
+	I64 i;
+
+	hl_pak_count = 0;
+	for (i = 0; i < HLPAK_MAX_PAKS; i++)
+		hl_paks[i] = NULL;
+
+	for (i = 0; i < HLFILE_CACHE_MAX; i++)
+	{
+		hl_file_cache[i].data    = NULL;
+		hl_file_cache[i].size    = 0;
+		hl_file_cache[i].name[0] = 0;
+	}
+
+	hl_file_count       = 0;
+	hl_pak_game_dir[0]  = 0;
+	hl_file_last_try[0] = 0;
+	hl_file_trace       = FALSE;
+
+}
+
+Bool HLPakMount(U8 *filename)
+{
+	CHLPak		*pak;
+	CHLPakEntry	*e;
+	U8			*d;
+	U8			*rec;
+	I64			 size = 0;
+	I64			 dir_offset;
+	I64			 dir_length;
+	I64			 count;
+	I64			 i;
+
+	if (hl_pak_count >= HLPAK_MAX_PAKS)
+	{
+		"HLPak: too many archives mounted\n";
+		return FALSE;
+	}
+
+	if (!FileFind(filename))
+		return FALSE;
+
+	d = FileRead(filename, &size);
+	if (!d)
+	{
+		"HLPak: cannot read %s\n", filename;
+		return FALSE;
+	}
+
+	if (size < 12 || d[0] != 'P' || d[1] != 'A' || d[2] != 'C' || d[3] != 'K')
+	{
+		"HLPak: %s is not a PACK archive\n", filename;
+		Free(d);
+		return FALSE;
+	}
+
+	dir_offset = HLRdI32(d + 4);
+	dir_length = HLRdI32(d + 8);
+	count      = dir_length / 64;
+
+	if (dir_offset < 0 || dir_length < 0 || dir_offset + dir_length > size)
+	{
+		"HLPak: %s has a corrupt directory\n", filename;
+		Free(d);
+		return FALSE;
+	}
+
+	pak				= CAlloc(sizeof(CHLPak));
+	pak->data		= d;
+	pak->data_size	= size;
+	pak->num_files	= count;
+	pak->files		= CAlloc(count * sizeof(CHLPakEntry));
+
+	for (i = 0; i < count; i++)
+	{
+		rec = d + dir_offset + i * 64;
+		e   = &pak->files[i];
+		HLRdName(rec, e->name, 56);
+		e->offset = HLRdI32(rec + 56);
+		e->size   = HLRdI32(rec + 60);
+	}
+
+	hl_paks[hl_pak_count] = pak;
+	hl_pak_count++;
+
+	"HLPak: mounted %s (%d files, %d bytes)\n", filename, count, size;
+
+	return TRUE;
+}
+
+U0 HLFileCacheClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLFILE_CACHE_MAX; i++)
+	{
+		if (hl_file_cache[i].data)
+			Free(hl_file_cache[i].data);
+
+		hl_file_cache[i].data    = NULL;
+		hl_file_cache[i].size    = 0;
+		hl_file_cache[i].name[0] = 0;
+	}
+
+	hl_file_count = 0;
+}
+
+U0 HLPakUnmountAll()
+{
+	CHLPak	*pak;
+	I64		 i;
+
+	for (i = 0; i < HLPAK_MAX_PAKS; i++)
+	{
+		pak = hl_paks[i];
+		hl_paks[i] = NULL;
+
+		if (!pak)
+			goto qpu_next;
+
+		if (pak->files)
+			Free(pak->files);
+		if (pak->data)
+			Free(pak->data);
+
+		Free(pak);
+
+qpu_next:
+	}
+
+	hl_pak_count = 0;
+
+	HLFileCacheClear;
+}
+
+CHLPakEntry *HLPakFind(U8 *name, CHLPak **_pak = NULL)
+{
+	CHLPak		*pak;
+	CHLPakEntry	*e;
+	I64			 p;
+	I64			 i;
+
+	for (p = hl_pak_count - 1; p >= 0; p--)
+	{
+		pak = hl_paks[p];
+		if (pak)
+		{
+			for (i = 0; i < pak->num_files; i++)
+			{
+				e = &pak->files[i];
+				if (!StrICompare(e->name, name))
+				{
+					if (_pak)
+						*_pak = pak;
+					return e;
+				}
+			}
+		}
+	}
+
+	if (_pak)
+		*_pak = NULL;
+
+	return NULL;
+}
+
+U8 *HLPakData(U8 *name, I64 *_size = NULL)
+{
+	CHLPak		*pak = NULL;
+	CHLPakEntry	*e   = HLPakFind(name, &pak);
+
+	if (!e || !pak)
+	{
+		if (_size)
+			*_size = 0;
+		return NULL;
+	}
+
+	if (e->offset < 0 || e->offset + e->size > pak->data_size)
+	{
+		"HLPak: %s has an out-of-range extent\n", name;
+		if (_size)
+			*_size = 0;
+		return NULL;
+	}
+
+	if (_size)
+		*_size = e->size;
+
+	return pak->data + e->offset;
+}
+
+U8 *HLPakLoad(U8 *name, I64 *_size = NULL)
+{
+	I64  size = 0;
+	U8  *src  = HLPakData(name, &size);
+	U8  *dst;
+
+	if (!src)
+	{
+		if (_size)
+			*_size = 0;
+		return NULL;
+	}
+
+	dst = MAlloc(size + 1);
+	MemCopy(dst, src, size);
+	dst[size] = 0;
+
+	if (_size)
+		*_size = size;
+
+	return dst;
+}
+
+U0 HLFileCaseFold(U8 *in, U8 *out, Bool upper)
+{
+	I64 i = 0;
+	I64 c;
+
+	while (in[i] && i < 79)
+	{
+		c = in[i];
+
+		if (upper)
+		{
+			if ('a' <= c <= 'z')
+				c -= 'a' - 'A';
+		}
+		else
+		{
+			if ('A' <= c <= 'Z')
+				c += 'a' - 'A';
+		}
+
+		out[i] = c;
+		i++;
+	}
+
+	out[i] = 0;
+}
+
+Bool HLFileResolve(U8 *name, U8 *out)
+{//first existing loose path for a game-relative name, e.g.
+	U8	 folded[80];
+	I64	 dir;
+	I64	 variant;
+
+	for (dir = 0; dir < 2; dir++)
+	{
+		if (!dir && !hl_pak_game_dir[0])
+			goto qfr_next_dir;
+
+		for (variant = 0; variant < 3; variant++)
+		{
+			if (!variant)
+				HLRdName(name, folded, 80);
+			else if (variant == 1)
+				HLFileCaseFold(name, folded, FALSE);
+			else
+				HLFileCaseFold(name, folded, TRUE);
+
+			if (!dir)
+				StrPrint(out, "%s/%s/%s", hl_game_root, hl_pak_game_dir,
+					folded);
+			else
+				StrPrint(out, "%s/valve/%s", hl_game_root, folded);
+
+			if (variant && !StrCompare(out, hl_file_last_try))
+				goto qfr_next_variant;
+
+			HLStrCopy(hl_file_last_try, out, 160);
+
+			if (FileFind(out))
+			{
+				if (hl_file_trace)
+					"HLFile: %s -> HIT\n", out;
+
+				return TRUE;
+			}
+
+			if (hl_file_trace)
+				"HLFile: %s -> miss\n", out;
+
+qfr_next_variant:
+		}
+
+qfr_next_dir:
+	}
+
+	out[0] = 0;
+
+	return FALSE;
+}
+
+U8 *HLFileData(U8 *name, I64 *_size = NULL)
+{
+	U8	 path[160];
+	U8	*d;
+	I64	 size = 0;
+	I64	 i;
+
+	for (i = 0; i < hl_file_count; i++)
+	{
+		if (!StrICompare(hl_file_cache[i].name, name))
+		{
+			if (_size)
+				*_size = hl_file_cache[i].size;
+			return hl_file_cache[i].data;
+		}
+	}
+
+	if (HLFileResolve(name, path))
+	{
+		d = FileRead(path, &size);
+
+		if (d)
+		{
+			if (hl_file_count < HLFILE_CACHE_MAX)
+			{
+				HLRdName(name, hl_file_cache[hl_file_count].name, 80);
+				hl_file_cache[hl_file_count].data = d;
+				hl_file_cache[hl_file_count].size = size;
+				hl_file_count++;
+			}
+			else
+			{
+				"HLPak: loose file cache full, ignoring %s\n", name;
+				Free(d);
+				goto qfd_pak;
+			}
+
+			if (_size)
+				*_size = size;
+
+			return d;
+		}
+	}
+
+qfd_pak:
+	return HLPakData(name, _size);
+}
+
+U8 *HLFileLoad(U8 *name, I64 *_size = NULL)
+{
+	U8	 path[160];
+	U8	*d;
+	U8	*src;
+	I64	 size = 0;
+
+	if (_size)
+		*_size = 0;
+
+	if (HLFileResolve(name, path))
+	{
+		d = FileRead(path, &size);
+
+		if (d)
+		{
+			if (_size)
+				*_size = size;
+
+			return d;
+		}
+	}
+
+	src = HLPakData(name, &size);
+
+	if (!src)
+		return NULL;
+
+	d = MAlloc(size + 1);
+	MemCopy(d, src, size);
+	d[size] = 0;
+
+	if (_size)
+		*_size = size;
+
+	return d;
+}
+
+Bool HLFileExists(U8 *name)
+{
+	U8 path[160];
+
+	if (HLFileResolve(name, path))
+		return TRUE;
+
+	return ToBool(HLPakFind(name) != NULL);
+}
+
+U0 HLPakList(U8 *prefix = NULL)
+{
+	CHLPak		*pak;
+	CHLPakEntry	*e;
+	I64			 p;
+	I64			 i;
+	I64			 n = 0;
+
+	for (p = 0; p < hl_pak_count; p++)
+	{
+		pak = hl_paks[p];
+		if (pak)
+		{
+			for (i = 0; i < pak->num_files; i++)
+			{
+				e = &pak->files[i];
+				if (!prefix || !StrNCompare(e->name, prefix, StrLen(prefix)))
+				{
+					"  %-40s %8d\n", e->name, e->size;
+					n++;
+				}
+			}
+		}
+	}
+
+	"HLPak: %d entries listed\n", n;
+}

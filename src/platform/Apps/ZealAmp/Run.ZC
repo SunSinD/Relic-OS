@@ -1,0 +1,4 @@
+Cd(__DIR__);;
+//MP3 and Vorbis decoders live in the system image, System/Audio/Lib
+#include "ZealAmp"
+ZealAmp;

@@ -1,0 +1,19 @@
+// launch entry point.
+//
+// two stages: RunLib.ZC builds the engine, this file builds the app shell and
+// starts it. RunLib.ZC documents the include order, which is load-bearing -
+// ZealC is single-pass, so a file can reference symbols only from an earlier
+// one. utils/hl1-checkorder.py enforces it.
+
+Cd(__DIR__);;
+
+"HL1 build:\n";
+
+ExeFile("RunLib");
+
+"  .. HL1\n";
+#include "HL1"
+
+HL1;
+
+"\nType $$LTBLUE$$HLTest;$$FG$$ to run the data-layer self-check.\n";

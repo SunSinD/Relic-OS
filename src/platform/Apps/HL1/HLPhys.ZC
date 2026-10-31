@@ -1,0 +1,688 @@
+// player movement and collision against the clipnode hulls
+//
+// hulls 1 and 2 are the render geometry pre-grown by a player and a monster box,
+// so collision is a point trace, not a box sweep. no bounds are carried here.
+//
+// the recursion below is direct self-recursion; routing it through a
+// forward-declared helper miscompiles on this compiler.
+
+#define HLCONTENTS_NODE		0
+
+#define HLPHYS_GRAVITY		800.0
+#define HLPHYS_MAXSPEED		320.0
+#define HLPHYS_ACCEL			10.0
+
+//sv_airaccelerate is 10 in HL, not quake's 0.7.
+#define HLPHYS_AIRACCEL		10.0
+#define HLPHYS_AIRSPEEDCAP	30.0
+
+#define HLPHYS_FRICTION		4.0
+#define HLPHYS_STOPSPEED		100.0
+
+//PM_Jump: sqrt(2 * 800 * 45), exactly enough to clear 45 units.
+#define HLPHYS_JUMP			268.3281573
+
+//PM_PreventMegaBunnyJumping
+#define HLPHYS_BUNNY_FACTOR	1.7
+#define HLPHYS_BUNNY_SCALE	0.65
+
+#define HLPHYS_MAXVELOCITY	2000.0
+
+#define HLPHYS_STEPSIZE		18.0
+#define HLPHYS_MAXCLIP		4
+#define HLPHYS_EPSILON		0.03125	//1/32, matches the compiler's precision
+#define HLPHYS_OVERCLIP		1.0
+
+//HL player box, matching hull 1's expansion. Used to sample liquid depth.
+#define HLPHYS_MINS_Z		-36.0
+#define HLPHYS_MAXS_Z		36.0
+#define HLPHYS_VIEW_Z		28.0
+
+//ducked: hull 3.
+#define HLPHYS_DUCK_MINS_Z	-18.0
+#define HLPHYS_DUCK_MAXS_Z	18.0
+#define HLPHYS_DUCK_VIEW_Z	12.0
+#define HLPHYS_DUCK_TIME		0.4
+
+#define HLPHYS_DUCK_SHIFT	18.0
+
+//PM_WaterMove
+#define HLPHYS_WATERFRICTION	1.0
+#define HLPHYS_WATERSPEED	0.8		//0.8 in HL, quake used 0.7
+#define HLPHYS_WATERSINK		60.0
+
+#define HLPHYS_CLIMBSPEED	200.0
+#define HLPHYS_LADDER_JUMP	270.0
+
+#define HLPHYS_WJ_HEIGHT		8.0
+#define HLPHYS_WJ_FORWARD	24.0
+#define HLPHYS_WJ_TIME		2.0
+#define HLPHYS_WJ_UP			225.0
+#define HLPHYS_WJ_PUSH		-50.0	//movedir = -50 * ledge normal
+#define HLPHYS_WJ_SINKING	-180.0
+
+//player.h.
+#define HLPHYS_FALL_SAFE		580.0
+#define HLPHYS_FALL_FATAL	1024.0
+#define HLPHYS_FALL_PUNCH	350.0
+#define HLPHYS_FALL_BOUNCE	200.0
+
+#define HLPHYS_EDGEFRICTION	2.0
+
+//CONTENTS_CURRENT_* push.
+#define HLPHYS_CURRENT_SPEED	100.0
+
+
+U0 HLMatFromAngles(F64 *angles, F64 *origin, F64 *m)
+{
+	F64 sr;
+	F64 sp;
+	F64 sy;
+	F64 cr;
+	F64 cp;
+	F64 cy;
+	F64 a;
+
+	a  = angles[0] * HLDEG2RAD;
+	sp = Sin(a);
+	cp = Cos(a);
+
+	a  = angles[1] * HLDEG2RAD;
+	sy = Sin(a);
+	cy = Cos(a);
+
+	a  = angles[2] * HLDEG2RAD;
+	sr = Sin(a);
+	cr = Cos(a);
+
+	m[0] = cp * cy;
+	m[4] = cp * sy;
+	m[8] = -sp;
+
+	m[1] = sr * sp * cy - cr * sy;
+	m[5] = sr * sp * sy + cr * cy;
+	m[9] = sr * cp;
+
+	m[2]  = cr * sp * cy + sr * sy;
+	m[6]  = cr * sp * sy - sr * cy;
+	m[10] = cr * cp;
+
+	m[3]  = origin[0];
+	m[7]  = origin[1];
+	m[11] = origin[2];
+}
+
+U0 HLMatRotate(F64 *in, F64 *m, F64 *out)
+{
+	out[0] = in[0] * m[0] + in[1] * m[1] + in[2] * m[2];
+	out[1] = in[0] * m[4] + in[1] * m[5] + in[2] * m[6];
+	out[2] = in[0] * m[8] + in[1] * m[9] + in[2] * m[10];
+}
+
+U0 HLMatRotateInv(F64 *in, F64 *m, F64 *out)
+{
+	out[0] = in[0] * m[0] + in[1] * m[4] + in[2] * m[8];
+	out[1] = in[0] * m[1] + in[1] * m[5] + in[2] * m[9];
+	out[2] = in[0] * m[2] + in[1] * m[6] + in[2] * m[10];
+}
+
+U0 HLMatTransform(F64 *in, F64 *m, F64 *out)
+{
+	out[0] = in[0] * m[0] + in[1] * m[1] + in[2] * m[2]  + m[3];
+	out[1] = in[0] * m[4] + in[1] * m[5] + in[2] * m[6]  + m[7];
+	out[2] = in[0] * m[8] + in[1] * m[9] + in[2] * m[10] + m[11];
+}
+
+U0 HLMatTransformInv(F64 *in, F64 *m, F64 *out)
+{
+	F64 t[3];
+
+	t[0] = in[0] - m[3];
+	t[1] = in[1] - m[7];
+	t[2] = in[2] - m[11];
+
+	out[0] = t[0] * m[0] + t[1] * m[4] + t[2] * m[8];
+	out[1] = t[0] * m[1] + t[1] * m[5] + t[2] * m[9];
+	out[2] = t[0] * m[2] + t[1] * m[6] + t[2] * m[10];
+}
+
+Bool HLMatAnglesActive(F64 *angles)
+{
+	if (angles[0] < 0.0 || angles[0] > 0.0)
+		return TRUE;
+	if (angles[1] < 0.0 || angles[1] > 0.0)
+		return TRUE;
+	if (angles[2] < 0.0 || angles[2] > 0.0)
+		return TRUE;
+
+	return FALSE;
+}
+
+class CHLTrace
+{
+	Bool all_solid;
+	Bool start_solid;
+	F64	 fraction;		//how far along the move it reached, 0..1
+	F64	 end_pos[3];
+	F64	 plane_normal[3];
+	F64	 plane_dist;
+	Bool hit;
+
+
+	Bool in_open;
+	Bool in_water;
+};
+
+I64 HLHullPointContents(CHLMap *map, I64 num, F64 *p)
+{
+	CHLClipNode	*node;
+	CHLPlane		*plane;
+	F64			 d;
+
+	while (num >= 0)
+	{
+		if (num >= map->num_clipnodes)
+			return HLCONTENTS_SOLID;
+
+		node  = &map->clipnodes[num];
+		plane = &map->planes[node->plane_num];
+
+		if (plane->type < 3)
+			d = p[plane->type] - plane->dist;
+		else
+			d = HLVecDot(p, plane->normal) - plane->dist;
+
+		if (d < 0.0)
+			num = node->children[1];
+		else
+			num = node->children[0];
+	}
+
+	return num;
+}
+
+Bool HLIsZeroF(F64 v)
+{
+	return ToBool(v <= 0.0 && v >= 0.0);
+}
+
+I64 hl_hull_head = 0;
+
+Bool HLRecursiveHullCheck(CHLMap *map, I64 num, F64 p1f, F64 p2f,
+	F64 *p1, F64 *p2, CHLTrace *trace)
+{
+	CHLClipNode	*node;
+	CHLPlane		*plane;
+	F64			 t1;
+	F64			 t2;
+	F64			 frac;
+	F64			 midf;
+	F64			 mid[3];
+	F64			 zero[3];
+	I64			 side;
+	I64			 i;
+
+	if (num < 0)
+	{
+		if (num != HLCONTENTS_SOLID)
+		{
+			trace->all_solid = FALSE;
+
+			if (num == HLCONTENTS_EMPTY)
+				trace->in_open = TRUE;
+			else
+				trace->in_water = TRUE;
+
+			return TRUE;
+		}
+
+		trace->start_solid = TRUE;
+		return TRUE;
+	}
+
+	if (num >= map->num_clipnodes)
+		return FALSE;
+
+	node  = &map->clipnodes[num];
+	plane = &map->planes[node->plane_num];
+
+	if (plane->type < 3)
+	{
+		t1 = p1[plane->type] - plane->dist;
+		t2 = p2[plane->type] - plane->dist;
+	}
+	else
+	{
+		t1 = HLVecDot(p1, plane->normal) - plane->dist;
+		t2 = HLVecDot(p2, plane->normal) - plane->dist;
+	}
+
+	if (t1 >= 0.0 && t2 >= 0.0)
+		return HLRecursiveHullCheck(map, node->children[0], p1f, p2f, p1, p2,
+			trace);
+	if (t1 < 0.0 && t2 < 0.0)
+		return HLRecursiveHullCheck(map, node->children[1], p1f, p2f, p1, p2,
+			trace);
+
+	if (t1 < 0.0)
+		frac = (t1 + HLPHYS_EPSILON) / (t1 - t2);
+	else
+		frac = (t1 - HLPHYS_EPSILON) / (t1 - t2);
+
+	if (frac < 0.0)
+		frac = 0.0;
+	if (frac > 1.0)
+		frac = 1.0;
+
+	midf = p1f + (p2f - p1f) * frac;
+	for (i = 0; i < 3; i++)
+		mid[i] = p1[i] + frac * (p2[i] - p1[i]);
+
+	if (t1 < 0.0)
+		side = 1;
+	else
+		side = 0;
+
+	if (!HLRecursiveHullCheck(map, node->children[side], p1f, midf, p1, mid,
+			trace))
+		return FALSE;
+
+	if (HLHullPointContents(map, node->children[side ^ 1], mid) !=
+			HLCONTENTS_SOLID)
+		return HLRecursiveHullCheck(map, node->children[side ^ 1], midf, p2f,
+			mid, p2, trace);
+
+	if (trace->all_solid)
+		return FALSE;
+
+	if (side)
+	{
+		HLVecSet(zero, 0.0, 0.0, 0.0);
+		HLVecSub(zero, plane->normal, trace->plane_normal);
+
+		trace->plane_dist = -plane->dist;
+	}
+	else
+	{
+		HLVecCopy(plane->normal, trace->plane_normal);
+		trace->plane_dist = plane->dist;
+	}
+
+	while (HLHullPointContents(map, hl_hull_head, mid) == HLCONTENTS_SOLID)
+	{
+		frac -= 0.1;
+
+		if (frac < 0.0)
+		{
+			trace->fraction = midf;
+			HLVecCopy(mid, trace->end_pos);
+			trace->hit = TRUE;
+			return FALSE;
+		}
+
+		midf = p1f + (p2f - p1f) * frac;
+		for (i = 0; i < 3; i++)
+			mid[i] = p1[i] + frac * (p2[i] - p1[i]);
+	}
+
+	trace->fraction = midf;
+	HLVecCopy(mid, trace->end_pos);
+	trace->hit = TRUE;
+
+	return FALSE;
+}
+
+U0 HLTraceMove(CHLMap *map, F64 *start, F64 *end, CHLTrace *trace)
+{//sweep the player's origin through hull 1
+	I64 head;
+
+	trace->all_solid   = TRUE;
+	trace->start_solid = FALSE;
+	trace->fraction    = 1.0;
+	trace->hit         = FALSE;
+	trace->plane_dist  = 0.0;
+	HLVecSet(trace->plane_normal, 0.0, 0.0, 0.0);
+	HLVecCopy(end, trace->end_pos);
+
+	if (!HLMapValid(map, "HLTraceMove"))
+		return;
+
+	head = map->models[0].head_node[1];
+
+	hl_hull_head = head;
+	HLRecursiveHullCheck(map, head, 0.0, 1.0, start, end, trace);
+}
+
+U0 HLTracePoint(CHLMap *map, F64 *start, F64 *end, CHLTrace *trace)
+{
+	I64 head;
+
+	trace->all_solid   = TRUE;
+	trace->start_solid = FALSE;
+	trace->fraction    = 1.0;
+	trace->hit         = FALSE;
+	trace->plane_dist  = 0.0;
+	HLVecSet(trace->plane_normal, 0.0, 0.0, 0.0);
+	HLVecCopy(end, trace->end_pos);
+
+	if (!HLMapValid(map, "HLTracePoint"))
+		return;
+
+	head = map->models[0].hull0_head;
+	if (head < 0)
+		return;
+
+	hl_hull_head = head;
+	HLRecursiveHullCheck(map, head, 0.0, 1.0, start, end, trace);
+}
+
+F64  hl_old_origin[3];
+I64  hl_stuck_reports = 0;
+
+Bool HLTestPlayerPosition(CHLMap *map, F64 *origin)
+{
+	CHLTrace trace;
+
+	HLTraceMove(map, origin, origin, &trace);
+	return trace.all_solid;
+}
+
+U0 HLCheckStuck(CHLMap *map, F64 *origin)
+{
+	F64 org[3];
+	I64 i;
+	I64 j;
+	I64 z;
+
+	if (!HLTestPlayerPosition(map, origin))
+	{
+		HLVecCopy(origin, hl_old_origin);
+		return;
+	}
+
+	HLVecCopy(origin, org);
+
+	HLVecCopy(hl_old_origin, origin);
+	if (!HLTestPlayerPosition(map, origin))
+		return;
+
+	for (z = 0; z < 18; z++)
+	{
+		for (i = -1; i <= 1; i++)
+		{
+			for (j = -1; j <= 1; j++)
+			{
+				origin[0] = org[0] + ToF64(i);
+				origin[1] = org[1] + ToF64(j);
+				origin[2] = org[2] + ToF64(z);
+
+				if (!HLTestPlayerPosition(map, origin))
+					return;
+			}
+		}
+	}
+
+	HLVecCopy(org, origin);
+
+	if (hl_stuck_reports < 8)
+	{
+		hl_stuck_reports++;
+		"HLPhys: player stuck at %.0f %.0f %.0f\n", org[0], org[1], org[2];
+	}
+}
+
+U0 HLClipVelocity(F64 *v, F64 *normal, F64 overbounce, F64 *out)
+{
+	F64 backoff = HLVecDot(v, normal) * overbounce;
+	I64 i;
+
+	for (i = 0; i < 3; i++)
+	{
+		out[i] = v[i] - normal[i] * backoff;
+
+		if (out[i] > -HLPHYS_EPSILON && out[i] < HLPHYS_EPSILON)
+			out[i] = 0.0;
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+#define HLWATER_MAX		64
+
+I64 hl_water_count = 0;
+I64 hl_water_model[HLWATER_MAX];
+I64 hl_water_cont[HLWATER_MAX];
+F64 hl_water_org[HLWATER_MAX * 3];
+F64 hl_water_min[HLWATER_MAX * 3];
+F64 hl_water_max[HLWATER_MAX * 3];
+
+I64 HLModelPointContents(CHLMap *map, I64 model, F64 *org, F64 *p)
+{
+	F64 local[3];
+
+	if (model < 0 || model >= map->num_models)
+		return HLCONTENTS_EMPTY;
+
+	local[0] = p[0] - org[0];
+	local[1] = p[1] - org[1];
+	local[2] = p[2] - org[2];
+
+	return HLHullPointContents(map, map->models[model].hull0_head, local);
+}
+
+I64 HLWaterBrushLive()
+{
+	if (hl_water_count < 0 || hl_water_count > HLWATER_MAX)
+		return 0;
+
+	return hl_water_count;
+}
+
+U0 HLWaterBrushReset()
+{
+	hl_water_count = 0;
+}
+
+U0 HLWaterBrushBox(CHLMap *map, I64 slot)
+{
+	CHLModel *m;
+	I64		  j;
+
+	m = &map->models[hl_water_model[slot]];
+
+	for (j = 0; j < 3; j++)
+	{
+		hl_water_min[slot * 3 + j] = m->mins[j] + hl_water_org[slot * 3 + j];
+		hl_water_max[slot * 3 + j] = m->maxs[j] + hl_water_org[slot * 3 + j];
+	}
+}
+
+U0 HLWaterBrushAdd(CHLMap *map, I64 model, F64 *org, I64 contents)
+{
+	I64 j;
+
+	if (!HLMapValid(map, "HLWaterBrushAdd"))
+		return;
+
+	if (hl_water_count >= HLWATER_MAX)
+		return;
+
+	if (model < 1 || model >= map->num_models)
+		return;
+
+	hl_water_model[hl_water_count] = model;
+	hl_water_cont[hl_water_count]  = contents;
+
+	for (j = 0; j < 3; j++)
+		hl_water_org[hl_water_count * 3 + j] = org[j];
+
+	HLWaterBrushBox(map, hl_water_count);
+
+	hl_water_count++;
+}
+
+U0 HLWaterBrushMove(CHLMap *map, I64 model, F64 *org)
+{
+	I64 i;
+	I64 j;
+	I64 n;
+
+	if (!HLMapValid(map, "HLWaterBrushMove"))
+		return;
+
+	n = HLWaterBrushLive();
+
+	for (i = 0; i < n; i++)
+	{
+		if (hl_water_model[i] != model)
+			goto qwbm_next;
+
+		for (j = 0; j < 3; j++)
+			hl_water_org[i * 3 + j] = org[j];
+
+		HLWaterBrushBox(map, i);
+		return;
+
+qwbm_next:
+	}
+}
+
+I64 HLWaterBrushContents(CHLMap *map, F64 *p)
+{
+	I64 i;
+	I64 j;
+	I64 n;
+
+	n = HLWaterBrushLive();
+
+	for (i = 0; i < n; i++)
+	{
+		for (j = 0; j < 3; j++)
+		{
+			if (p[j] < hl_water_min[i * 3 + j] ||
+				p[j] > hl_water_max[i * 3 + j])
+				goto qwbc_next;
+		}
+
+		if (HLModelPointContents(map, hl_water_model[i],
+			&hl_water_org[i * 3], p) != HLCONTENTS_EMPTY)
+			return hl_water_cont[i];
+
+qwbc_next:
+	}
+
+	return HLCONTENTS_EMPTY;
+}
+
+I64 HLPointContents(CHLMap *map, F64 *p)
+{
+	CHLNode	*node;
+	CHLPlane	*plane;
+	I64		 num;
+	I64		 cont;
+	F64		 d;
+
+	if (!HLMapValid(map, "HLPointContents"))
+		return HLCONTENTS_SOLID;
+
+	num = map->models[0].head_node[0];
+
+	while (num >= 0)
+	{
+		if (num >= map->num_nodes)
+			return HLCONTENTS_SOLID;
+
+		node  = &map->nodes[num];
+		plane = &map->planes[node->plane_num];
+
+		if (plane->type < 3)
+			d = p[plane->type] - plane->dist;
+		else
+			d = HLVecDot(p, plane->normal) - plane->dist;
+
+		if (d < 0.0)
+			num = node->children[1];
+		else
+			num = node->children[0];
+	}
+
+	num = -1 - num;
+	if (num < 0 || num >= map->num_leafs)
+		return HLCONTENTS_SOLID;
+
+	cont = map->leafs[num].contents;
+
+	if (cont == HLCONTENTS_EMPTY && HLWaterBrushLive() > 0)
+		return HLWaterBrushContents(map, p);
+
+	return cont;
+}
+
+Bool HLContentsCurrent(I64 c)
+{
+	if (c <= HLCONTENTS_CURRENT_0 && c >= HLCONTENTS_CURRENT_DOWN)
+		return TRUE;
+
+	return FALSE;
+}
+
+Bool HLContentsLiquid(I64 c)
+{
+	if (c == HLCONTENTS_WATER || c == HLCONTENTS_SLIME || c == HLCONTENTS_LAVA)
+		return TRUE;
+
+	return HLContentsCurrent(c);
+}
+
+I64 HLContentsWaterType(I64 c)
+{
+	if (HLContentsCurrent(c))
+		return HLCONTENTS_WATER;
+
+	return c;
+}
+
+I64 HLWaterLevelGet(CHLMap *map, F64 *origin, I64 *_watertype)
+{//liquid depth
+	F64 point[3];
+	I64 contents;
+	I64 level = 0;
+
+	if (_watertype)
+		*_watertype = HLCONTENTS_EMPTY;
+
+	HLVecCopy(origin, point);
+	point[2] = origin[2] + HLPHYS_MINS_Z + 1.0;
+
+	contents = HLPointContents(map, point);
+	if (!HLContentsLiquid(contents))
+		return 0;
+
+	level = 1;
+	if (_watertype)
+		*_watertype = HLContentsWaterType(contents);
+
+	point[2] = origin[2] + (HLPHYS_MINS_Z + HLPHYS_MAXS_Z) * 0.5;
+	contents = HLPointContents(map, point);
+	if (HLContentsLiquid(contents))
+	{
+		level = 2;
+
+		point[2] = origin[2] + HLPHYS_VIEW_Z;
+		contents = HLPointContents(map, point);
+		if (HLContentsLiquid(contents))
+			level = 3;
+	}
+
+	return level;
+}
+
+

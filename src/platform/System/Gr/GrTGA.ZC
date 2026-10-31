@@ -1,0 +1,293 @@
+//Truevision TGA decoder into a truecolor CDC. Uncompressed and RLE, colour
+//mapped, truecolour and greyscale, 8/15/16/24/32 bpp, either vertical origin.
+//15 and 16 bpp share a 5.5.5 layout with the top bit as a one-bit alpha.
+//Byte order on disk is BGRA. Types 9, 10 and 11 are RLE: a packet header byte
+//carries a 7-bit count minus one and bit 7 selects run or literal; a run stores
+//one pixel, a literal count pixels. Packets may cross scanlines.
+
+#define TGA_HDR_SIZE		18
+
+#define TGA_TYPE_NONE		0
+#define TGA_TYPE_CMAP		1
+#define TGA_TYPE_RGB			2
+#define TGA_TYPE_GREY		3
+#define TGA_TYPE_RLE_CMAP	9
+#define TGA_TYPE_RLE_RGB		10
+#define TGA_TYPE_RLE_GREY	11
+
+//image descriptor bit 5: set means the first row on disk is the TOP one
+#define TGA_DESC_TOP			0x20
+
+U32 TGAPix(U8 *p, I64 bytes, U8 *cmap, I64 cmap_bytes, I64 cmap_len)
+{//One source pixel to 0xAARRGGBB. cmap is NULL for a non-mapped image. Colour
+ //only: an opaque top byte would read as PIXF_TRANSPARENT (0xFF000000), so the
+ //alpha comes back in a separate plane.
+	I64 idx;
+	I64 v;
+	I64 r;
+	I64 g;
+	I64 b;
+
+	if (cmap)
+	{
+		if (bytes == 2)
+			idx = p[0] + (p[1] << 8);
+		else
+			idx = p[0];
+
+		if (idx < 0 || idx >= cmap_len)
+			return 0;
+
+		return TGAPix(cmap + idx * cmap_bytes, cmap_bytes, NULL, 0, 0);
+	}
+
+	if (bytes == 1)
+	{
+		//greyscale
+		v = p[0];
+		return 0xFF000000 | (v << 16) | (v << 8) | v;
+	}
+
+	if (bytes == 2)
+	{
+		//5.5.5 with the top bit as alpha, low byte first
+		v = p[0] + (p[1] << 8);
+		r = (v >> 10) & 31;
+		g = (v >> 5) & 31;
+		b = v & 31;
+
+		//5 bits to 8 by replicating the high bits, so 31 maps to 255
+		r = (r << 3) | (r >> 2);
+		g = (g << 3) | (g >> 2);
+		b = (b << 3) | (b >> 2);
+
+		return 0xFF000000 | (r << 16) | (g << 8) | b;
+	}
+
+	//24 and 32 are both BGR(A). 24 has none, so it reads opaque
+	if (bytes == 4)
+		return (p[3] << 24) | (p[2] << 16) | (p[1] << 8) | p[0];
+
+	return 0xFF000000 | (p[2] << 16) | (p[1] << 8) | p[0];
+}
+
+public CDC *TGAReadBuf(U8 *buf, I64 size, CTask *mem_task=NULL,
+	U8 **_alpha = NULL)
+{//Decode a TGA already in memory into a truecolor CDC. Does not free buf.
+ //_alpha, when given, receives a MAlloc'd width*height alpha plane, 255 where the
+ //format carries none; the caller Frees it. The DC body stays 0x00RRGGBB.
+	CDC	*dc;
+	U8	*p;
+	U8	*end;
+	U8	*cmap = NULL;
+	U32	*dst;
+	U8	*ap = NULL;		//alpha plane, when the caller asked for one
+	U8	*arow;
+	U32	 pix;
+	I64	 id_len;
+	I64	 cmap_type;
+	I64	 type;
+	I64	 cmap_len;
+	I64	 cmap_bits;
+	I64	 cmap_bytes = 0;
+	I64	 w;
+	I64	 h;
+	I64	 bits;
+	I64	 desc;
+	I64	 bytes;
+	I64	 rle;
+	I64	 x;
+	I64	 y;
+	I64	 row;
+	I64	 n;
+	I64	 hdr;
+	Bool top;
+
+	if (_alpha)
+		*_alpha = NULL;
+
+	if (!mem_task)
+		mem_task = Fs;
+
+	if (!buf || size < TGA_HDR_SIZE)
+		return NULL;
+
+	id_len    = buf[0];
+	cmap_type = buf[1];
+	type      = buf[2];
+	cmap_len  = buf[5] + (buf[6] << 8);
+	cmap_bits = buf[7];
+	w         = buf[12] + (buf[13] << 8);
+	h         = buf[14] + (buf[15] << 8);
+	bits      = buf[16];
+	desc      = buf[17];
+
+	if (w < 1 || h < 1)
+		return NULL;
+
+	rle = 0;
+	if (type == TGA_TYPE_RLE_CMAP || type == TGA_TYPE_RLE_RGB ||
+		type == TGA_TYPE_RLE_GREY)
+		rle = 1;
+
+	if (type != TGA_TYPE_CMAP && type != TGA_TYPE_RGB &&
+		type != TGA_TYPE_GREY && !rle)
+		return NULL;
+
+	if (bits != 8 && bits != 15 && bits != 16 && bits != 24 && bits != 32)
+		return NULL;
+
+	bytes = (bits + 7) / 8;
+	hdr   = TGA_HDR_SIZE + id_len;
+
+	if (hdr > size)
+		return NULL;
+
+	//A colour map is present when the header says so, whatever the image type claims.
+	if (cmap_type && cmap_len > 0)
+	{
+		if (cmap_bits != 15 && cmap_bits != 16 && cmap_bits != 24 &&
+			cmap_bits != 32)
+			return NULL;
+
+		cmap_bytes = (cmap_bits + 7) / 8;
+
+		if (hdr + cmap_len * cmap_bytes > size)
+			return NULL;
+
+		cmap = buf + hdr;
+		hdr += cmap_len * cmap_bytes;
+	}
+
+	if (type != TGA_TYPE_CMAP && type != TGA_TYPE_RLE_CMAP)
+		cmap = NULL;
+
+	p   = buf + hdr;
+	end = buf + size;
+
+	if (!rle && p + w * h * bytes > end)
+		return NULL;
+
+	top = ToBool(desc & TGA_DESC_TOP);
+
+	dc = DCNew(w, h, mem_task);
+
+	if (_alpha)
+	{
+		*_alpha = MAlloc(w * h, mem_task);
+		ap      = *_alpha;
+		MemSet(ap, 0xFF, w * h);
+	}
+
+	if (!dc)
+		return NULL;
+
+	x = 0;
+	y = 0;
+
+	while (y < h)
+	{
+		//Bottom-left origin: the first row on disk is the bottom scanline.
+		if (top)
+			row = y;
+		else
+			row = h - 1 - y;
+
+		dst = dc->body + row * dc->width_internal;
+
+		arow = NULL;
+		if (ap)
+			arow = ap + row * w;
+
+		if (!rle)
+		{
+			if (p + w * bytes > end)
+				break;
+
+			for (x = 0; x < w; x++)
+			{
+				pix    = TGAPix(p + x * bytes, bytes, cmap, cmap_bytes,
+							cmap_len);
+				dst[x] = pix & 0x00FFFFFF;
+				if (arow)
+					arow[x] = pix >> 24;
+			}
+
+			p += w * bytes;
+			y++;
+			goto qtga_next_row;
+		}
+
+		//RLE packets run across scanlines, so x carries between rows.
+		while (x < w)
+		{
+			if (p >= end)
+				goto qtga_done;
+
+			n = (p[0] & 0x7F) + 1;
+
+			if (p[0] & 0x80)
+			{
+				if (p + 1 + bytes > end)
+					goto qtga_done;
+
+				pix = TGAPix(p + 1, bytes, cmap, cmap_bytes, cmap_len);
+				p += 1 + bytes;
+
+				while (n > 0 && x < w)
+				{
+					dst[x] = pix & 0x00FFFFFF;
+					if (arow)
+						arow[x] = pix >> 24;
+					x++;
+					n--;
+				}
+			}
+			else
+			{
+				if (p + 1 + n * bytes > end)
+					goto qtga_done;
+
+				p++;
+
+				while (n > 0 && x < w)
+				{
+					pix    = TGAPix(p, bytes, cmap, cmap_bytes, cmap_len);
+					dst[x] = pix & 0x00FFFFFF;
+					if (arow)
+						arow[x] = pix >> 24;
+					p += bytes;
+					x++;
+					n--;
+				}
+
+				p += n * bytes;
+			}
+		}
+
+		x = 0;
+		y++;
+
+qtga_next_row:
+	}
+
+qtga_done:
+	return dc;
+}
+
+public CDC *TGARead(U8 *filename, CTask *mem_task=NULL)
+{//NULL on error.
+	CDC	*dc;
+	U8	*buf;
+	I64	 size = 0;
+
+	buf = FileRead(filename, &size);
+
+	if (!buf)
+		return NULL;
+
+	dc = TGAReadBuf(buf, size, mem_task);
+	Free(buf);
+
+	return dc;
+}

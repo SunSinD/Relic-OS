@@ -1,0 +1,827 @@
+// IDSP sprite models.
+//
+// Third model class after brush and alias. Carries the effects with no geometry:
+// explosion fireball (progs/s_explod.spr), bubbles, glows.
+//
+// 36-byte header then one record per frame:
+//
+//     "IDSP", version 1, type, boundingradius, maxwidth, maxheight,
+//     numframes, beamlength, synctype
+//
+//     per frame: group flag; then origin[2], width, height and width*height
+//     palette indices. A group carries a count and intervals first.
+//
+// Palette index 255 is transparent under NORMAL and ALPHATEST. A sprite is a
+// rect with most of it cut away, and the cutout is the shape. ADDITIVE and
+// INDEXALPHA carry no cutout index.
+
+#define HLSPR_MAX_FRAMES	64
+#define HLSPR_TRANSPARENT	255
+
+//SPR version. Quake shipped 1; every Half-Life sprite is 2.
+#define HLSPR_VERSION_Q		1
+#define HLSPR_VERSION_HL		2
+
+#define HLSPR_NORMAL			0	//index 255 is the cutout, as in SPR v1
+#define HLSPR_ADDITIVE		1
+#define HLSPR_INDEXALPHA		2	//index is the alpha, palette[255] the colour
+#define HLSPR_ALPHATEST		3	//index 255 cut, the rest opaque
+
+//type, the orientation the quad is built with. Version 1 carries it too.
+#define HLSPR_VP_PARALLEL_UPRIGHT	0
+#define HLSPR_FACING_UPRIGHT		1
+#define HLSPR_VP_PARALLEL			2
+#define HLSPR_ORIENTED				3
+#define HLSPR_VP_PARALLEL_ORIENTED	4
+
+//two axes within a degree of parallel give a degenerate cross product
+#define HLSPR_UPRIGHT_LIMIT	0.999848	//cos(1 degree)
+
+class CHLSprFrame
+{
+	I64	 origin_x;		//texel offset from centre
+	I64	 origin_y;
+	I64	 width;
+	I64	 height;
+	U8	*pixels;
+};
+
+class CHLSpr
+{
+	U8			 name[64];
+	U8			*raw;
+	I64			 version;
+	I64			 type;
+	I64			 tex_format;
+	I64			 max_width;
+	I64			 max_height;
+	I64			 num_frames;
+	F64			 interval;
+	U8			*palette;
+	CHLSprFrame	 frames[HLSPR_MAX_FRAMES];
+};
+
+U32 HLSprColor(CHLSpr *sp, I64 texel)
+{//one texel to 0x00RRGGBB through the applicable palette
+	texel &= 255;
+
+	if (!sp->palette)
+		return HLPalColor(texel);
+
+	return (sp->palette[texel * 3] << 16) |
+		   (sp->palette[texel * 3 + 1] << 8) |
+			sp->palette[texel * 3 + 2];
+}
+
+Bool HLSprTexelVisible(CHLSpr *sp, I64 texel)
+{
+	if (sp->tex_format == HLSPR_INDEXALPHA)
+		return ToBool(texel != 0);
+
+	if (sp->tex_format == HLSPR_ADDITIVE)
+		return TRUE;
+
+	return ToBool(texel != HLSPR_TRANSPARENT);
+}
+
+U0 HLSprPutPixel(CHLSpr *sp, U32 *row, I64 x, I64 texel, I64 light,
+	I64 shade, Bool force_add = FALSE)
+{
+	I64	r;
+	I64	g;
+	I64	b;
+	U32	c32;
+	U32	dst;
+
+	if (sp->palette)
+	{
+		if (sp->tex_format == HLSPR_INDEXALPHA)
+			c32 = HLSprColor(sp, 255);
+		else
+			c32 = HLSprColor(sp, texel);
+
+		r = (((c32 >> 16) & 255) * light) / 255;
+		g = (((c32 >> 8) & 255) * light) / 255;
+		b = ((c32 & 255) * light) / 255;
+
+		if (sp->tex_format == HLSPR_INDEXALPHA)
+		{
+			r = (r * texel) / 255;
+			g = (g * texel) / 255;
+			b = (b * texel) / 255;
+		}
+
+		if (force_add || sp->tex_format == HLSPR_ADDITIVE ||
+			sp->tex_format == HLSPR_INDEXALPHA)
+		{
+			dst = row[x];
+
+			r += (dst >> 16) & 255;
+			g += (dst >> 8) & 255;
+			b += dst & 255;
+
+			if (r > 255)	r = 255;
+			if (g > 255)	g = 255;
+			if (b > 255)	b = 255;
+		}
+
+		row[x] = (r << 16) | (g << 8) | b;
+		return;
+	}
+
+	if (texel >= HLPAL_FULLBRIGHT)
+		c32 = HLPalColor(texel);
+	else
+		c32 = HLPalColor(hl_pal_colormap[shade * HLPAL_COLORS + texel]);
+
+	if (!force_add)
+	{
+		row[x] = c32;
+		return;
+	}
+
+	dst = row[x];
+
+	r = ((c32 >> 16) & 255) + ((dst >> 16) & 255);
+	g = ((c32 >> 8) & 255) + ((dst >> 8) & 255);
+	b = (c32 & 255) + (dst & 255);
+
+	if (r > 255)	r = 255;
+	if (g > 255)	g = 255;
+	if (b > 255)	b = 255;
+
+	row[x] = (r << 16) | (g << 8) | b;
+}
+
+CHLSpr *HLSprLoad(U8 *name)
+{
+	CHLSpr	*sp;
+	U8		*d;
+	I64		 size = 0;
+	I64		 p;
+	I64		 i;
+	I64		 group;
+	I64		 sub;
+	I64		 w;
+	I64		 h;
+
+	d = HLFileLoad(name, &size);
+	if (!d || size < 36)
+	{
+		if (d)
+			Free(d);
+		return NULL;
+	}
+
+	if (d[0] != 'I' || d[1] != 'D' || d[2] != 'S' || d[3] != 'P')
+	{
+		Free(d);
+		return NULL;
+	}
+
+	sp = CAlloc(sizeof(CHLSpr));
+	sp->raw = d;
+	HLStrCopy(sp->name, name, 64);
+
+	sp->version = HLRdI32(d + 4);
+
+	if (sp->version != HLSPR_VERSION_Q && sp->version != HLSPR_VERSION_HL)
+	{
+		"HLSpr: %s is version %d, expected 1 or 2\n", name, sp->version;
+		Free(d);
+		Free(sp);
+		return NULL;
+	}
+
+	if (sp->version == HLSPR_VERSION_HL)
+	{
+		sp->type       = HLRdI32(d + 8);
+		sp->tex_format = HLRdI32(d + 12);
+		sp->max_width  = HLRdI32(d + 20);
+		sp->max_height = HLRdI32(d + 24);
+		sp->num_frames = HLRdI32(d + 28);
+		p              = 40;
+	}
+	else
+	{
+		sp->type       = HLRdI32(d + 8);
+		sp->tex_format = HLSPR_NORMAL;
+		sp->max_width  = HLRdI32(d + 16);
+		sp->max_height = HLRdI32(d + 20);
+		sp->num_frames = HLRdI32(d + 24);
+		p              = 36;
+	}
+
+	sp->interval = 0.1;
+	sp->palette  = NULL;
+
+	if (sp->num_frames < 1 || sp->num_frames > HLSPR_MAX_FRAMES)
+	{
+		Free(d);
+		Free(sp);
+		return NULL;
+	}
+
+	//v2: u16 colour count then count*3 RGB, before the first frame
+	if (sp->version == HLSPR_VERSION_HL)
+	{
+		I64 colors;
+
+		if (p + 2 > size)
+		{
+			Free(d);
+			Free(sp);
+			return NULL;
+		}
+
+		colors = HLRdU16(d + p);
+		p += 2;
+
+		if (colors > 0 && p + colors * 3 <= size)
+		{
+			sp->palette = d + p;
+			p += colors * 3;
+		}
+	}
+
+	for (i = 0; i < sp->num_frames; i++)
+	{
+		if (p + 4 > size)
+			break;
+
+		group = HLRdI32(d + p);
+		p += 4;
+
+		if (group)
+		{
+			if (p + 4 > size)
+				break;
+
+			sub = HLRdI32(d + p);
+			p += 4;
+
+			if (sub > 0 && p + 4 <= size)
+				sp->interval = HLRdF32(d + p);
+
+			if (sp->interval <= 0.0)
+				sp->interval = 0.1;
+
+			p += sub * 4;
+		}
+
+		if (p + 16 > size)
+			break;
+
+		sp->frames[i].origin_x = HLRdI32(d + p);
+		sp->frames[i].origin_y = HLRdI32(d + p + 4);
+		w = HLRdI32(d + p + 8);
+		h = HLRdI32(d + p + 12);
+		p += 16;
+
+		if (w < 1 || h < 1 || p + w * h > size)
+			break;
+
+		sp->frames[i].width  = w;
+		sp->frames[i].height = h;
+		sp->frames[i].pixels = d + p;
+
+		p += w * h;
+	}
+
+	return sp;
+}
+
+U0 HLSprDrawRect(CHLCanvas *c, CHLSpr *sp, I64 frame,
+	I64 dst_x, I64 dst_y, I64 src_x, I64 src_y, I64 sw, I64 sh,
+	I64 tint_r, I64 tint_g, I64 tint_b, I64 dst_w = 0, I64 dst_h = 0)
+{
+	CHLSprFrame	*fr;
+	U32			*row;
+	I64			 x, y;
+	I64			 tx, ty;
+	I64			 texel;
+	I64			 r, g, b;
+	I64			 dr, dg, db;
+	U32			 c32;
+
+	if (!c || !sp || frame < 0 || frame >= sp->num_frames)
+		return;
+
+	fr = &sp->frames[frame];
+
+	if (!fr->pixels || sw < 1 || sh < 1)
+		return;
+
+	if (dst_w < 1)	dst_w = sw;
+	if (dst_h < 1)	dst_h = sh;
+
+	for (y = 0; y < dst_h; y++)
+	{
+		ty = src_y + y * sh / dst_h;
+
+		if (ty < 0 || ty >= fr->height)
+			goto qsdr_next_row;
+
+		if (dst_y + y < 0 || dst_y + y >= c->height)
+			goto qsdr_next_row;
+
+		row = c->pixels + (dst_y + y) * c->width;
+
+		for (x = 0; x < dst_w; x++)
+		{
+			tx = src_x + x * sw / dst_w;
+
+			if (tx < 0 || tx >= fr->width)
+				goto qsdr_next_col;
+			if (dst_x + x < 0 || dst_x + x >= c->width)
+				goto qsdr_next_col;
+
+			texel = fr->pixels[ty * fr->width + tx];
+
+			if (!HLSprTexelVisible(sp, texel))
+				goto qsdr_next_col;
+
+			if (sp->tex_format == HLSPR_INDEXALPHA)
+			{
+				r = (tint_r * texel) / 255;
+				g = (tint_g * texel) / 255;
+				b = (tint_b * texel) / 255;
+			}
+			else
+			{
+				c32 = HLSprColor(sp, texel);
+
+				r = (((c32 >> 16) & 255) * tint_r) / 255;
+				g = (((c32 >> 8) & 255) * tint_g) / 255;
+				b = ((c32 & 255) * tint_b) / 255;
+			}
+
+			if (sp->tex_format == HLSPR_ADDITIVE ||
+				sp->tex_format == HLSPR_INDEXALPHA)
+			{
+				c32 = row[dst_x + x];
+
+				dr = ((c32 >> 16) & 255) + r;
+				dg = ((c32 >> 8) & 255) + g;
+				db = (c32 & 255) + b;
+
+				if (dr > 255)	dr = 255;
+				if (dg > 255)	dg = 255;
+				if (db > 255)	db = 255;
+
+				r = dr;
+				g = dg;
+				b = db;
+			}
+
+			row[dst_x + x] = (r << 16) | (g << 8) | b;
+
+qsdr_next_col:
+		}
+
+qsdr_next_row:
+	}
+}
+
+U0 HLSprFree(CHLSpr *sp)
+{
+	if (!sp)
+		return;
+
+	if (sp->raw)
+		Free(sp->raw);
+
+	Free(sp);
+}
+
+U0 HLSprDraw(CHLCanvas *c, CHLSpr *sp, I64 frame, F64 *origin, I64 light,
+	I64 blend = HLRENDER_NORMAL, F64 scale = 1.0)
+{
+	CHLSprFrame	*fr;
+	Bool		 add;
+	Bool		 depth;
+	U32			*row;
+	F64			*zrow;
+	F64			 rel[3];
+	F64			 cam_x;
+	F64			 cam_y;
+	F64			 cam_z;
+	F64			 inv_z;
+	F64			 sx;
+	F64			 sy;
+	F64			 half_w;
+	F64			 half_h;
+	I64			 x0, x1, y0, y1;
+	I64			 x, y;
+	I64			 tx, ty;
+	I64			 texel;
+	I64			 shade;
+
+	if (!sp || frame < 0 || frame >= sp->num_frames)
+		return;
+
+	fr = &sp->frames[frame];
+	if (!fr->pixels || fr->width < 1 || fr->height < 1)
+		return;
+
+	HLVecSub(origin, c->origin, rel);
+	cam_x = HLVecDot(rel, c->right);
+	cam_y = HLVecDot(rel, c->up);
+	cam_z = HLVecDot(rel, c->forward);
+
+	if (cam_z < 1.0)
+		return;
+
+	inv_z = 1.0 / cam_z;
+
+	sx = c->center_x + cam_x * c->x_scale * inv_z;
+	sy = c->center_y - cam_y * c->y_scale * inv_z;
+
+	if (scale <= 0.0)
+		scale = 1.0;
+
+	half_w = ToF64(fr->width) * 0.5 * scale * c->x_scale * inv_z;
+	half_h = ToF64(fr->height) * 0.5 * scale * c->y_scale * inv_z;
+
+	sx += ToF64(fr->origin_x + fr->width / 2) * scale * c->x_scale * inv_z;
+	sy -= ToF64(fr->origin_y - fr->height / 2) * scale * c->y_scale * inv_z;
+
+	x0 = ToI64(Ceil(sx - half_w));
+	x1 = ToI64(Ceil(sx + half_w));
+	y0 = ToI64(Ceil(sy - half_h));
+	y1 = ToI64(Ceil(sy + half_h));
+
+	if (x0 < c->vx)					x0 = c->vx;
+	if (y0 < c->vy)					y0 = c->vy;
+	if (x1 > c->vx + c->vw)			x1 = c->vx + c->vw;
+	if (y1 > c->vy + c->vh)			y1 = c->vy + c->vh;
+
+	if (x1 <= x0 || y1 <= y0)
+		return;
+
+	shade = ClampI64((255 - light) >> 2, 0, HLPAL_SHADES - 1);
+	add   = ToBool(blend == HLRENDER_TRANSADD);
+	depth = !HLRenderTranslucent(blend);
+
+	for (y = y0; y < y1; y++)
+	{
+		row  = c->pixels + y * c->width;
+		zrow = c->depth + y * c->width;
+
+		ty = ToI64((ToF64(y) - (sy - half_h)) / (half_h * 2.0) *
+				ToF64(fr->height));
+		ty = ClampI64(ty, 0, fr->height - 1);
+
+		for (x = x0; x < x1; x++)
+		{
+			if (inv_z <= zrow[x])
+				goto qsd_next;
+
+			tx = ToI64((ToF64(x) - (sx - half_w)) / (half_w * 2.0) *
+					ToF64(fr->width));
+			tx = ClampI64(tx, 0, fr->width - 1);
+
+			texel = fr->pixels[ty * fr->width + tx];
+
+			if (!HLSprTexelVisible(sp, texel))
+				goto qsd_next;
+
+			HLSprPutPixel(sp, row, x, texel, light, shade, add);
+
+			if (depth)
+				zrow[x] = inv_z;
+
+qsd_next:
+		}
+	}
+}
+
+
+Bool HLSprAxes(CHLCanvas *c, CHLSpr *sp, F64 *origin, F64 *angles,
+	F64 *right, F64 *up)
+{
+	F64 modelorg[3];
+	F64 world_up[3];
+	F64 sr;
+	F64 cr;
+	F64 a;
+	I64 i;
+
+	world_up[0] = 0.0;
+	world_up[1] = 0.0;
+	world_up[2] = 1.0;
+
+	switch (sp->type)
+	{
+		case HLSPR_VP_PARALLEL_UPRIGHT:
+			if (c->forward[2] > HLSPR_UPRIGHT_LIMIT ||
+				c->forward[2] < -HLSPR_UPRIGHT_LIMIT)
+				return FALSE;
+
+			HLVecCopy(world_up, up);
+
+			//cross(up, forward), which for up = (0,0,1) is this
+			right[0] = c->forward[1];
+			right[1] = -c->forward[0];
+			right[2] = 0.0;
+
+			HLVecNormalize(right);
+			break;
+
+		case HLSPR_FACING_UPRIGHT:
+			HLVecSub(c->origin, origin, modelorg);
+
+			if (c->forward[2] > HLSPR_UPRIGHT_LIMIT ||
+				c->forward[2] < -HLSPR_UPRIGHT_LIMIT)
+				return FALSE;
+
+			HLVecCopy(world_up, up);
+
+			right[0] = -modelorg[1];
+			right[1] = modelorg[0];
+			right[2] = 0.0;
+
+			if (HLVecNormalize(right) <= 0.0)
+				return FALSE;
+			break;
+
+		case HLSPR_ORIENTED:
+			HLAngleVectors(angles, NULL, right, up);
+			break;
+
+		case HLSPR_VP_PARALLEL_ORIENTED:
+			a  = angles[2] * HLDEG2RAD;
+			sr = Sin(a);
+			cr = Cos(a);
+
+			for (i = 0; i < 3; i++)
+			{
+				right[i] = c->right[i] * cr + c->up[i] * sr;
+				up[i]    = c->right[i] * -sr + c->up[i] * cr;
+			}
+			break;
+
+		default:
+			HLVecCopy(c->right, right);
+			HLVecCopy(c->up, up);
+			break;
+	}
+
+	return TRUE;
+}
+
+U0 HLSprTri(CHLCanvas *c, CHLSpr *sp, F64 *px, F64 *py, F64 *piz,
+	F64 *psz, F64 *ptz, I64 fw, I64 fh, U8 *pixels, I64 light, I64 shade,
+	I64 blend = HLRENDER_NORMAL)
+{
+	Bool add;
+	Bool depth;
+	U32	*row;
+	F64	*zrow;
+	F64	 area;
+	F64	 l0;
+	F64	 l1;
+	F64	 l2;
+	F64	 inv_z;
+	F64	 fx;
+	F64	 fy;
+	F64	 x_min;
+	F64	 x_max;
+	F64	 y_min;
+	F64	 y_max;
+	I64	 x0, x1, y0, y1;
+	I64	 x, y;
+	I64	 tx, ty;
+	I64	 texel;
+	I64	 i;
+
+	area = (px[1] - px[0]) * (py[2] - py[0]) -
+		   (px[2] - px[0]) * (py[1] - py[0]);
+
+	if (area > -0.0001 && area < 0.0001)
+		return;
+
+	x_min = px[0];
+	x_max = px[0];
+	y_min = py[0];
+	y_max = py[0];
+
+	for (i = 1; i < 3; i++)
+	{
+		if (px[i] < x_min)	x_min = px[i];
+		if (px[i] > x_max)	x_max = px[i];
+		if (py[i] < y_min)	y_min = py[i];
+		if (py[i] > y_max)	y_max = py[i];
+	}
+
+	x0 = ToI64(Floor(x_min));
+	x1 = ToI64(Ceil(x_max));
+	y0 = ToI64(Floor(y_min));
+	y1 = ToI64(Ceil(y_max));
+
+	if (x0 < c->vx)					x0 = c->vx;
+	if (y0 < c->vy)					y0 = c->vy;
+	if (x1 > c->vx + c->vw)			x1 = c->vx + c->vw;
+	if (y1 > c->vy + c->vh)			y1 = c->vy + c->vh;
+
+	add   = ToBool(blend == HLRENDER_TRANSADD);
+	depth = !HLRenderTranslucent(blend);
+
+	for (y = y0; y < y1; y++)
+	{
+		row  = c->pixels + y * c->width;
+		zrow = c->depth + y * c->width;
+		fy   = ToF64(y) + 0.5;
+
+		for (x = x0; x < x1; x++)
+		{
+			fx = ToF64(x) + 0.5;
+
+			l0 = ((px[1] - fx) * (py[2] - fy) -
+				  (px[2] - fx) * (py[1] - fy)) / area;
+			l1 = ((px[2] - fx) * (py[0] - fy) -
+				  (px[0] - fx) * (py[2] - fy)) / area;
+			l2 = 1.0 - l0 - l1;
+
+			if (l0 < 0.0 || l1 < 0.0 || l2 < 0.0)
+				goto qst_next;
+
+			inv_z = l0 * piz[0] + l1 * piz[1] + l2 * piz[2];
+
+			if (inv_z <= 0.0 || inv_z <= zrow[x])
+				goto qst_next;
+
+			tx = ToI64((l0 * psz[0] + l1 * psz[1] + l2 * psz[2]) / inv_z);
+			ty = ToI64((l0 * ptz[0] + l1 * ptz[1] + l2 * ptz[2]) / inv_z);
+
+			tx = ClampI64(tx, 0, fw - 1);
+			ty = ClampI64(ty, 0, fh - 1);
+
+			texel = pixels[ty * fw + tx];
+
+			if (!HLSprTexelVisible(sp, texel))
+				goto qst_next;
+
+			HLSprPutPixel(sp, row, x, texel, light, shade, add);
+
+			if (depth)
+				zrow[x] = inv_z;
+
+qst_next:
+		}
+	}
+}
+
+U0 HLSprDrawOriented(CHLCanvas *c, CHLSpr *sp, I64 frame, F64 *origin,
+	F64 *angles, I64 light, I64 blend = HLRENDER_NORMAL, F64 scale = 1.0)
+{
+	CHLSprFrame	*fr;
+	F64			 right[3];
+	F64			 up[3];
+	F64			 corner[3];
+	F64			 rel[3];
+	F64			 cx[4];
+	F64			 cy[4];
+	F64			 cz[4];
+	F64			 sx[4];
+	F64			 sy[4];
+	F64			 iz[4];
+	F64			 cs[4];
+	F64			 ct[4];
+	F64			 tpx[3];
+	F64			 tpy[3];
+	F64			 tiz[3];
+	F64			 tsz[3];
+	F64			 ttz[3];
+	F64			 du;
+	F64			 dv;
+	I64			 shade;
+	I64			 i;
+	I64			 j;
+	I64			 k;
+
+	if (!c || !sp || frame < 0 || frame >= sp->num_frames)
+		return;
+
+	fr = &sp->frames[frame];
+
+	if (!fr->pixels || fr->width < 1 || fr->height < 1)
+		return;
+
+	if (!HLSprAxes(c, sp, origin, angles, right, up))
+		return;
+
+	if (scale <= 0.0)
+		scale = 1.0;
+
+	for (i = 0; i < 4; i++)
+	{
+		if (i == 0 || i == 3)
+		{
+			du    = ToF64(fr->origin_x);
+			cs[i] = 0.0;
+		}
+		else
+		{
+			du    = ToF64(fr->origin_x + fr->width);
+			cs[i] = ToF64(fr->width);
+		}
+
+		if (i < 2)
+		{
+			dv    = ToF64(fr->origin_y);
+			ct[i] = 0.0;
+		}
+		else
+		{
+			dv    = ToF64(fr->origin_y - fr->height);
+			ct[i] = ToF64(fr->height);
+		}
+
+		du *= scale;
+		dv *= scale;
+
+		for (j = 0; j < 3; j++)
+			corner[j] = origin[j] + right[j] * du + up[j] * dv;
+
+		HLVecSub(corner, c->origin, rel);
+
+		cx[i] = HLVecDot(rel, c->right);
+		cy[i] = HLVecDot(rel, c->up);
+		cz[i] = HLVecDot(rel, c->forward);
+
+		if (cz[i] < 1.0)
+			return;
+
+		iz[i] = 1.0 / cz[i];
+		sx[i] = c->center_x + cx[i] * c->x_scale * iz[i];
+		sy[i] = c->center_y - cy[i] * c->y_scale * iz[i];
+	}
+
+	shade = ClampI64((255 - light) >> 2, 0, HLPAL_SHADES - 1);
+
+	//two triangles, 0-1-2 and 0-2-3
+	for (i = 0; i < 2; i++)
+	{
+		for (j = 0; j < 3; j++)
+		{
+			k = j;
+
+			if (j)
+				k = j + i;
+
+			tpx[j] = sx[k];
+			tpy[j] = sy[k];
+			tiz[j] = iz[k];
+			tsz[j] = cs[k] * iz[k];
+			ttz[j] = ct[k] * iz[k];
+		}
+
+		HLSprTri(c, sp, tpx, tpy, tiz, tsz, ttz, fr->width, fr->height,
+			fr->pixels, light, shade, blend);
+	}
+}
+
+U0 HLSprDrawModel(CHLCanvas *c, CHLSpr *sp, I64 frame, F64 *origin,
+	F64 *angles, I64 light, I64 blend = HLRENDER_NORMAL, F64 scale = 1.0)
+{
+	if (!c || !sp)
+		return;
+
+	if (sp->type == HLSPR_VP_PARALLEL)
+	{
+		HLSprDraw(c, sp, frame, origin, light, blend, scale);
+		return;
+	}
+
+	HLSprDrawOriented(c, sp, frame, origin, angles, light, blend, scale);
+}
+
+U0 HLSprDrawEntity(CHLCanvas *c, CHLSpr *sp, I64 frame, F64 *origin,
+	F64 *angles, I64 light, I64 mode, I64 amt, F64 scale = 1.0)
+{
+	I64 blend;
+	I64 lit;
+
+	if (!c || !sp)
+		return;
+
+	blend = mode;
+	lit   = light;
+
+	if (blend == HLRENDER_GLOW)
+		blend = HLRENDER_TRANSADD;
+
+	if (HLRenderTranslucent(blend))
+	{
+		amt = ClampI64(amt, 0, 255);
+
+		if (amt <= 0)
+			return;
+
+		lit = amt;
+	}
+
+	HLSprDrawModel(c, sp, frame, origin, angles, ClampI64(lit, 0, 255),
+		blend, scale);
+}

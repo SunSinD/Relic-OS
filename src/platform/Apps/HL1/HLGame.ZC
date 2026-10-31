@@ -1,0 +1,406 @@
+// map-level game state for the shell
+
+#define HLGAME_STATIC_DIST	2000.0
+
+Bool hl_world_active	= FALSE;
+F64	 hl_game_time	= 0.0;
+I64	 hl_game_spawned	= 0;
+I64	 hl_game_thinks	= 0;
+
+Bool hl_world_warned			= FALSE;
+
+// valve/skill.cfg: one "name value" a line, value quoted, // comments to end of
+// line, tabs and spaces both separators. 249 entries, three tiers per constant,
+// the tier a digit on the end of the name.
+//
+// CGameRules::RefreshSkillData, dlls/gamerules.cpp:114, clamps the skill cvar to
+// 1..3; GetSkillCvar, dlls/skill.cpp:29, appends the digit to the base name.
+
+#define HLSKILL_MAX_VARS	320
+#define HLSKILL_NAME_MAX	40
+
+class CHLSkillVar
+{
+	U8	name[HLSKILL_NAME_MAX];
+	F64	value;
+};
+
+CHLSkillVar	hl_skill_var[HLSKILL_MAX_VARS];
+I64			hl_skill_count	= 0;
+I64			hl_skill_level	= 1;	//gSkillData.iSkillLevel, 1..3
+Bool		hl_skill_loaded	= FALSE;
+
+I64 HLSkillFind(U8 *name)
+{
+	I64 i;
+
+	for (i = 0; i < hl_skill_count; i++)
+	{
+		if (!StrICompare(hl_skill_var[i].name, name))
+			return i;
+	}
+
+	return -1;
+}
+
+U0 HLSkillDefine(U8 *name, F64 value)
+{
+	I64 i = HLSkillFind(name);
+
+	if (i < 0)
+	{
+		if (hl_skill_count >= HLSKILL_MAX_VARS)
+			return;
+
+		i = hl_skill_count;
+		hl_skill_count++;
+		HLStrCopy(hl_skill_var[i].name, name, HLSKILL_NAME_MAX);
+	}
+
+	hl_skill_var[i].value = value;
+}
+
+U0 HLSkillParse(U8 *text, I64 size)
+{
+	U8	 name[HLSKILL_NAME_MAX];
+	U8	 val[32];
+	I64	 i = 0;
+	I64	 n;
+
+	while (i < size)
+	{
+		while (i < size && text[i] <= ' ')
+			i++;
+
+		if (i >= size)
+			break;
+
+		if (i + 1 < size && text[i] == '/' && text[i + 1] == '/')
+		{
+			while (i < size && text[i] != '\n')
+				i++;
+			goto sk_next;
+		}
+
+		n = 0;
+		while (i < size && text[i] > ' ')
+		{
+			if (n < HLSKILL_NAME_MAX - 1)
+			{
+				name[n] = text[i];
+				n++;
+			}
+			i++;
+		}
+		name[n] = 0;
+
+		while (i < size && (text[i] == ' ' || text[i] == '\t'))
+			i++;
+
+		if (i >= size || text[i] == '\n' || text[i] == '\r')
+			goto sk_next;
+
+		n = 0;
+
+		if (text[i] == '"')
+		{
+			i++;
+			while (i < size && text[i] != '"' && text[i] != '\n')
+			{
+				if (n < 31)
+				{
+					val[n] = text[i];
+					n++;
+				}
+				i++;
+			}
+			if (i < size && text[i] == '"')
+				i++;
+		}
+		else
+		{
+			while (i < size && text[i] > ' ')
+			{
+				if (n < 31)
+				{
+					val[n] = text[i];
+					n++;
+				}
+				i++;
+			}
+		}
+
+		val[n] = 0;
+
+		if (name[0] == 's' && name[1] == 'k' && name[2] == '_')
+			HLSkillDefine(name, HLAtoF(val));
+
+sk_next:
+	}
+}
+
+F64 HLSkillCvar(U8 *base, F64 fallback)
+{//GetSkillCvar, dlls/skill.cpp:29 - base name plus the resolved tier digit
+	U8	 name[HLSKILL_NAME_MAX];
+	I64	 i;
+
+	StrPrint(name, "%s%d", base, hl_skill_level);
+
+	i = HLSkillFind(name);
+
+	if (i < 0)
+		return fallback;
+
+	if (hl_skill_var[i].value <= 0.0)
+		return fallback;
+
+	return hl_skill_var[i].value;
+}
+
+U0 HLSkillApply()
+{//RefreshSkillData's back half
+
+	hl_ai_mon_info[HLMON_HEADCRAB].health     = HLSkillCvar("sk_headcrab_health", 10.0);
+	hl_ai_mon_info[HLMON_HEADCRAB].melee_dmg  = HLSkillCvar("sk_headcrab_dmg_bite", 5.0);
+
+	hl_ai_mon_info[HLMON_ZOMBIE].health       = HLSkillCvar("sk_zombie_health", 50.0);
+	hl_ai_mon_info[HLMON_ZOMBIE].melee_dmg    = HLSkillCvar("sk_zombie_dmg_one_slash", 10.0);
+	hl_ai_mon_info[HLMON_ZOMBIE].melee2_dmg   = HLSkillCvar("sk_zombie_dmg_both_slash", 25.0);
+
+	hl_ai_mon_info[HLMON_SCIENTIST].health    = HLSkillCvar("sk_scientist_health", 20.0);
+
+	hl_ai_mon_info[HLMON_BARNEY].health       = HLSkillCvar("sk_barney_health", 35.0);
+	hl_ai_mon_info[HLMON_BARNEY].range_dmg    = HLSkillCvar("sk_9mm_bullet", 5.0);
+
+	hl_ai_mon_info[HLMON_HOUNDEYE].health     = HLSkillCvar("sk_houndeye_health", 20.0);
+	hl_ai_mon_info[HLMON_HOUNDEYE].range_dmg  = HLSkillCvar("sk_houndeye_dmg_blast", 10.0);
+
+	hl_ai_mon_info[HLMON_HGRUNT].health       = HLSkillCvar("sk_hgrunt_health", 50.0);
+	hl_ai_mon_info[HLMON_HGRUNT].melee_dmg    = HLSkillCvar("sk_hgrunt_kick", 5.0);
+	hl_ai_mon_info[HLMON_HGRUNT].range_dmg    = HLSkillCvar("sk_9mmAR_bullet", 3.0);
+
+	hl_ai_mon_info[HLMON_ISLAVE].health       = HLSkillCvar("sk_islave_health", 30.0);
+	hl_ai_mon_info[HLMON_ISLAVE].melee_dmg    = HLSkillCvar("sk_islave_dmg_claw", 8.0);
+	hl_ai_mon_info[HLMON_ISLAVE].range_dmg    = HLSkillCvar("sk_islave_dmg_zap", 10.0);
+
+	hl_ai_mon_info[HLMON_BULLSQUID].health    = HLSkillCvar("sk_bullsquid_health", 40.0);
+	hl_ai_mon_info[HLMON_BULLSQUID].melee_dmg = HLSkillCvar("sk_bullsquid_dmg_bite", 15.0);
+	hl_ai_mon_info[HLMON_BULLSQUID].melee2_dmg = HLSkillCvar("sk_bullsquid_dmg_whip", 25.0);
+	hl_ai_mon_info[HLMON_BULLSQUID].range_dmg = HLSkillCvar("sk_bullsquid_dmg_spit", 15.0);
+
+	//CAGrunt has one melee figure
+	hl_ai_mon_info[HLMON_AGRUNT].health       = HLSkillCvar("sk_agrunt_health", 60.0);
+	hl_ai_mon_info[HLMON_AGRUNT].melee_dmg    = HLSkillCvar("sk_agrunt_dmg_punch", 10.0);
+	hl_ai_mon_info[HLMON_AGRUNT].melee2_dmg   = HLSkillCvar("sk_agrunt_dmg_punch", 10.0);
+	hl_ai_mon_info[HLMON_AGRUNT].range_dmg    = HLSkillCvar("sk_hornet_dmg", 4.0);
+
+	//controller.cpp:630-661: attack1 sprays one ball per 0.2s over 0.4s, so two
+	hl_ai_mon_info[HLMON_CONTROLLER].health     = HLSkillCvar("sk_controller_health", 60.0);
+	hl_ai_mon_info[HLMON_CONTROLLER].range_dmg  = HLSkillCvar("sk_controller_dmgball", 3.0) * 2.0;
+	hl_ai_mon_info[HLMON_CONTROLLER].range2_dmg = HLSkillCvar("sk_controller_dmgzap", 15.0);
+
+	hl_ai_mon_info[HLMON_SENTRY].health       = HLSkillCvar("sk_sentry_health", 40.0);
+	hl_ai_mon_info[HLMON_SENTRY].range_dmg    = HLSkillCvar("sk_9mmAR_bullet", 3.0);
+
+	hl_ai_mon_info[HLMON_ASSASSIN].health     = HLSkillCvar("sk_hassassin_health", 50.0);
+	hl_ai_mon_info[HLMON_ASSASSIN].range_dmg  = HLSkillCvar("sk_9mm_bullet", 5.0);
+
+	hl_ai_mon_info[HLMON_GARGANTUA].health      = HLSkillCvar("sk_gargantua_health", 800.0);
+	hl_ai_mon_info[HLMON_GARGANTUA].melee_dmg   = HLSkillCvar("sk_gargantua_dmg_slash", 30.0);
+	hl_ai_mon_info[HLMON_GARGANTUA].melee2_dmg  = HLSkillCvar("sk_gargantua_dmg_fire", 3.0);
+	hl_ai_mon_info[HLMON_GARGANTUA].range_dmg   = HLSkillCvar("sk_gargantua_dmg_stomp", 50.0);
+
+	//CBigMomma health is 150 * factor at spawn
+	hl_ai_mon_info[HLMON_BIGMOMMA].health     =
+		150.0 * HLSkillCvar("sk_bigmomma_health_factor", 1.0);
+	hl_ai_mon_info[HLMON_BIGMOMMA].melee_dmg  =
+		HLSkillCvar("sk_bigmomma_dmg_slash", 50.0);
+	hl_ai_mon_info[HLMON_BIGMOMMA].range_dmg  =
+		HLSkillCvar("sk_bigmomma_dmg_blast", 100.0);
+	hl_ai_mon_info[HLMON_BIGMOMMA].blast_radius =
+		HLSkillCvar("sk_bigmomma_radius_blast", 250.0);
+
+	hl_ai_mon_info[HLMON_NIHILANTH].health   =
+		HLSkillCvar("sk_nihilanth_health", 800.0);
+	hl_ai_mon_info[HLMON_NIHILANTH].range_dmg =
+		HLSkillCvar("sk_nihilanth_zap", 30.0);
+
+	hl_ai_mon_info[HLMON_APACHE].health   =
+		HLSkillCvar("sk_apache_health", 150.0);
+	hl_ai_mon_info[HLMON_APACHE].range_dmg =
+		HLSkillCvar("sk_12mm_bullet", 8.0);
+	hl_ai_mon_info[HLMON_OSPREY].range_dmg =
+		HLSkillCvar("sk_12mm_bullet", 8.0);
+
+	hl_ai_mon_info[HLMON_TURRET].health      =
+		HLSkillCvar("sk_turret_health", 50.0);
+	hl_ai_mon_info[HLMON_TURRET].range_dmg   =
+		HLSkillCvar("sk_12mm_bullet", 8.0);
+	hl_ai_mon_info[HLMON_MINITURRET].health  =
+		HLSkillCvar("sk_miniturret_health", 40.0);
+	hl_ai_mon_info[HLMON_MINITURRET].range_dmg =
+		HLSkillCvar("sk_9mmAR_bullet", 3.0);
+
+	hl_ai_mon_info[HLMON_TRIPMINE].range_dmg  = HLSkillCvar("sk_plr_tripmine", 150.0);
+
+	//CBarnacle, CRoach, CTentacle and COsprey hardcode health; no skill cvar
+
+	hl_wpn_info[HLWPN_CROWBAR].damage      = HLSkillCvar("sk_plr_crowbar", 10.0);
+
+	hl_wpn_info[HLWPN_GLOCK].damage        = HLSkillCvar("sk_plr_9mm_bullet", 8.0);
+	hl_wpn_info[HLWPN_GLOCK].sec_damage    = HLSkillCvar("sk_plr_9mm_bullet", 8.0);
+
+	hl_wpn_info[HLWPN_PYTHON].damage       = HLSkillCvar("sk_plr_357_bullet", 40.0);
+
+	hl_wpn_info[HLWPN_MP5].damage          = HLSkillCvar("sk_plr_9mmAR_bullet", 5.0);
+	hl_wpn_info[HLWPN_MP5].sec_damage      = HLSkillCvar("sk_plr_9mmAR_grenade", 100.0);
+
+	hl_wpn_info[HLWPN_CROSSBOW].damage     = HLSkillCvar("sk_plr_xbow_bolt_monster", 50.0);
+
+	hl_wpn_info[HLWPN_SHOTGUN].damage      = HLSkillCvar("sk_plr_buckshot", 5.0);
+	hl_wpn_info[HLWPN_SHOTGUN].sec_damage  = HLSkillCvar("sk_plr_buckshot", 5.0);
+
+	hl_wpn_info[HLWPN_RPG].damage          = HLSkillCvar("sk_plr_rpg", 100.0);
+	hl_wpn_info[HLWPN_GAUSS].damage        = HLSkillCvar("sk_plr_gauss", 20.0);
+
+	hl_wpn_info[HLWPN_EGON].damage         = HLSkillCvar("sk_plr_egon_wide", 14.0);
+	hl_wpn_info[HLWPN_EGON].sec_damage     = HLSkillCvar("sk_plr_egon_narrow", 6.0);
+
+	hl_wpn_info[HLWPN_HANDGRENADE].damage  = HLSkillCvar("sk_plr_hand_grenade", 100.0);
+	hl_wpn_info[HLWPN_TRIPMINE].damage     = HLSkillCvar("sk_plr_tripmine", 150.0);
+	hl_wpn_info[HLWPN_SATCHEL].damage      = HLSkillCvar("sk_plr_satchel", 150.0);
+	hl_wpn_info[HLWPN_SNARK].damage        = HLSkillCvar("sk_snark_dmg_pop", 5.0);
+
+	//HLWPN_HORNETGUN has no cvar; RefreshSkillData assigns 7 (gamerules.cpp:288)
+
+	hl_ai_grunt_pellets  = HLSkillCvar("sk_hgrunt_pellets", 3.0);
+	hl_ai_grunt_buckshot = HLSkillCvar("sk_plr_buckshot", 5.0);
+}
+
+Bool HLSkillLoad()
+{//RefreshSkillData's front half: resolve the tier, then read the file
+	U8	*text;
+	U8	 line[96];
+	I64	 size = 0;
+	I64	 skill;
+
+	hl_skill_count  = 0;
+	hl_skill_loaded = FALSE;
+
+	skill = ToI64(HLCvarGet("skill") + 0.5);
+
+	if (skill < 1)
+		skill = 1;
+	if (skill > 3)
+		skill = 3;
+
+	hl_skill_level = skill;
+
+	//borrowed from the file cache; not Freed
+	text = HLFileData("skill.cfg", &size);
+
+	if (!text || size <= 0)
+	{
+		HLLog("skill: no skill.cfg, tables keep their built-in figures\n");
+		HLSkillApply;
+		return FALSE;
+	}
+
+	HLSkillParse(text, size);
+	hl_skill_loaded = TRUE;
+
+	StrPrint(line, "skill: level %d, %d entries from skill.cfg\n",
+		hl_skill_level, hl_skill_count);
+	HLLog(line);
+
+	HLSkillApply;
+
+	return TRUE;
+}
+
+Bool hl_coop_active = FALSE;
+
+U0 HLGameApplyModeCvars()
+{//Host_InitLocal forces deathmatch off whenever coop is set
+	hl_coop_active = FALSE;
+
+	if (HLCvarGet("coop") != 0.0)
+	{
+		hl_coop_active = TRUE;
+
+		if (HLCvarGet("deathmatch") != 0.0)
+			HLCvarSet("deathmatch", 0.0);
+	}
+}
+
+U0 HLGameInit(CHLMap *map)
+{//CGameRules' constructor: runs on map load before any entity spawns
+	no_warn map;
+
+	hl_game_time    = 1.0;
+	hl_game_thinks  = 0;
+	hl_game_spawned = 0;
+
+	//globals aren't zeroed
+	hl_coop_active  = FALSE;
+
+	HLSkillLoad;
+}
+
+U0 HLGameShutdown()
+{
+	hl_world_active   = FALSE;
+	hl_player_active  = FALSE;
+	hl_player_edict   = 0;
+
+	//voices play by reference out of the precache cache; they stop before it is freed
+	HLLog("  shutdown: sounds\n");	HLLogFlush;
+	HLSndStopAll(FALSE);
+
+	HLLog("  shutdown: statics\n");	HLLogFlush;
+	HLBiStaticClear;
+	HLBiBeamsClear;
+	HLBiIntermissionClear;
+	HLBiCenterClear;
+
+	HLLog("  shutdown: lights/ambients\n");	HLLogFlush;
+	HLDlightClear;
+	HLSndAmbientClear;
+	HLLightInit;
+
+	HLLog("  shutdown: precache\n");	HLLogFlush;
+	HLBiFreePrecache;
+
+	HLLog("  shutdown: bsp models\n");	HLLogFlush;
+	HLBiBspCacheFree;
+	HLBiSprCacheFree;
+
+	HLLog("  shutdown: progs\n");	HLLogFlush;
+	HLPrFree;
+
+	HLLog("  shutdown: ok\n");	HLLogFlush;
+}
+
+U0 HLGameDrawStatics(CHLCanvas *c, CHLMap *map)
+{
+	CHLStaticEnt	*se;
+	F64			 d[3];
+	I64			 i;
+
+	for (i = 0; i < hl_static_count; i++)
+	{
+		se = &hl_static_ent[i];
+
+		if (!se->mdl)
+			goto qds_next;
+
+		HLVecSub(se->origin, c->origin, d);
+		if (HLVecLength(d) > HLGAME_STATIC_DIST)
+			goto qds_next;
+
+		HLMdlDraw(c, se->mdl, se->frame, se->origin, se->angles[1],
+			HLLightPoint(map, se->origin));
+
+qds_next:
+	}
+}

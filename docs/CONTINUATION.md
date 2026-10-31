@@ -1,57 +1,50 @@
-# Relic OS - Continuation Prompt
+# Continuing RelicOS
 
-Paste the block below into a new chat with any AI coding assistant to pick up
-where the last session stopped.
+User constraints: original TempleOS font, matte black/grey/white, automatic
+home/desktop startup, broad apps and games, smooth motion and minimum 60 FPS.
+No new ISO until the user asks. No commits, pushes or PRs were requested.
 
-```
-You are working on my repo Relic OS, a fork of TempleOS V5.03 written in HolyC:
-https://github.com/SunSinD/Relic-OS
-Local clone: <path to your clone> (Windows, VMware Workstation, Python 3)
-Plain-text TempleOS source for checking APIs: python tools\tosz.py <file>.HC.Z out.HC (expands any src/templeos .Z file)
+Read README.md, docs/VALIDATION.md, docs/UPSTREAM-INTEGRATION.md and
+ docs/platform-workflow.md before continuing. `src/relic/` is the working
+HolyC recovery baseline; `src/platform/` is the imported ZealC platform.
+Do not mix their binaries, kernel APIs or source dialects.
 
-Dev loop (already set up and working):
-- powershell -ExecutionPolicy Bypass -File tools\relic.ps1 dev
-  Powers off the VM, writes src\relic\ to a FAT32 transfer disk, boots the VM.
-  The guest's HomeSys.HC copies the new files in and starts the desktop (~25 s).
-- tools\relic.ps1 shot  -> build\shots\latest.png (screenshot of the VMware window; VNC misreports moving frames)
-- tools\relic.ps1 log   -> prints ::/Home/Boot.LOG from the VM disk
-- python tools\vnc.py type "Dir;" --enter   /   python tools\vnc.py key Escape
-  Keyboard works over VNC, mouse clicks do not. Desktop keys: F E S G T M I H.
-- tools\relic.ps1 iso   -> build\RelicOS-v0.4.0.iso (guest runs Build.HC by itself)
-- The VM lives in build\vm\RelicOS (git-ignored). Transfer disk is E: after a dev boot (G: when mounted manually for setup).
+Use actual guest compilation and runtime checks. Static source inspection is
+not a substitute. Preserve raw DolDoc/binary bytes in the platform import.
+Update the import manifest when changing imported files. Check
+`python tools/platform_audit.py` and the host unittest suite.
 
-Boot chain: HomeSys.HC (dev sync) -> RelicStartUp.HC (UserStartUp/SrvStartUp)
--> RelicBoot.HC -> Theme -> Chrome (status bar) -> Wallpaper -> Install prompt
--> RelicDesktop.HC (dock, apps, Shell task) which includes GamesLauncher.HC -> RunTOOM.HC -> TOOM/.
+Known limits: the 60 FPS minimum remains unmet; TLS has no certificate-chain
+validation and uses a non-hardened random source; many imported apps/drivers
+need runtime coverage. Baseline TinkerOS games need ZealC ports to join the
+platform. Retail game data is separate. UT99 is incomplete upstream.
 
-HolyC rules (each one broke the OS before):
-- Never re-declare an already defined function with extern (calls become "Undefined Extern").
-- ToI64(x) - U8 is unsigned; convert both sides with ToF64 for signed math.
-- HomeSys must keep SrvStartUp or every popup is invisible.
-- No continue; define functions before use; Relic Shell lines max 1023 chars.
-- Changes to HomeSys.HC apply one boot later; everything else on the next boot.
-- Dev sync is opt-in with ::/Home/RelicDev.TXT; that flag must never ship in the ISO.
-- Dev discovery checks only FAT32 ATA drives, never an empty CD drive.
-- Display goes through RelicDisplay.HC (VMware SVGA II or Bochs VBE); planar VGA in VMs costs ~270 ms per full screen.
-  Ctrl+Alt+V returns to VGA (shows debugger/crash text); ::/Home/RelicNoSVGA.TXT forces VGA from boot.
-- DOOM controls: mouse or arrows turn, A/D strafe, W/S move, Ctrl or left click fires, Shift runs.
-- DOOM mouse look reads the ms_hard.pos delta; never MsSet the cursor every frame (it erases the movement).
-- Never rewrite ::/Kernel.BIN.C or ::/0000Boot/* on a running system (boot sectors use disk positions).
-- reg is a HolyC keyword; #include on the same line as a statement runs before it.
+ZealC reads types/functions in one pass. Define them before use. Avoid relying
+on declaration initializers to install callbacks. HolyC local fixed-array
+string initialization required explicit StrCpy in baseline tests. FileWrite
+returns a disk location, not the number of bytes; verify saves by reading back.
 
-How to work:
-1. Read roadmap/README.md and the files you will touch before editing.
-2. Make the change, run tools\relic.ps1 dev, take screenshots over VNC and check the result yourself.
-   If something breaks, find the cause in the guest (dump buffers to the transfer disk, read them on the host) instead of guessing.
-3. Update roadmap/README.md and CHANGELOG.md, commit with a clear message, push to main.
-   Do not commit build/, ISOs, VMDKs or screenshots.
+Do not modify a running VM's disk from mtools. Stop the relevant VM and verify
+it is off first. Keep the recovery VMware disk and platform QEMU disk separate.
+No automatic commits, pushes, ISO generation or publication on continuation.
 
-Task for this session:
-<describe what you want next, e.g. "Files browser that can navigate folders and open files in the Editor">
-```
+Latest retained platform checks: eight platform checks and five Paint checks
+pass under VMware; docs/validation/RelicProfile.txt records actual frame-start
+intervals (maximum 18.607 ms, so the requested minimum remains unmet). The new
+TinkerOS-derived VMware absolute-pointer driver fixes VNC movement/clicks and
+Paint dragging; QEMU still uses USB tablet input. Normal Once files are restored
+on both development disks. Read the validation record before claiming results.
 
-## Status
+Latest UI pass: read docs/UI-REFINEMENT.md. Real platform framebuffer1920x1080;
+75Hz desktop sample max14.719ms, no intervals above16.667ms, but no guarantee
+under load. Recovery27 checks pass, platform UI6 pass, MP4 media2 pass.
+Only Files and Browser pinned. Native media apps remain in platform Start.
+Recovery pointer driver must install after stock startup mouse reset; verified
+post-reboot. Platform VMware NIC must be PCNet/vlance, not unfinished E1000.
+Image viewer now has clickable controls. Legacy platform file manager still
+uses DolDoc; broader visual redesign and game/media coverage remain open.
 
-v0.4.0 is released. What is done, known issues and what is next:
-`roadmap/README.md`. Host checks:
-`python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py"`.
+Latest sources synced to both platform disks; both VMware guests stopped after
+validation. Import audit:1322 files passed. No ISO produced. Final actual guest
+screenshots:build/shots/platform-image-viewer-final.png,
+platform-video-player-final.png, recovery-games-final.png.

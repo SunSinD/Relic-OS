@@ -1,0 +1,114 @@
+// Clipboard bridge (QEMU guest <-> host) 
+
+U8 *ClipDocGet()
+{//MAlloc'd, never NULL. A line break is a DOCT_NEW_LINE entry and a tab a
+//DOCT_TAB entry; neither carries a tag.
+	CDoc		*doc = sys_clip_doc;
+	Bool		 unlock = DocLock(doc);
+	CDocEntry	*e = doc->head.next;
+	U8			*buf = MAlloc(0x10000);
+	I64			 o = 0, l;
+
+	while (e != doc && o < 0xFF00)
+	{
+		if (e->type_u8 == DOCT_NEW_LINE || e->type_u8 == DOCT_SOFT_NEW_LINE)
+		{
+			buf[o] = '\n';
+			o++;
+		}
+		else if (e->type_u8 == DOCT_TAB)
+		{
+			buf[o] = '\t';
+			o++;
+		}
+		else if (e->de_flags & DOCEF_TAG && e->tag)
+		{
+			l = StrLen(e->tag);
+			if (o + l < 0xFF00)
+			{
+				MemCopy(buf + o, e->tag, l);
+				o += l;
+			}
+		}
+		e = e->next;
+	}
+	buf[o] = 0;
+	if (unlock)
+		DocUnlock(doc);
+	return buf;
+}
+
+U0 ClipDocSet(U8 *text)
+{
+	CDoc	*doc = sys_clip_doc;
+	Bool	 unlock = DocLock(doc);
+	DocReset(doc, TRUE);
+	DocPrint(doc, "%s", text);			// %s passes text literally
+	if (unlock)
+		DocUnlock(doc);
+}
+
+
+U0 ClipOnChange()
+{
+	U8 *g = ClipDocGet();
+
+	if (*g)
+		VSerClipSet(g);
+	Free(g);
+}
+
+U0 ClipFromHost(U8 *text)
+{//text belongs to the caller.
+	if (text && *text)
+		ClipDocSet(text);
+}
+
+public U0 ClipTest()
+{
+	if (!VSerPresent)
+	{
+		VSerRep;
+		"$$RED$$No vdagent channel.$$FG$$\n";
+		"QEMU needs:\n";
+		"  -device virtio-serial-pci\n";
+		"  -chardev qemu-vdagent,id=vd,clipboard=on\n";
+		"  -device virtserialport,chardev=vd,name=com.redhat.spice.0\n";
+		"  -display gtk,clipboard=on\n";
+		return;
+	}
+	VSerRep;
+	"$$GREEN$$vdagent channel open on port %d.$$FG$$\n", VSerPortOf;
+	VSerClipSet("hello-from-zealos");
+	"Published to the host. The bytes move when the host asks for them, so\n";
+	"check the host clipboard in a moment.\n";
+}
+
+public U0 ClipPush()
+{
+	U8 *g = ClipDocGet();
+
+	if (VSerClipSet(g))	"$$GREEN$$Pushed %d bytes to the host.$$FG$$\n", StrLen(g);
+	else				"$$RED$$Push failed (no vdagent channel).$$FG$$\n";
+	Free(g);
+}
+
+public U0 ClipPull()
+{//On demand: may need a second call while the request is outstanding.
+	U8 *h = VSerClipGet;
+
+	if (h)
+	{
+		ClipDocSet(h);
+		"$$GREEN$$Pulled %d bytes into the clipboard (Ctrl+V to paste).$$FG$$\n",
+			StrLen(h);
+		Free(h);
+	}
+	else
+		"$$RED$$Nothing from the host yet (it publishes on demand).$$FG$$\n";
+}
+
+//Unconditional: the port handshake finishes in VSerTask, so VSerPresent is
+//still FALSE here. VSerClipSet refuses until the channel is ready.
+fp_clip_changed   = &ClipOnChange;
+fp_clip_from_host = &ClipFromHost;

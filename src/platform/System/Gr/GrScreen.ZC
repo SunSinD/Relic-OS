@@ -1,0 +1,1185 @@
+#help_index "Graphics/Screen"
+
+U0 GrUpdateTaskODEs(CTask *task)
+{
+	sys_task_being_screen_updated = task;
+	try
+		ODEsUpdate(task);
+	catch
+	{
+		LBts(&task->win_inhibit, WIf_SELF_ODE);
+		"Exception in WinMgr: Update Task ODEs\n";
+		PutExcept;
+		Sleep(3000);
+		LFBFlush;
+	}
+	sys_task_being_screen_updated = NULL;
+}
+
+extern Bool TextColorChar(CTask *task, I64 x, I64 y, I64 d, CColorROPU32 fg, CColorROPU32 bg, Bool allow_border);
+
+U0 GrFlatTitleRow(CTask *task, Bool focused)
+{//Flat truecolor title row painted over the DolDoc border top line. Layout
+//mirrors $LK,"DocBorderNew",A="MN:DocBorderNew"$, keeping the MENU and [X] click zones.
+	I64	 l = task->win_left, r = task->win_right, row = task->win_top - 1;
+	I64	 w = r - l + 1, i, n, tx;
+	CColorROPU32 bar, txt, chip_bg, chip_fg;
+	U8	*menu = "MENU", *close = "[X]", *title = task->task_title;
+
+	if (row < 0 || w < 14)
+		return;
+	//gr.tc_* hold resolved pixs; TextColorChar takes pens, so they go through ColorPix().
+	bar = ColorPix(gr.tc_border_bg);
+	if (focused)
+		txt = ColorPix(gr.tc_border_fg);
+	else
+		txt = ColorPix(gr.tc_border_unfocus_fg);
+	for (i = 0; i < w; i++)
+		TextColorChar(Fs, l + i, row, ' ', txt, bar, TRUE);
+
+	n = StrLen(title);
+	if (n > w - 12)
+		n = w - 12;
+	tx = l + (w - n) / 2;
+	for (i = 0; i < n; i++)
+		TextColorChar(Fs, tx + i, row, title[i], txt, bar, TRUE);
+
+	if (task != sys_task && task != ac.task)
+	{
+		if (focused)
+		{
+			chip_bg = ColorPix(gr.tc_border_fg);
+			chip_fg = ColorPix(gr.tc_border_bg);
+		}
+		else
+		{
+			chip_bg = ColorPix(gr.tc_border_unfocus_fg);
+			chip_fg = ColorPix(gr.tc_border_bg);
+		}
+		for (i = 0; i < 4; i++)
+			TextColorChar(Fs, l + i, row, menu[i], chip_fg, chip_bg, TRUE);
+	}
+	if (task != sys_task)
+	{
+		for (i = 0; i < 3; i++)
+			TextColorChar(Fs, r - 2 + i, row, close[i],
+						  ColorRGB(0xFF, 0xE8, 0xE8), ColorRGB(0xB4, 0x40, 0x48), TRUE);
+	}
+}
+
+U0 GrUpdateTaskWin(CTask *task)
+{ //Draw a win. Only Core0 tasks have a win.
+	CDC		*dc;
+	CD3I64	 saved_scroll;
+	U32		*save_base, *save_fg, *save_bg;
+	Bool	 redirect = task == gr.translucent_task;
+
+	sys_task_being_screen_updated = task;
+	if (redirect)
+	{//Draw this window's text into the private layer, not the shared text_base.
+		save_base = gr.text_base;
+		save_fg   = gr.text_fg;
+		save_bg   = gr.text_bg;
+		gr.text_base = gr.layer_base;
+		gr.text_fg   = gr.layer_fg;
+		gr.text_bg   = gr.layer_bg;
+		MemSetU32(gr.layer_base, 0, TEXT_ROWS * TEXT_COLS);
+	}
+	try
+	{
+		if (!Bt(&task->display_flags, DISPLAYf_NO_BORDER))
+		{
+			if (gr.tc_chrome)
+			{
+				if (task == sys_focus_task)
+					TextBorderColor(Fs, task->win_left, task->win_right, task->win_top, task->win_bottom,
+									gr.tc_border_fg, gr.tc_border_bg, TRUE);
+				else
+					TextBorderColor(Fs, task->win_left, task->win_right, task->win_top, task->win_bottom,
+									gr.tc_border_unfocus_fg, gr.tc_border_bg, FALSE);
+			}
+			else
+				TextBorder(Fs,	task->win_left, task->win_right, task->win_top, task->win_bottom,
+								task->border_attr, task == sys_focus_task);
+		}
+
+		TextRect(task->win_left, task->win_right, task->win_top, task->win_bottom, task->text_attr << 8);
+		if (task == sys_winmgr_task)
+		{
+			if (gr.fp_wall_paper)
+				(*gr.fp_wall_paper)(task);
+		}
+		else if (!(task->win_inhibit & WIF_SELF_DOC))
+			DocUpdateTaskDocs(task);
+		if (gr.tc_chrome && gr.tc_flat_menu &&
+			!Bt(&task->display_flags, DISPLAYf_NO_BORDER))
+			GrFlatTitleRow(task, task == sys_focus_task);
+		if (TaskValidate(task))
+		{
+			if (task->draw_it)
+			{
+				dc = DCAlias(gr.dc2, task);
+				(*task->draw_it)(task, dc);
+				DCDel(dc);
+			}
+			if (TaskValidate(task))
+			{
+				WinScrollNull(task, &saved_scroll);
+				DrawCtrls(task);
+				WinScrollRestore(task, &saved_scroll);
+			}
+		}
+	}
+	catch
+	{
+		if (task != Fs && TaskValidate(task))
+		{
+			LBtr(&task->display_flags, DISPLAYf_SHOW);
+			"Exception in WinMgr: Update Task Win\n";
+			PutExcept;
+			Sleep(3000);
+			LFBFlush;
+		}
+	}
+	if (redirect)
+	{
+		gr.text_base = save_base;
+		gr.text_fg   = save_fg;
+		gr.text_bg   = save_bg;
+	}
+	sys_task_being_screen_updated = NULL;
+}
+
+U0 GrDrawCore0Wins()
+{
+	CTask *task, *task1;
+
+	task1 = task = sys_winmgr_task;
+	do
+	{
+		if (!TaskValidate(task))
+			break;
+		if (Bt(&task->display_flags, DISPLAYf_SHOW) && Bt(gr.win_uncovered_bitmap, task->win_z_num))
+			GrUpdateTaskWin(task);
+		if (!TaskValidate(task))
+			break;
+		task = task->next_task;
+	}
+	while (task != task1);
+}
+
+U0 GrUpdateTasks()
+{//Only called by WinMgr
+	I64		 i;
+	CTask	*task, *task1, *gt = gr.translucent_task;
+
+	try
+	{
+		winmgr.ode_time = 0;
+		if (Bt(&sys_semas[SEMA_UPDATE_WIN_Z_BUF], 0))
+			WinZBufUpdate;
+
+		if (gt && TaskValidate(gt) && Bt(&gt->display_flags, DISPLAYf_SHOW))
+		{//Background is drawn first with the translucent window hidden; that window
+		//then draws alone into its private layer.
+			LBtr(&gt->display_flags, DISPLAYf_SHOW);
+			WinZBufUpdate;
+			GrDrawCore0Wins;
+			LBts(&gt->display_flags, DISPLAYf_SHOW);
+			WinZBufUpdate;
+			if (TaskValidate(gt))
+				GrUpdateTaskWin(gt);
+		}
+		else
+			GrDrawCore0Wins;
+
+		for (i = 0; i < mp_count; i++)
+		{ //Loop through all cores.
+			task1 = task = cpu_structs[i].executive_task;
+			do
+			{
+				if (!TaskValidate(task))
+					break;
+				GrUpdateTaskODEs(task);
+				if (!TaskValidate(task))
+					break;
+				task = task->next_task;
+			}
+			while (task != task1);
+		}
+	}
+	catch
+	{
+		PutExcept(FALSE);
+		Debug("Exception in WinMgr");
+	}
+	winmgr.last_ode_time = winmgr.ode_time;
+	ode_alloced_factor = LowPass1(0.1, ode_alloced_factor, Clamp(Gs->idle_factor - 0.1, 0.2, 0.8), 1 / winmgr.fps);
+	sys_task_being_screen_updated = NULL;
+}
+
+U0 GrFixZoomScale()
+{
+	gr.screen_zoom = ClampI64(gr.screen_zoom, 1, GR_SCREEN_ZOOM_MAX);
+	if (gr.screen_zoom == 1)
+	{
+		gr.sx = 0;
+		gr.sy = 0;
+	}
+	else
+	{
+		gr.sx = ClampI64(gr.sx, 0, GR_WIDTH  - GR_WIDTH  / gr.screen_zoom);
+		gr.sy = ClampI64(gr.sy, 0, GR_HEIGHT - GR_HEIGHT / gr.screen_zoom);
+	}
+}
+
+public U0 GrScaleZoom(F64 scale)
+{//Multiply zoom factor larger or smaller.
+	F64 s = gr.screen_zoom;
+
+	gr.screen_zoom = gr.screen_zoom * scale;
+	GrFixZoomScale;
+	s /= gr.screen_zoom;
+	mouse.scale.x *= s;
+	mouse.scale.y *= s;
+	mouse.scale.z *= s;
+	mouse.offset.x = mouse.pos.x - (mouse.pos.x - mouse.offset.x) * s;
+	mouse.offset.y = mouse.pos.y - (mouse.pos.y - mouse.offset.y) * s;
+	mouse.offset.z = mouse.pos.z - (mouse.pos.z - mouse.offset.z) * s;
+	gr.sx = mouse.pos.x - GR_WIDTH  >> 1 / gr.screen_zoom;
+	gr.sy = mouse.pos.y - GR_HEIGHT >> 1 / gr.screen_zoom;
+	GrFixZoomScale;
+}
+
+U0 GrZoomInScreen()
+{
+	I64  i, j, k, l;
+	U32 *src, *src2, *dst;
+
+	GrFixZoomScale;
+
+	src = gr.dc2->body + gr.sx + gr.sy * GR_WIDTH;
+	dst = gr.zoomed_dc->body;
+
+	for (i = 0; i < GR_HEIGHT / gr.screen_zoom; i++)
+	{
+		k = gr.screen_zoom;
+		while (k--)
+		{
+			src2 = src;
+			for (l = 0; l < GR_WIDTH / gr.screen_zoom; l++)
+			{
+				for (j = 0; j < gr.screen_zoom - 1; j++)
+					*dst++ = *src2;
+
+				*dst++ = *src2++;
+			}
+		}
+		src += GR_WIDTH;
+	}
+}
+
+U0 GrGlyph32(I64 ch, I64 pen, U32 *dst, I64 width_internal)
+{//ch bits: char in low byte, ATTRF_UNDERLINE honored. Color comes from pen.
+	CFont	*f = text.cur_font;
+	U8		*rows = FontGlyphRows(f, ch);
+	I64		 i, j, b;
+
+	for (i = 0; i < f->height; i++)
+	{
+		b = rows[i * f->row_bytes];
+		if (i == f->height - 1 && ch & ATTRF_UNDERLINE)
+			b = 0xFF;
+		if (b)
+		{
+			for (j = 0; j < f->width; j++)
+				if (b & 1 << j)
+					dst[j] = pen;
+		}
+		dst += width_internal;
+	}
+}
+
+U0 GrUpdateTextBG()
+{
+	U32			*src = gr.text_base, *fg_src, *bg_src, *dst_base = gr.dc2->body, *dst;
+	U64			*d64;
+	I64			 bg, bg2, tc_fg, tc_bg, tmp, row, col, i, j, cur_ch, w1 = gr.dc2->width_internal,
+				 num_rows = TEXT_ROWS, num_cols = TEXT_COLS, x0 = 0, y0 = 0, src_skip = 0;
+	Bool		 blink_flag = Blink;
+
+	if (gr.pan_text_x || gr.hide_col)
+	{
+		gr.pan_text_x = ClampI64(gr.pan_text_x, -7, 7);
+		j = AbsI64(gr.pan_text_x) / FONT_WIDTH + 1;
+		num_cols -= j;
+		if (gr.pan_text_x < 0)
+		{
+			src += j;
+			x0 = FONT_WIDTH * j + gr.pan_text_x;
+		}
+		else
+			x0 = gr.pan_text_x;
+		src_skip = j;
+	}
+	if (gr.pan_text_y || gr.hide_row)
+	{
+		gr.pan_text_y = ClampI64(gr.pan_text_y, -7, 7);
+		j = AbsI64(gr.pan_text_y) / FONT_HEIGHT + 1;
+		num_rows -= j;
+		if (gr.pan_text_y < 0)
+		{
+			src += TEXT_COLS * j;
+			y0 = FONT_HEIGHT * j + gr.pan_text_y;
+		}
+		else
+			y0 = gr.pan_text_y;
+	}
+	if (x0 || y0 || num_rows != TEXT_ROWS || num_cols != TEXT_COLS)
+		MemSetU32(dst_base, gr_palette[BLACK], w1 * gr.dc2->height);
+
+	fg_src = gr.text_fg + (src - gr.text_base);
+	bg_src = gr.text_bg + (src - gr.text_base);
+
+	for (row = 0; row < num_rows; row++)
+	{
+		for (col = 0; col < num_cols; col++)
+		{
+			cur_ch = *src++;
+			tc_fg  = *fg_src++;
+			tc_bg  = *bg_src++;
+			if (cur_ch & ATTRF_TRUE_COLOR)
+			{
+				if (cur_ch & ATTRF_SEL)
+				{
+					tc_fg ^= PIX_RGB_MASK;
+					tc_bg ^= PIX_RGB_MASK;
+				}
+				if (cur_ch & ATTRF_INVERT)
+				{
+					tmp = tc_fg; tc_fg = tc_bg; tc_bg = tmp;
+				}
+				if (cur_ch & ATTRF_BLINK && blink_flag)
+				{
+					tmp = tc_fg; tc_fg = tc_bg; tc_bg = tmp;
+				}
+				bg = tc_bg;
+			}
+			else
+			{
+				if (cur_ch & (ATTRF_SEL | ATTRF_INVERT | ATTRF_BLINK))
+				{
+					if (cur_ch & ATTRF_SEL)
+						cur_ch.u8[1] = cur_ch.u8[1] ^ 0xFF;
+					if (cur_ch & ATTRF_INVERT)
+						cur_ch.u8[1] = cur_ch.u8[1] << 4 + cur_ch.u8[1] >> 4;
+					if (cur_ch & ATTRF_BLINK && blink_flag)
+						cur_ch.u8[1] = cur_ch.u8[1] << 4 + cur_ch.u8[1] >> 4;
+				}
+				bg = gr_palette[cur_ch.u8[1] >> 4];
+			}
+			bg2 = bg | bg << 32;
+			dst = dst_base + (y0 + row * FONT_HEIGHT) * w1 + x0 + col * FONT_WIDTH;
+			for (i = FONT_HEIGHT; i--;)
+			{
+				d64 = dst(U64 *);
+				d64[0] = bg2;
+				d64[1] = bg2;
+				d64[2] = bg2;
+				d64[3] = bg2;
+				dst += w1;
+			}
+		}
+		src	   += src_skip;
+		fg_src += src_skip;
+		bg_src += src_skip;
+	}
+}
+
+U0 GrUpdateTextFG()
+{//See $LK,"TextBase Layer",A="HI:TextBase Layer"$.
+	U32 *src = gr.text_base, *fg_src, *bg_src, *dst_base = gr.dc2->body, *dst,
+		*dst_start = gr.dc2->body, *dst_end;
+	I64  i, j, cur_ch, pen, tc_fg, tc_bg, tmp, w1 = gr.dc2->width_internal,
+		 num_rows = TEXT_ROWS, num_cols = TEXT_COLS, row, col, x0 = 0, y0 = 0, src_skip = 0;
+	Bool blink_flag = Blink;
+
+	dst_end = dst_start + w1 * gr.dc2->height - 7 * w1 - 8;
+
+	if (gr.pan_text_x || gr.hide_col)
+	{
+		gr.pan_text_x = ClampI64(gr.pan_text_x, -7, 7);
+		j = AbsI64(gr.pan_text_x) / FONT_WIDTH + 1;
+		num_cols -= j;
+		if (gr.pan_text_x < 0)
+		{
+			src += j;
+			x0 = FONT_WIDTH * j;
+		}
+		src_skip = j;
+	}
+	if (gr.pan_text_y || gr.hide_row)
+	{
+		gr.pan_text_y = ClampI64(gr.pan_text_y, -7, 7);
+		j = AbsI64(gr.pan_text_y) / FONT_HEIGHT + 1;
+		num_rows -= j;
+		if (gr.pan_text_y < 0)
+		{
+			src += TEXT_COLS * j;
+			y0 = FONT_HEIGHT * j;
+		}
+	}
+
+	fg_src = gr.text_fg + (src - gr.text_base);
+	bg_src = gr.text_bg + (src - gr.text_base);
+
+	for (row = 0; row < num_rows; row++)
+	{
+		for (col = 0; col < num_cols; col++)
+		{
+			cur_ch = *src++;
+			tc_fg  = *fg_src++;
+			tc_bg  = *bg_src++;
+			if (cur_ch & ATTRF_TRUE_COLOR)
+			{
+				if (cur_ch & ATTRF_SEL)
+				{
+					tc_fg ^= PIX_RGB_MASK;
+					tc_bg ^= PIX_RGB_MASK;
+				}
+				if (cur_ch & ATTRF_INVERT)
+				{
+					tmp = tc_fg; tc_fg = tc_bg; tc_bg = tmp;
+				}
+				if (cur_ch & ATTRF_BLINK && blink_flag)
+				{
+					tmp = tc_fg; tc_fg = tc_bg; tc_bg = tmp;
+				}
+				pen = tc_fg;
+			}
+			else
+			{
+				if (cur_ch & (ATTRF_SEL | ATTRF_INVERT | ATTRF_BLINK))
+				{
+					if (cur_ch & ATTRF_SEL)
+						cur_ch.u8[1] = cur_ch.u8[1] ^ 0xFF;
+					if (cur_ch & ATTRF_INVERT)
+						cur_ch.u8[1] = cur_ch.u8[1] << 4 + cur_ch.u8[1] >> 4;
+					if (cur_ch & ATTRF_BLINK && blink_flag)
+						cur_ch.u8[1] = cur_ch.u8[1] << 4 + cur_ch.u8[1] >> 4;
+				}
+				pen = gr_palette[cur_ch.u8[1] & 0xF];
+			}
+			dst = dst_base + (y0 + row * FONT_HEIGHT) * w1 + x0 + col * FONT_WIDTH;
+			if (i = cur_ch.u16[1] & 0x3FF + gr.pan_text_x + gr.pan_text_y << 5)
+			{
+				j = i & 0x1F;
+				if (j & 0x10)
+					j |= ~0x1F;
+				i >>= 5;
+				if (i & 0x10)
+					i |= ~0x1F;
+				i = w1 * i + j;
+				if (dst_start <= dst + i < dst_end)
+					GrGlyph32(cur_ch & (ATTRF_UNDERLINE + 0xFF), pen, dst + i, w1);
+			}
+			else
+				GrGlyph32(cur_ch & (ATTRF_UNDERLINE + 0xFF), pen, dst, w1);
+		}
+		src	   += src_skip;
+		fg_src += src_skip;
+		bg_src += src_skip;
+	}
+}
+
+#help_index "TextBase Layer/Char;Char/TextBase Layer"
+
+public Bool TextColorChar(CTask *task=NULL, I64 x, I64 y, I64 d, CColorROPU32 fg, CColorROPU32 bg, Bool allow_border=FALSE)
+{//d = char in low byte plus optional ATTRF_ flags. fg/bg accept $LK,"ColorRGB",A="MN:ColorRGB"$() pens or
+//0-15 indices. Call from Fs->draw_it(). NULL task means Fs.
+	I64 idx, col, row;
+
+	if (!task)
+		task = Fs;
+	if (TextChar(task, allow_border, x, y, d | ATTRF_TRUE_COLOR))
+	{
+		col = (task->scroll_x / FONT_WIDTH) + x + task->win_left;
+		row = (task->scroll_y / FONT_HEIGHT) + y + task->win_top;
+		idx = row * TEXT_COLS + col;
+		gr.text_fg[idx] = GrColorResolve(fg);
+		gr.text_bg[idx] = GrColorResolve(bg);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+public U0 TextColorLenStr(CTask *task=NULL, I64 x, I64 y, I64 len, I64 attr, CColorROPU32 fg, CColorROPU32 bg, U8 *s)
+{//attr = extra ATTRF_ flags. Call from Fs->draw_it().
+	I64 i;
+
+	if (!task)
+		task = Fs;
+	for (i = 0; i < len; i++)
+		TextColorChar(task, x + i, y, s[i] | attr, fg, bg);
+}
+
+public U0 TextColorPrint(CTask *task=NULL, I64 x, I64 y, CColorROPU32 fg, CColorROPU32 bg, U8 *format, ...)
+{//Call from Fs->draw_it(). fg/bg accept $LK,"ColorRGB",A="MN:ColorRGB"$() pens.
+	U8 *buf = StrPrintJoin(NULL, format, argc, argv);
+
+	if (!task)
+		task = Fs;
+	TextColorLenStr(task, x, y, StrLen(buf), 0, fg, bg, buf);
+	Free(buf);
+}
+
+public U0 TextColorAttrStr(CTask *task=NULL, I64 x, I64 y, I64 len, U32 *attr_arr)
+{//attr_arr entries = char + fg/bg color nibbles + flags (from $LK,"DocHighlight",A="MN:DocHighlight"$). fg maps
+//through gr_syntax_scheme, bg through the palette.
+	I64 i, d, idx, col, row;
+
+	if (!task)
+		task = Fs;
+	for (i = 0; i < len; i++)
+	{
+		d = attr_arr[i];
+		if (TextChar(task, FALSE, x + i, y, d & 0xFFFF00FF | ATTRF_TRUE_COLOR))
+		{
+			col = (task->scroll_x / FONT_WIDTH) + x + i + task->win_left;
+			row = (task->scroll_y / FONT_HEIGHT) + y + task->win_top;
+			idx = row * TEXT_COLS + col;
+			gr.text_fg[idx] = gr_syntax_scheme[d >> 8 & 0xF];
+			gr.text_bg[idx] = gr_palette[d >> 12 & 0xF];
+		}
+	}
+}
+
+#help_index "Graphics/Misc"
+U0 DCBlotColor8(CDC *dc, CDC *img)
+{
+	U32	*src = img->body, *b0 = dc->body;
+	I64  j, k, d0 = img->width_internal * img->height;
+
+	for (k = 0; k < d0; k++)
+	{
+		j = *src++;
+		if (j != PIXF_TRANSPARENT)
+			*b0++ = j;
+		else
+			b0++;
+	}
+}
+
+U0 GrCalcScreenUpdates()
+{
+	U32 *screen, *last_screen = gr.screen_cache;
+	I64  i, j, y, x0, x1, bytes;
+
+	if (gr.screen_zoom == 1)
+		screen = gr.dc2->body;
+	else
+		screen = gr.zoomed_dc->body;
+
+	for (y = 0; y < GR_HEIGHT; y++)
+	{
+		i = y * GR_WIDTH;
+		j = y * sys_framebuffer_pidth;
+
+		x0 = 0;
+		while (x0 < GR_WIDTH && (screen[i + x0] == last_screen[i + x0]))
+			x0++;
+
+		if (x0 < GR_WIDTH)
+		{
+			x1 = GR_WIDTH - 1;
+			while (x1 > x0 && (screen[i + x1] == last_screen[i + x1]))
+				x1--;
+
+				//The framebuffer is write-combining: a sequential span fills whole
+				//64-byte WC buffers, an isolated dword store flushes a partial one.
+			bytes = (x1 - x0 + 1) * sizeof(U32);
+			MemCopy(&text.raw_screen[j + x0], &screen[i + x0], bytes);
+			MemCopy(&text.fb_alias [j + x0], &screen[i + x0], bytes);
+		}
+	}
+	MemCopy(gr.screen_cache, screen, GR_WIDTH * GR_HEIGHT * sizeof(U32));
+}
+
+U0 GrUpdateScreen32()
+{
+	if (gr.screen_zoom != 1)
+		GrZoomInScreen;
+
+	GrCalcScreenUpdates;
+
+	if (LBtr(&sys_semas[SEMA_FLUSH_VBE_IMAGE], 0))
+		MemCopy(text.fb_alias, text.raw_screen, text.buffer_size);
+}
+
+#help_index "Graphics/Screen;Graphics/Color"
+
+public CDC *GrOverlayNew(I64 w, I64 h, I64 x=0, I64 y=0, I64 alpha=255)
+{//Truecolor overlay DC composited over the finished screen at (x,y), blended at
+//alpha 0..255. TRANSPARENT areas show through. NULL if all slots are used.
+	I64  n;
+	CDC *dc;
+
+	for (n = 0; n < GR_OVERLAY_MAX; n++)
+		if (!gr.overlay_dc[n])
+		{
+			dc = DCNew(w, h);
+			DCFill(dc, TRANSPARENT);
+			gr.overlay_x[n]		= x;
+			gr.overlay_y[n]		= y;
+			gr.overlay_alpha[n]	= alpha;
+			gr.overlay_dc[n]	= dc; //Set last: the compositor runs on another core.
+			return dc;
+		}
+
+	return NULL;
+}
+
+public U0 GrOverlaySet(CDC *dc, I64 x, I64 y, I64 alpha=255)
+{
+	I64 n;
+
+	for (n = 0; n < GR_OVERLAY_MAX; n++)
+		if (gr.overlay_dc[n] == dc)
+		{
+			gr.overlay_x[n]		= x;
+			gr.overlay_y[n]		= y;
+			gr.overlay_alpha[n]	= alpha;
+		}
+}
+
+public U0 GrOverlayDel(CDC *dc)
+{
+	I64 n;
+
+	for (n = 0; n < GR_OVERLAY_MAX; n++)
+		if (gr.overlay_dc[n] == dc)
+		{
+			gr.overlay_dc[n] = NULL;
+			DCDel(dc);
+		}
+}
+
+U0 GrOverlayComposite()
+{
+	I64  n, ox, oy, sx, sy, a, ia, w, h, wi, sr, sg, sb, rr, gg, bb, d,
+		 scr_w = GR_WIDTH, scr_h = GR_HEIGHT, scr_wi = gr.dc2->width_internal;
+	U32 *dst_base = gr.dc2->body, *ob, src;
+	CDC *odc;
+
+	for (n = 0; n < GR_OVERLAY_MAX; n++)
+	{
+		odc = gr.overlay_dc[n];
+		if (odc && (a = gr.overlay_alpha[n]) > 0)
+		{
+			if (a > 255)
+				a = 255;
+			ia = 255 - a;
+			w  = odc->width;
+			h  = odc->height;
+			wi = odc->width_internal;
+			for (oy = 0; oy < h; oy++)
+			{
+				sy = gr.overlay_y[n] + oy;
+				if (0 <= sy < scr_h)
+				{
+					ob = odc->body + oy * wi;
+					for (ox = 0; ox < w; ox++)
+					{
+						sx = gr.overlay_x[n] + ox;
+						if (0 <= sx < scr_w)
+						{
+							src = ob[ox];
+							if (src != PIXF_TRANSPARENT)
+							{
+								d  = dst_base[sy * scr_wi + sx];
+								sr = src >> 16 & 0xFF;
+								sg = src >> 8  & 0xFF;
+								sb = src	   & 0xFF;
+								rr = (sr * a + (d >> 16 & 0xFF) * ia) / 255;
+								gg = (sg * a + (d >> 8  & 0xFF) * ia) / 255;
+								bb = (sb * a + (d	    & 0xFF) * ia) / 255;
+								dst_base[sy * scr_wi + sx] = rr << 16 | gg << 8 | bb;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+#help_index "Graphics/Screen;Windows"
+
+#help_index "Graphics/Screen;Windows"
+
+//Frosted glass. Separable box blur with running sums, O(1) per pixel in the
+//radius: 2.4ms for a 768x416 window at radius 6 to 24, against 0.65ms for the
+//plain alpha blend.
+
+#define GR_BLUR_RECIP_MAX	2048
+I64 gr_blur_recip[GR_BLUR_RECIP_MAX];
+
+U0 GrBlurInit()
+{//Reciprocal table turns the per-pixel divide into a multiply and a shift. Also
+//clears the scratch pointers: JIT globals are not zeroed and Free() would get garbage.
+	I64 i;
+
+	gr.blur_radius = 0;
+	gr.blur_w      = 0;
+	gr.blur_h      = 0;
+	gr.blur_buf    = NULL;
+	gr.blur_tmp    = NULL;
+	gr_blur_recip[0] = 0;
+	for (i = 1; i < GR_BLUR_RECIP_MAX; i++)
+		gr_blur_recip[i] = (1 << 16) / i;
+}
+
+GrBlurInit;
+
+U0 GrBlurH(U32 *src, U32 *dst, I64 w, I64 h, I64 r)
+{
+	I64	 y, x, sr, sg, sb, cnt, i, c, x0, x1, rc;
+	U32	*s, *d;
+
+	for (y = 0; y < h; y++)
+	{
+		s = src + y * w;
+		d = dst + y * w;
+		sr  = 0;
+		sg  = 0;
+		sb  = 0;
+		cnt = 0;
+		for (i = 0; i <= r && i < w; i++)
+		{
+			c = s[i];
+			sr += c >> 16 & 0xFF;
+			sg += c >> 8 & 0xFF;
+			sb += c & 0xFF;
+			cnt++;
+		}
+		for (x = 0; x < w; x++)
+		{
+			rc = gr_blur_recip[cnt];
+			d[x] = ((sr * rc) >> 16) << 16 | ((sg * rc) >> 16) << 8 |
+				   ((sb * rc) >> 16);
+			x1 = x + r + 1;
+			if (x1 < w)
+			{
+				c = s[x1];
+				sr += c >> 16 & 0xFF;
+				sg += c >> 8 & 0xFF;
+				sb += c & 0xFF;
+				cnt++;
+			}
+			x0 = x - r;
+			if (x0 >= 0)
+			{
+				c = s[x0];
+				sr -= c >> 16 & 0xFF;
+				sg -= c >> 8 & 0xFF;
+				sb -= c & 0xFF;
+				cnt--;
+			}
+		}
+	}
+}
+
+U0 GrBlurV(U32 *src, U32 *dst, I64 w, I64 h, I64 r)
+{
+	I64 x, y, sr, sg, sb, cnt, i, c, y0, y1, rc;
+
+	for (x = 0; x < w; x++)
+	{
+		sr  = 0;
+		sg  = 0;
+		sb  = 0;
+		cnt = 0;
+		for (i = 0; i <= r && i < h; i++)
+		{
+			c = src[i * w + x];
+			sr += c >> 16 & 0xFF;
+			sg += c >> 8 & 0xFF;
+			sb += c & 0xFF;
+			cnt++;
+		}
+		for (y = 0; y < h; y++)
+		{
+			rc = gr_blur_recip[cnt];
+			dst[y * w + x] = ((sr * rc) >> 16) << 16 | ((sg * rc) >> 16) << 8 |
+							 ((sb * rc) >> 16);
+			y1 = y + r + 1;
+			if (y1 < h)
+			{
+				c = src[y1 * w + x];
+				sr += c >> 16 & 0xFF;
+				sg += c >> 8 & 0xFF;
+				sb += c & 0xFF;
+				cnt++;
+			}
+			y0 = y - r;
+			if (y0 >= 0)
+			{
+				c = src[y0 * w + x];
+				sr -= c >> 16 & 0xFF;
+				sg -= c >> 8 & 0xFF;
+				sb -= c & 0xFF;
+				cnt--;
+			}
+		}
+	}
+}
+
+U32 *GrGlassBackdrop(U32 *dst_base, I64 w1, I64 bx, I64 by, I64 bw, I64 bh, CDC *wall)
+{//dc2 was drawn with the glass window hidden, so it already holds the backdrop.
+//NULL if the buffers cannot be had.
+	I64	 x, y, d, sx, sy;
+	U32	*row, *wall_row;
+
+	if (bw < 1 || bh < 1)
+		return NULL;
+	if (gr.blur_w != bw || gr.blur_h != bh || !gr.blur_buf || !gr.blur_tmp)
+	{
+		if (gr.blur_buf)
+			Free(gr.blur_buf);
+		if (gr.blur_tmp)
+			Free(gr.blur_tmp);
+		gr.blur_buf = MAlloc(bw * bh * sizeof(U32), sys_task);
+		gr.blur_tmp = MAlloc(bw * bh * sizeof(U32), sys_task);
+		gr.blur_w   = bw;
+		gr.blur_h   = bh;
+	}
+	if (!gr.blur_buf || !gr.blur_tmp)
+		return NULL;
+
+	for (y = 0; y < bh; y++)
+	{
+		sy  = by + y;
+		row = gr.blur_buf + y * bw;
+		wall_row = NULL;
+		if (wall && sy < wall->height)
+			wall_row = wall->body + sy * wall->width_internal;
+		for (x = 0; x < bw; x++)
+		{
+			sx = bx + x;
+			d  = dst_base[sy * w1 + sx];
+			if (!d && wall_row && sx < wall->width)
+				d = wall_row[sx];
+			row[x] = d;
+		}
+	}
+	GrBlurH(gr.blur_buf, gr.blur_tmp, bw, bh, gr.blur_radius);
+	GrBlurV(gr.blur_tmp, gr.blur_buf, bw, bh, gr.blur_radius);
+
+	return gr.blur_buf;
+}
+
+public U0 GlassBlur(I64 radius)
+{//0 = off.
+	gr.blur_radius = ClampI64(radius, 0, 64);
+}
+
+#define GR_LAYER_CTRLS	8	//ctrl rects spared from the opaque border fill
+
+U0 GrWinLayerComposite()
+{//The cell background blends at translucent_alpha; glyph text stays opaque.
+	CTask *t = gr.translucent_task;
+	I64  cl, cr, ct, cb, cx, cy, idx, cell, ch, fg, bg, a, ia,
+		 px, py, brow, sy, sx, d, br, bgc, bl, bx, by, bw, bh,
+		 n_rect, ri, cell_ctrl, ccx, ccy, w1 = gr.dc2->width_internal;
+	I64  rl[GR_LAYER_CTRLS], rr[GR_LAYER_CTRLS];
+	I64  rt[GR_LAYER_CTRLS], rb[GR_LAYER_CTRLS];
+	CFont *gf = text.cur_font;
+	U8	  *rows;
+	I64	   attr_tmp;
+	Bool blink_flag = Blink;
+	Bool edge, in_ctrl;
+	CCtrl *c;
+	U32 *dst_base = gr.dc2->body, *dstp, *wall_row, *blur;
+	CDC *wall = gr.translucent_bg;
+
+	if (!t || !TaskValidate(t) || !Bt(&t->display_flags, DISPLAYf_SHOW))
+		return;
+	a = gr.translucent_alpha;
+	if (a <= 0)
+		return;
+	if (a > 255)
+		a = 255;
+	ia = 255 - a;
+
+	cl = t->win_left   - 1;
+	cr = t->win_right  + 1;
+	ct = t->win_top    - 1;
+	cb = t->win_bottom + 1;
+	if (cl < 0)
+		cl = 0;
+	if (ct < 0)
+		ct = 0;
+	if (cr > TEXT_COLS - 1)
+		cr = TEXT_COLS - 1;
+	if (cb > TEXT_ROWS - 1)
+		cb = TEXT_ROWS - 1;
+
+	bx = cl * FONT_WIDTH;
+	by = ct * FONT_HEIGHT;
+	bw = (cr - cl + 1) * FONT_WIDTH;
+	bh = (cb - ct + 1) * FONT_HEIGHT;
+	blur = NULL;
+	if (gr.blur_radius > 0)
+		blur = GrGlassBackdrop(dst_base, w1, bx, by, bw, bh, wall);
+
+	//Ctrls draw pixels into dc2 and the scroll bars sit in border cells, which composite opaquely below.
+	n_rect = 0;
+	c = t->next_ctrl;
+	while (c != &t->next_ctrl && n_rect < GR_LAYER_CTRLS)
+	{
+		if (c->flags & CTRLF_SHOW)
+		{
+			rl[n_rect] = c->screen_left;
+			rr[n_rect] = c->screen_right;
+			rt[n_rect] = c->screen_top;
+			rb[n_rect] = c->screen_bottom;
+			n_rect++;
+		}
+		c = c->next;
+	}
+
+	for (cy = ct; cy <= cb; cy++)
+	{
+		for (cx = cl; cx <= cr; cx++)
+		{
+			idx  = cy * TEXT_COLS + cx;
+			cell = gr.layer_base[idx];
+			if (!cell)
+				goto layer_next_cell; //Cell not owned by this window: leave dc2.
+			if (cell & ATTRF_TRUE_COLOR)
+			{
+				fg = gr.layer_fg[idx];
+				bg = gr.layer_bg[idx];
+				if (cell & ATTRF_SEL)
+				{
+					fg ^= PIX_RGB_MASK;
+					bg ^= PIX_RGB_MASK;
+				}
+				if (cell & ATTRF_INVERT)
+				{
+					attr_tmp = fg; fg = bg; bg = attr_tmp;
+				}
+				if (cell & ATTRF_BLINK && blink_flag)
+				{
+					attr_tmp = fg; fg = bg; bg = attr_tmp;
+				}
+			}
+			else
+			{
+				if (cell & ATTRF_SEL)
+					cell.u8[1] = cell.u8[1] ^ 0xFF;
+				if (cell & ATTRF_INVERT)
+					cell.u8[1] = cell.u8[1] << 4 + cell.u8[1] >> 4;
+				if (cell & ATTRF_BLINK && blink_flag)
+					cell.u8[1] = cell.u8[1] << 4 + cell.u8[1] >> 4;
+				fg = gr_palette[cell.u8[1] & 0xF];
+				bg = gr_palette[cell.u8[1] >> 4];
+			}
+			ch	 = cell & 0xFF;
+			edge = cx < t->win_left || cx > t->win_right ||
+				   cy < t->win_top  || cy > t->win_bottom;
+			//Most cells touch no ctrl: test the cell box once, and only walk
+			//pixels for the few that straddle a ctrl edge.
+			cell_ctrl = 0;
+			ccx = cx * FONT_WIDTH;
+			ccy = cy * FONT_HEIGHT;
+			for (ri = 0; ri < n_rect; ri++)
+				if (rl[ri] <= ccx + FONT_WIDTH - 1 && rr[ri] >= ccx &&
+					rt[ri] <= ccy + FONT_HEIGHT - 1 && rb[ri] >= ccy)
+				{
+					cell_ctrl = 1;
+					if (rl[ri] <= ccx && rr[ri] >= ccx + FONT_WIDTH - 1 &&
+						rt[ri] <= ccy && rb[ri] >= ccy + FONT_HEIGHT - 1)
+						cell_ctrl = 2;	//fully owned, nothing to blend
+				}
+			if (cell_ctrl == 2)
+				goto layer_next_cell;
+			rows = FontGlyphRows(gf, ch);
+			for (py = 0; py < FONT_HEIGHT; py++)
+			{
+				brow = rows[py * gf->row_bytes];
+				if (py == gf->height - 1 && cell & ATTRF_UNDERLINE)
+					brow = 0xFF;
+				sy	 = cy * FONT_HEIGHT + py;
+				dstp = dst_base + sy * w1 + cx * FONT_WIDTH;
+				wall_row = NULL;
+				if (wall && sy < wall->height)
+					wall_row = wall->body + sy * wall->width_internal;
+				for (px = 0; px < FONT_WIDTH; px++)
+				{
+					sx = cx * FONT_WIDTH + px;
+//A ctrl owns every pixel of its rect, glyph included: the scroll bar occupies
+//border cells whose foreground would otherwise paint over the knob, and a
+//window that draws through a ctrl keeps those pixels while the cells around
+//them still take the blend.
+					in_ctrl = FALSE;
+					if (cell_ctrl)
+						for (ri = 0; ri < n_rect; ri++)
+							if (rl[ri] <= sx <= rr[ri] && rt[ri] <= sy <= rb[ri])
+								in_ctrl = TRUE;
+					if (in_ctrl)
+						goto layer_next_px;
+					if (brow & 1 << px)
+						dstp[px] = fg;
+					else if (edge)
+						dstp[px] = bg;
+					else
+					{
+						//Task graphics reached dc2 before this pass, so the
+						//glass would replace them with the backdrop.
+						if (gr.dc->body[sy * gr.dc->width_internal + sx] !=
+							PIXF_TRANSPARENT)
+							goto layer_next_px;
+						if (blur)
+							d = blur[(sy - by) * bw + (sx - bx)];
+						else
+						{
+							d = dstp[px];
+							if (!d && wall_row && sx < wall->width)
+								d = wall_row[sx];
+						}
+						br	= ((bg >> 16 & 0xFF) * a + (d >> 16 & 0xFF) * ia) / 255;
+						bgc	= ((bg >> 8  & 0xFF) * a + (d >> 8  & 0xFF) * ia) / 255;
+						bl	= ((bg       & 0xFF) * a + (d       & 0xFF) * ia) / 255;
+						dstp[px] = br << 16 | bgc << 8 | bl;
+					}
+layer_next_px:;
+				}
+			}
+layer_next_cell:;
+		}
+	}
+}
+
+public U0 WinTranslucent(CTask *task=NULL, I64 alpha=190)
+{//alpha 0..255. NULL task means Fs.
+	if (!task)
+		task = Fs;
+	gr.translucent_alpha = alpha;
+	gr.translucent_task	 = task; //Set last.
+}
+
+public U0 WinOpaque()
+{
+	gr.translucent_task = NULL;
+}
+
+//Per-stage cost of one composed frame, in TSC ticks.
+#define GRPROF_STAGES	8
+
+U8 *gr_prof_stage_names = "TextBG\0TextFG\0Tasks\0BlotColor8\0WinLayer\0"
+						  "Overlay\0FinalUpdate\0Blit32";
+I64 gr_prof_tsc[GRPROF_STAGES];
+I64 gr_prof_frames = 0;
+I64 gr_prof_last_tick, gr_prof_max_delta, gr_prof_sum_delta, gr_prof_late;
+
+I64 GrProfMark(I64 stage, I64 t0)
+{//ZealC has no macros with arguments, so this is a call.
+	I64 t1 = TSCGet;
+
+	gr_prof_tsc[stage] += t1 - t0;
+
+	return t1;
+}
+
+public U0 GrProfReset()
+{
+	PUSHFD
+	CLI
+	MemSet(gr_prof_tsc, 0, sizeof(gr_prof_tsc));
+	gr_prof_frames = 0;
+	gr_prof_last_tick = gr_prof_max_delta = gr_prof_sum_delta = gr_prof_late = 0;
+	POPFD
+}
+
+public U0 GrProfRep()
+{
+	I64 i, total = 0, frames, max_delta, sum_delta, late;
+	I64 ticks[GRPROF_STAGES];
+
+	PUSHFD
+	CLI
+	MemCopy(ticks, gr_prof_tsc, sizeof(ticks));
+	frames = gr_prof_frames;
+	max_delta = gr_prof_max_delta;
+	sum_delta = gr_prof_sum_delta;
+	late = gr_prof_late;
+	POPFD
+	if (!frames || !counts.time_stamp_freq)
+	{
+		"No frames sampled.\n";
+		return;
+	}
+	for (i = 0; i < GRPROF_STAGES; i++)
+		total += ticks[i];
+	if (!total) return;
+
+	"\n%d frames, %6.3f ms/frame composed, %5.1f fps ceiling\n\n",
+		frames, total * 1000.0 / counts.time_stamp_freq / frames,
+		ToF64(counts.time_stamp_freq) * frames / total;
+	if (frames > 1)
+		"Frame starts: avg %.3f ms, max %.3f ms, %d over 16.667 ms\n\n",
+			sum_delta * 1000.0 / counts.time_stamp_freq / (frames - 1),
+			max_delta * 1000.0 / counts.time_stamp_freq, late;
+
+	"stage                  ms      pct\n";
+	for (i = 0; i < GRPROF_STAGES; i++)
+		"%-16tz %8.3f %8.1f\n", i, gr_prof_stage_names,
+			ticks[i] * 1000.0 / counts.time_stamp_freq / frames,
+			ticks[i] * 100.0 / total;
+}
+
+U0 GrUpdateScreen()
+{//Called by the Window Manager $LK,"HERE",A="FF:::/System/WinMgr.ZC,GrUpdateScreen"$, 30 times a second.
+	CDC *dc;
+	I64	 t0, delta;
+
+	if (text.is_fb_busy)
+		return;
+
+	t0 = TSCGet;
+	if (gr_prof_last_tick)
+	{
+		delta = t0 - gr_prof_last_tick;
+		gr_prof_sum_delta += delta;
+		if (delta > gr_prof_max_delta) gr_prof_max_delta = delta;
+		if (delta > counts.time_stamp_freq / 60) gr_prof_late++;
+	}
+	gr_prof_last_tick = t0;
+	GrUpdateTextBG;
+	t0 = GrProfMark(0, t0);
+	GrUpdateTextFG;
+	t0 = GrProfMark(1, t0);
+	GrUpdateTasks;
+	t0 = GrProfMark(2, t0);
+	DCBlotColor8(gr.dc2, gr.dc);
+	t0 = GrProfMark(3, t0);
+
+	GrWinLayerComposite;
+	t0 = GrProfMark(4, t0);
+	GrOverlayComposite;
+	t0 = GrProfMark(5, t0);
+
+	dc = DCAlias(gr.dc2, Fs);
+	dc->flags |= DCF_ON_TOP;
+	if (gr.fp_final_screen_update)
+		(*gr.fp_final_screen_update)(dc);
+	DCDel(dc);
+	t0 = GrProfMark(6, t0);
+
+	GrUpdateScreen32;
+	GrProfMark(7, t0);
+
+	gr_prof_frames++;
+}

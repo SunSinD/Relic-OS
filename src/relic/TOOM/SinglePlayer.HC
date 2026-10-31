@@ -5,7 +5,7 @@
 // ExeFile("SinglePlayer.HC") executes top-level statements directly, so
 // the loop starts as soon as DOOM finishes compiling.  Wrapping this in
 // `U0 TOOMStart()` would make ExeFile only DEFINE the function and never
-// call it — DOOM would compile and immediately exit, leaving the desktop
+// call it: DOOM would compile and immediately exit, leaving the desktop
 // frozen on a blank screen.
 WinBorder(OFF);
 WinMax;
@@ -21,7 +21,7 @@ U64 r;
 CDC *title=GetGrLump("TITLEPIC");
 TOOMChromeOff;
 // Relic OS: RelicDoomBegin sets draw_it=&DrawDesktop (desktop heap).
-// Do not assign TOOMDrawIt here — ExeFile heap draw_it can fail over DolDoc.
+// Do not assign TOOMDrawIt here: ExeFile heap draw_it can fail over DolDoc.
 DocClear;
 while(TRUE) {
   winmgr.show_menu=FALSE;

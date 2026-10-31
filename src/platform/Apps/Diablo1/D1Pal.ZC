@@ -1,0 +1,135 @@
+// 256-color palette, fades
+//
+// .pal: 768 bytes, 256 RGB triples. Kept expanded to 0x00RRGGBB for the blit.
+
+#define D1PAL_COLORS	256
+
+U8	 d1_pal[D1PAL_COLORS * 3];
+U32	 d1_argb[D1PAL_COLORS];
+I64	 d1_fade_level = 256;			//0 = black, 256 = full
+I64	 d1_gamma = 100;		//30..100, 100 = identity
+Bool d1_pal_loaded = FALSE;
+I64	 d1_pal_serial = 0;		//caches key on this
+
+//palette.cpp ApplyGamma: out = 255 * (v/255)^(gamma/100); exponent < 1 brightens
+U8	d1_gamma_lut[256];
+I64 d1_gamma_lut_for = -1;
+
+U0 D1GammaLutBuild()
+{
+	I64 i;
+	F64 e = d1_gamma / 100.0;
+
+	for (i = 0; i < 256; i++)
+		d1_gamma_lut[i] = ToI64(Pow(i / 255.0, e) * 255.0);
+	d1_gamma_lut_for = d1_gamma;
+}
+
+U0 D1PalExpand()
+{//palette.cpp ApplyGamma then SetFadeLevel compose order
+	I64 i;
+	I64 r;
+	I64 g;
+	I64 b;
+
+	if (d1_gamma_lut_for != d1_gamma)
+		D1GammaLutBuild;
+	for (i = 0; i < D1PAL_COLORS; i++)
+	{
+		r = (d1_gamma_lut[d1_pal[i * 3]]     * d1_fade_level) >> 8;
+		g = (d1_gamma_lut[d1_pal[i * 3 + 1]] * d1_fade_level) >> 8;
+		b = (d1_gamma_lut[d1_pal[i * 3 + 2]] * d1_fade_level) >> 8;
+		if (r > 255) r = 255;
+		if (g > 255) g = 255;
+		if (b > 255) b = 255;
+		d1_argb[i] = (r << 16) | (g << 8) | b;
+	}
+}
+
+U0 D1PalSetRaw(U8 *rgb768)
+{
+	MemCopy(d1_pal, rgb768, D1PAL_COLORS * 3);
+	d1_pal_loaded = TRUE;
+	d1_pal_serial++;
+	D1PalExpand;
+}
+
+Bool D1PalLoad(U8 *name)
+{
+	I64	 size = 0;
+	U8	*p    = D1MpqRead(name, &size);
+
+	if (!p || size < D1PAL_COLORS * 3)
+	{
+		"D1Pal: %s missing or short\n", name;
+		if (p)
+			Free(p);
+		return FALSE;
+	}
+	D1PalSetRaw(p);
+	Free(p);
+	return TRUE;
+}
+
+U0 D1PalFadeLevel(I64 level)
+{
+	if (level < 0)
+		level = 0;
+	if (level > 256)
+		level = 256;
+	d1_fade_level = level;
+	D1PalExpand;
+}
+
+U0 D1PalGammaSet(I64 g)
+{
+	if (g < 30)
+		g = 30;
+	if (g > 100)
+		g = 100;
+	d1_gamma = g;
+	D1PalExpand;
+}
+
+U32 D1PalColor(I64 index)
+{
+	return d1_argb[index & 255];
+}
+
+I64 D1PalBrightest()
+{
+	I64 best   = 0;
+	I64 best_v = -1;
+	I64 i;
+	I64 v;
+
+	for (i = 0; i < D1PAL_COLORS; i++)
+	{
+		v = d1_pal[i * 3] + d1_pal[i * 3 + 1] + d1_pal[i * 3 + 2];
+		if (v > best_v)
+		{
+			best_v = v;
+			best   = i;
+		}
+	}
+	return best;
+}
+
+I64 D1PalReddest()
+{
+	I64 best   = 0;
+	I64 best_v = -0x10000;
+	I64 i;
+	I64 v;
+
+	for (i = 0; i < D1PAL_COLORS; i++)
+	{
+		v = 2 * d1_pal[i * 3] - d1_pal[i * 3 + 1] - d1_pal[i * 3 + 2];
+		if (v > best_v)
+		{
+			best_v = v;
+			best   = i;
+		}
+	}
+	return best;
+}

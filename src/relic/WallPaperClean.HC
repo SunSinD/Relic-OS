@@ -5,7 +5,7 @@ class CWallPaperGlbls
   U8 top_line[STR_LEN];
 } *wall=CAlloc(sizeof(CWallPaperGlbls));
 
-// Apply dark palette at Adam boot — kills all white before any window appears
+// Apply dark palette at Adam boot: kills all white before any window appears
 U0 RelicEarlyDarkPalette()
 {
   CBGR48 pal[COLORS_NUM];
@@ -58,7 +58,7 @@ U0 WallPaper(CTask *_task)
   if (!(winmgr.updates&31) || !*wall->top_line) {
     Date2Struct(&ds,Now+local_time_offset);
     StrPrint(wall->top_line,
-          "RelicOS V0.4.0 %3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf",
+          "RelicOS V0.5.0 %3tZ %02d/%02d %02d:%02d:%02d FPS:%2tf",
           ds.day_of_week,"ST_DAYS_OF_WEEK",ds.mon,ds.day_of_mon,
           ds.hour,ds.min,ds.sec,winmgr.fps);
   }

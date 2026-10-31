@@ -1,0 +1,357 @@
+// .dem playback and record.
+//
+// a demo is a recorded server-to-client stream. ASCII cd track + newline,
+// then repeated to EOF:
+//
+//     I32   message length
+//     F32   viewangles[3]
+//     U8    data[length]        one server message, byte for byte
+//
+// the normal client parser fed from a file instead of a socket, as
+// CL_ReadDemoMessage does. record writes the same layout; a mid-session record
+// omits signon and will not load a map on play.
+
+#define HLDEMO_MAX_NAME	64
+#define HLDEMO_BUF_START	(256 * 1024)
+
+
+U8	*hl_demo_data	= NULL;
+I64	 hl_demo_size	= 0;
+I64	 hl_demo_pos		= 0;
+Bool hl_demo_playing	= FALSE;
+Bool hl_demo_loop	= FALSE;
+I64	 hl_demo_track	= 0;
+F64	 hl_demo_angles[3];
+
+F64	 hl_demo_clock	= 0.0;
+F64	 hl_demo_last_t	= 0.0;
+Bool hl_demo_timed	= FALSE;
+U8	 hl_demo_name[HLDEMO_MAX_NAME];
+
+U8 *hl_demo_loop_names[3];
+I64 hl_demo_loop_index = 0;
+
+
+Bool	 hl_demo_recording	= FALSE;
+U8		*hl_demo_rec_buf	= NULL;
+I64		 hl_demo_rec_cap	= 0;
+I64		 hl_demo_rec_len	= 0;
+U8		 hl_demo_rec_name[HLDEMO_MAX_NAME];
+F64		 hl_demo_rec_angles[3];
+
+#define HLClientMode	(hl_demo_playing || (hl_udp_ready && !hl_udp_server))
+
+U0 HLDemoInit()
+{
+	hl_demo_data       = NULL;
+	hl_demo_size       = 0;
+	hl_demo_pos        = 0;
+	hl_demo_playing    = FALSE;
+	hl_demo_loop       = FALSE;
+	hl_demo_track      = 0;
+	hl_demo_name[0]    = 0;
+	hl_demo_loop_index = 0;
+	hl_demo_clock      = 0.0;
+	hl_demo_last_t     = 0.0;
+	hl_demo_timed      = FALSE;
+
+	HLVecSet(hl_demo_angles, 0.0, 0.0, 0.0);
+
+	hl_demo_loop_names[0] = "demo1.dem";
+	hl_demo_loop_names[1] = "demo2.dem";
+	hl_demo_loop_names[2] = "demo3.dem";
+
+	hl_demo_recording = FALSE;
+	hl_demo_rec_buf   = NULL;
+	hl_demo_rec_cap   = 0;
+	hl_demo_rec_len   = 0;
+	hl_demo_rec_name[0] = 0;
+	HLVecSet(hl_demo_rec_angles, 0.0, 0.0, 0.0);
+}
+
+U0 HLDemoStop()
+{
+	if (hl_demo_data)
+		Free(hl_demo_data);
+
+	hl_demo_data    = NULL;
+	hl_demo_size    = 0;
+	hl_demo_pos     = 0;
+	hl_demo_playing = FALSE;
+}
+
+U0 HLDemoRecNeed(I64 n)
+{
+	U8	*nb;
+	I64	 cap;
+
+	if (!hl_demo_recording || !hl_demo_rec_buf)
+		return;
+	if (hl_demo_rec_len + n <= hl_demo_rec_cap)
+		return;
+
+	cap = hl_demo_rec_cap;
+	if (cap < HLDEMO_BUF_START)
+		cap = HLDEMO_BUF_START;
+	while (cap < hl_demo_rec_len + n)
+		cap = cap * 2;
+
+	nb = MAlloc(cap);
+	if (!nb)
+	{
+		HLLog("demo: record buffer grow failed\n");
+		HLLogFlush;
+		return;
+	}
+
+	if (hl_demo_rec_len > 0)
+		MemCopy(nb, hl_demo_rec_buf, hl_demo_rec_len);
+	Free(hl_demo_rec_buf);
+	hl_demo_rec_buf = nb;
+	hl_demo_rec_cap = cap;
+}
+
+U0 HLDemoRecPutI32(I64 v)
+{
+	U8 *p;
+
+	HLDemoRecNeed(4);
+	if (!hl_demo_rec_buf || hl_demo_rec_len + 4 > hl_demo_rec_cap)
+		return;
+
+	p = hl_demo_rec_buf + hl_demo_rec_len;
+	p[0] = v & 0xFF;
+	p[1] = (v >> 8) & 0xFF;
+	p[2] = (v >> 16) & 0xFF;
+	p[3] = (v >> 24) & 0xFF;
+	hl_demo_rec_len += 4;
+}
+
+U0 HLDemoRecPutF32(F64 f)
+{
+	U32 bits;
+	U8	*p;
+
+	HLDemoRecNeed(4);
+	if (!hl_demo_rec_buf || hl_demo_rec_len + 4 > hl_demo_rec_cap)
+		return;
+
+	bits = HLWrF32(f);
+	p = hl_demo_rec_buf + hl_demo_rec_len;
+	p[0] = bits & 0xFF;
+	p[1] = (bits >> 8) & 0xFF;
+	p[2] = (bits >> 16) & 0xFF;
+	p[3] = (bits >> 24) & 0xFF;
+	hl_demo_rec_len += 4;
+}
+
+U0 HLDemoSetRecordAngles(F64 *angles)
+{
+	if (!angles)
+		return;
+
+	HLVecCopy(angles, hl_demo_rec_angles);
+}
+
+U0 HLDemoWriteMessage(CHLMsg *m)
+{
+	I64 j;
+
+	if (!hl_demo_recording || !m || m->len < 1 || m->overflowed)
+		return;
+	if (m->len > HLNET_MAX_MSG)
+		return;
+
+	HLDemoRecNeed(16 + m->len);
+	if (!hl_demo_rec_buf)
+		return;
+
+	HLDemoRecPutI32(m->len);
+	for (j = 0; j < 3; j++)
+		HLDemoRecPutF32(hl_demo_rec_angles[j]);
+
+	HLDemoRecNeed(m->len);
+	if (!hl_demo_rec_buf || hl_demo_rec_len + m->len > hl_demo_rec_cap)
+		return;
+
+	MemCopy(hl_demo_rec_buf + hl_demo_rec_len, m->data, m->len);
+	hl_demo_rec_len += m->len;
+}
+
+Bool HLDemoRecordStop()
+{
+	U8	 path[HLDEMO_MAX_NAME + 32];
+	Bool ok;
+
+	if (!hl_demo_recording)
+		return FALSE;
+
+	ok = FALSE;
+	if (hl_demo_rec_buf && hl_demo_rec_len > 2 && hl_disk_writes)
+	{
+		StrPrint(path, "%s/%s", hl_game_root, hl_demo_rec_name);
+		if (FileWrite(path, hl_demo_rec_buf, hl_demo_rec_len) >= 1)
+			ok = TRUE;
+	}
+
+	if (hl_demo_rec_buf)
+		Free(hl_demo_rec_buf);
+
+	hl_demo_rec_buf   = NULL;
+	hl_demo_rec_cap   = 0;
+	hl_demo_rec_len   = 0;
+	hl_demo_recording = FALSE;
+	hl_demo_rec_name[0] = 0;
+
+	return ok;
+}
+
+Bool HLDemoRecordStart(U8 *name)
+{
+	U8	 hdr[16];
+	I64	 n;
+	I64	 hlen;
+
+	if (!name || !name[0])
+		return FALSE;
+
+	if (hl_demo_recording)
+		HLDemoRecordStop;
+
+	HLDemoStop;
+
+	HLStrCopy(hl_demo_rec_name, name, HLDEMO_MAX_NAME);
+	n = StrLen(hl_demo_rec_name);
+	if (n < 4 || StrICompare(hl_demo_rec_name + n - 4, ".dem"))
+		StrPrint(hl_demo_rec_name, "%s.dem", name);
+
+	hl_demo_rec_buf = MAlloc(HLDEMO_BUF_START);
+	if (!hl_demo_rec_buf)
+		return FALSE;
+
+	hl_demo_rec_cap   = HLDEMO_BUF_START;
+	hl_demo_rec_len   = 0;
+	hl_demo_recording = TRUE;
+	HLVecSet(hl_demo_rec_angles, 0.0, 0.0, 0.0);
+
+	//cd track line. 0 = no track, same as an empty playdemo header.
+	StrPrint(hdr, "%d\n", hl_demo_track);
+	hlen = StrLen(hdr);
+	HLDemoRecNeed(hlen);
+	if (!hl_demo_rec_buf)
+	{
+		hl_demo_recording = FALSE;
+		return FALSE;
+	}
+	MemCopy(hl_demo_rec_buf, hdr, hlen);
+	hl_demo_rec_len = hlen;
+
+	return TRUE;
+}
+
+Bool HLDemoStart(U8 *name, Bool loop = FALSE)
+{
+	U8	 path[HLDEMO_MAX_NAME + 16];
+	I64	 size = 0;
+	I64	 n;
+
+	if (hl_demo_recording)
+		HLDemoRecordStop;
+
+	HLDemoStop;
+
+	if (!name || !name[0])
+		return FALSE;
+
+	HLStrCopy(path, name, HLDEMO_MAX_NAME);
+	n = StrLen(path);
+	if (n < 4 || StrICompare(path + n - 4, ".dem"))
+		StrPrint(path, "%s.dem", name);
+
+	hl_demo_data = HLFileLoad(path, &size);
+	if (!hl_demo_data || size < 2)
+	{
+		HLDemoStop;
+		return FALSE;
+	}
+
+	hl_demo_size = size;
+	hl_demo_pos  = 0;
+
+	hl_demo_track = 0;
+	while (hl_demo_pos < hl_demo_size && hl_demo_data[hl_demo_pos] != '\n')
+	{
+		if ('0' <= hl_demo_data[hl_demo_pos] <= '9')
+			hl_demo_track = hl_demo_track * 10 +
+				(hl_demo_data[hl_demo_pos] - '0');
+		hl_demo_pos++;
+	}
+	hl_demo_pos++;
+
+	HLStrCopy(hl_demo_name, path, HLDEMO_MAX_NAME);
+	hl_demo_playing = TRUE;
+	hl_demo_loop    = loop;
+	hl_demo_clock   = 0.0;
+	hl_demo_last_t  = 0.0;
+	hl_demo_timed   = FALSE;
+
+	HLVecSet(hl_demo_angles, 0.0, 0.0, 0.0);
+
+	return TRUE;
+}
+
+Bool HLDemoNextInLoop()
+{
+	I64 tries;
+
+	for (tries = 0; tries < 3; tries++)
+	{
+		if (hl_demo_loop_index < 0 || hl_demo_loop_index > 2)
+			hl_demo_loop_index = 0;
+
+		if (HLDemoStart(hl_demo_loop_names[hl_demo_loop_index], TRUE))
+		{
+			hl_demo_loop_index++;
+			return TRUE;
+		}
+
+		hl_demo_loop_index++;
+	}
+
+	return FALSE;
+}
+
+Bool HLDemoReadMessage(CHLMsg *m)
+{
+	I64 len;
+	I64 j;
+
+	if (!hl_demo_playing || !hl_demo_data)
+		return FALSE;
+
+	//len + 3 angles must be there before the payload
+	if (hl_demo_pos + 16 > hl_demo_size)
+		return FALSE;
+
+	len = HLRdI32(hl_demo_data + hl_demo_pos);
+	hl_demo_pos += 4;
+
+	for (j = 0; j < 3; j++)
+	{
+		hl_demo_angles[j] = HLRdF32(hl_demo_data + hl_demo_pos);
+		hl_demo_pos += 4;
+	}
+
+	if (len < 0 || len > HLNET_MAX_MSG)
+		return FALSE;
+	if (hl_demo_pos + len > hl_demo_size)
+		return FALSE;
+
+	HLMsgClear(m);
+	MemCopy(m->data, hl_demo_data + hl_demo_pos, len);
+	m->len = len;
+
+	hl_demo_pos += len;
+
+	return TRUE;
+}

@@ -1,0 +1,6386 @@
+// player inventory, weapons, firing and single-player gamerules
+//
+// from dlls/weapons.cpp (CBasePlayerWeapon, FireBullets), crowbar.cpp,
+// glock.cpp, python.cpp, mp5.cpp, shotgun.cpp, items.cpp
+// (CBasePlayerItem::Touch, CBasePlayerAmmo) and singleplay_gamerules.cpp, plus
+// cl_dll/ammo.cpp for the bucket/selection UI. one table plus a fire-mode id
+// per attack replaces the SDK's per-weapon class; a row carries both attacks.
+//
+// projectiles: hl_entities is sized to the parsed map and cannot allocate at
+// runtime, so this file owns hl_proj[HLPROJ_MAX], mirroring CGrenade
+// (dlls/ggrenade.cpp), CCrossbowBolt, CRpgRocket, CTripmineGrenade,
+// CSatchelCharge, CSqueakGrenade and CHornet. a saturated pool drops the shot.
+//
+// the per-frame tick runs off hl_hud_weapon_hook, the pointer HLHud.ZC declares
+// and HL1.ZC calls once per rendered frame through HLHudDraw: single-pass
+// compiler, so HLHud.ZC cannot name anything in this file. the view comes out
+// of CHLCanvas; the clock is hl_ent_time, the server clock HLEntFrame advances,
+// not the render clock.
+//
+// reload foley comes from the VIEW MODEL's animation events, code 5004
+// (HLWeaponVmEvents). only three retail view models carry 5004:
+//
+//   v_9mmhandgun  reload f4 items/9mmclip2.wav, f23 items/9mmclip1.wav
+//   v_9mmar       reload f5 items/cliprelease1.wav, f24 items/clipinsert1.wav
+//   v_357         reload f70 weapons/357_reload1.wav
+//
+// every other view model carries only 5001 muzzle flashes, so the rest is
+// emitted here through CHLWeaponInfo.reload_snd and .pump: the shotgun's cock
+// (weapons/scock1.wav, CShotgun::ItemPostFrame m_flPumpTime) and the crossbow's
+// reload (weapons/xbow_reload1.wav, CCrossbow::Reload).
+//
+// absent: inventory across a changelevel; the python's zoom, multiplayer only
+// in the SDK. item pickups live in HLEntity.ZC, not the inventory table.
+
+//SDK WEAPON_* order; -1 is empty handed
+
+#define HLWPN_NONE			-1
+
+#define HLWPN_CROWBAR		0
+#define HLWPN_GLOCK			1
+#define HLWPN_PYTHON			2
+#define HLWPN_MP5			3
+#define HLWPN_CROSSBOW		4
+#define HLWPN_SHOTGUN		5
+#define HLWPN_RPG			6
+#define HLWPN_GAUSS			7
+#define HLWPN_EGON			8
+#define HLWPN_HORNETGUN		9
+#define HLWPN_HANDGRENADE	10
+#define HLWPN_TRIPMINE		11
+#define HLWPN_SATCHEL		12
+#define HLWPN_SNARK			13
+
+#define HLWPN_COUNT			14
+
+//m_rgAmmo in the SDK, in CBasePlayerItem::AmmoInfoArray order
+
+#define HLAMMO_NONE			-1
+
+#define HLAMMO_9MM			0
+#define HLAMMO_357			1
+#define HLAMMO_BUCKSHOT		2
+#define HLAMMO_ARGRENADE		3
+#define HLAMMO_BOLT			4
+#define HLAMMO_ROCKET		5
+#define HLAMMO_URANIUM		6
+#define HLAMMO_HANDGRENADE	7
+#define HLAMMO_SATCHEL		8
+#define HLAMMO_TRIPMINE		9
+#define HLAMMO_SNARK			10
+#define HLAMMO_HORNET		11
+
+#define HLAMMO_COUNT			12
+
+#define HLWPN_SLOTS			5
+
+#define HLWPN_NOCLIP			-1
+
+
+#define HLFIRE_NONE			0
+#define HLFIRE_MELEE			1
+#define HLFIRE_BULLET		2
+#define HLFIRE_SHOTGUN2		3
+#define HLFIRE_BOLT			4
+#define HLFIRE_ROCKET		5
+#define HLFIRE_M203			6
+#define HLFIRE_GRENADE		7
+#define HLFIRE_SATCHEL		8
+#define HLFIRE_SATCHEL_FIRE	9
+#define HLFIRE_TRIPMINE		10
+#define HLFIRE_SNARK			11
+#define HLFIRE_HORNET		12
+#define HLFIRE_HORNET_FAST	13
+#define HLFIRE_GAUSS			14
+#define HLFIRE_GAUSS_CHARGE	15
+#define HLFIRE_EGON_WIDE		16
+#define HLFIRE_EGON_NARROW	17
+#define HLFIRE_ZOOM			18
+#define HLFIRE_SPOT			19
+
+
+#define HLPROJ_MAX			64
+
+#define HLPRJ_FREE			0
+#define HLPRJ_BOLT			1
+#define HLPRJ_STUCK			2
+#define HLPRJ_ROCKET			3
+#define HLPRJ_CONTACT		4
+#define HLPRJ_TIMED			5
+#define HLPRJ_SATCHEL		6
+#define HLPRJ_TRIPMINE		7
+#define HLPRJ_SNARK			8
+#define HLPRJ_HORNET			9
+#define HLPRJ_SPIT			10	//CSquidSpit, bullsquid.cpp
+#define HLPRJ_CTRLBALL		11
+#define HLPRJ_FLAME			12	//CGargantua flame volume, gargantua.cpp:552
+
+//BOLT_AIR_VELOCITY, dlls/crossbow.cpp
+#define HLPRJ_BOLT_SPEED		2000.0
+
+#define HLPRJ_BOLT_STICK		10.0
+
+//SQUEEK_DETONATE_DELAY, dlls/squeakgrenade.cpp
+#define HLPRJ_SNARK_LIFE		15.0
+
+#define HLPRJ_HORNET_LIFE	5.0
+
+#define HLPRJ_SPIT_SPEED		900.0
+#define HLPRJ_SPIT_LIFE		3.0
+
+#define HLPRJ_CTRLBALL_SPEED	800.0
+#define HLPRJ_CTRLBALL_LIFE	5.0
+
+//CTripmineGrenade::Spawn, tripmine.cpp:117
+#define HLPRJ_MINE_ARM		2.5
+#define HLPRJ_MINE_BEAM		2048.0
+
+#define HLPRJ_REST_SPEED		60.0
+
+class CHLProj
+{
+	I64	 kind;
+	F64	 org[3];
+	F64	 vel[3];
+
+	F64	 dir[3];
+
+	F64	 gravity;
+	F64	 friction;
+	F64	 damage;
+
+	F64	 die;			//absolute detonate/remove time, 0 = never
+	F64	 arm;
+	F64	 next_hurt;
+	F64	 next_hop;
+	F64	 next_puff;
+	F64	 beam_len;
+
+	F64	 next_hunt;
+	F64	 prev_org[3];
+	F64	 aim[3];
+	I64	 enemy;			//m_hEnemy as an entity index, -1 for none
+
+	F64	 beam_end[3];
+
+	I64	 seq;
+	F64	 frame;			//animation phase, 0..1
+	F64	 anim_rate;
+
+	Bool bounce;
+	Bool on_ground;
+	Bool armed;
+
+	I64	 owner;			//entity index that fired it, -1 for none
+};
+
+CHLProj	hl_proj[HLPROJ_MAX];
+I64		hl_proj_live	= 0;
+I64		hl_proj_dropped	= 0;
+
+
+#define HLPRJ_KINDS			13
+
+//GARG_FLAME_LENGTH and FlameUpdate cadence, gargantua.cpp:55
+#define HLPRJ_FLAME_LEN		330.0
+#define HLPRJ_FLAME_TICK		0.1
+
+#define HLPRJ_SEQ_TIMED		3		//RANDOM_LONG(3,6), ggrenade.cpp:410
+#define HLPRJ_SEQ_SATCHEL	1		//satchel.cpp:90
+#define HLPRJ_SEQ_TRIPMINE	7		//TRIPMINE_WORLD, tripmine.cpp:105
+#define HLPRJ_SEQ_SNARK		3		//WSQUEAK_RUN, squeakgrenade.cpp:145
+
+//pev->body = 3 on a placed mine.
+#define HLPRJ_BODY_TRIPMINE	3		//tripmine.cpp:104
+
+#define HLPRJ_PUFF_STEP		0.05
+#define HLPRJ_PUFF_SCALE		4.0
+#define HLPRJ_GLOW_RADIUS	160.0
+
+CHLStudio	*hl_proj_mdl[HLPRJ_KINDS];
+Bool		 hl_proj_tried[HLPRJ_KINDS];
+
+F64			 hl_proj_ctl[HLPRJ_KINDS * HLST_MAX_CONTROLLERS];
+
+#define HLWPN_ITEM_HALF		16.0
+#define HLWPN_ITEM_TOP		16.0
+
+#define HLWPN_SEL_TIME		1.5
+
+#define HLWPN_VM_LIGHT		176
+
+#define HLWPN_MAX_DT			0.25
+
+
+#define HLWPN_SND_ENT		20000
+#define HLWPN_SND_PROJ		20100
+
+//EGON_SOUND_OFF / RUN / STARTUP, dlls/egon.cpp:31-33
+#define HLWPN_EGON_OFF		"weapons/egon_off1.wav"
+#define HLWPN_EGON_RUN		"weapons/egon_run3.wav"
+#define HLWPN_EGON_START		"weapons/egon_windup2.wav"
+
+//CBasePlayerWeapon::PlayEmptySound, dlls/weapons.cpp:1049.
+#define HLWPN_EMPTY_SND		"weapons/357_cock1.wav"
+
+class CHLWeaponInfo
+{
+	U8	classname[32];
+	U8	hud_name[32];
+	U8	view_model[64];
+
+	I64	slot;				//iSlot from GetItemInfo, 0..4
+	I64	pos;
+
+	I64	ammo;
+	I64	max_clip;
+	I64	give;
+
+	F64	damage;
+	I64	bullets;
+	F64	spread;
+	F64	rate;
+	F64	range;
+	F64	reload_time;		//0 for a weapon with no clip to fill
+
+	I64	xhair_col;
+	I64	xhair_row;
+
+	U8	seq_idle[24];
+	U8	seq_fire[24];
+	U8	seq_reload[24];
+	U8	seq_draw[24];
+
+	U8	fire_snd[64];
+
+
+	I64	fire_mode;
+	I64	sec_mode;
+	I64	sec_ammo;
+	F64	sec_damage;
+	I64	sec_bullets;
+	F64	sec_spread;
+	F64	sec_rate;
+
+	F64	pump;
+	F64	sec_pump;
+
+	U8	reload_snd[64];
+
+	U8	seq_fire2[24];
+	U8	sec_snd[64];
+};
+
+CHLWeaponInfo	hl_wpn_info[HLWPN_COUNT];
+
+
+Bool	hl_wpn_have[HLWPN_COUNT];
+I64		hl_wpn_clip[HLWPN_COUNT];
+F64		hl_wpn_next[HLWPN_COUNT];
+I64		hl_wpn_ammo[HLAMMO_COUNT];
+I64		hl_wpn_ammo_max[HLAMMO_COUNT];
+
+F64		hl_wpn_next2[HLWPN_COUNT];
+
+I64		hl_wpn_active		= HLWPN_NONE;
+F64		hl_wpn_reload_done	= 0.0;		//0 = not reloading
+I64		hl_wpn_reloading	= HLWPN_NONE;
+
+
+F64		hl_wpn_pump_time	= 0.0;
+
+I64		hl_wpn_shell_reload	= 0;
+F64		hl_wpn_shell_next	= 0.0;
+
+Bool	hl_wpn_sv_aim		= TRUE;
+
+//CHandGrenade::m_flStartThrow - when the pin was pulled, 0 = not primed
+F64		hl_wpn_gren_start	= 0.0;
+
+//CSatchel::m_chargeReady - 0 none out, 1 radio live, 2 just detonated
+I64		hl_wpn_satchel_ready = 0;
+
+I64		hl_wpn_gauss_state	= 0;
+F64		hl_wpn_gauss_start	= 0.0;
+F64		hl_wpn_gauss_burn	= 0.0;
+F64		hl_wpn_gauss_full	= 0.0;
+Bool	hl_wpn_gauss_primary = FALSE;
+
+Bool	hl_wpn_egon_on		= FALSE;
+I64		hl_wpn_egon_mode	= HLFIRE_EGON_WIDE;
+F64		hl_wpn_egon_pulse	= 0.0;
+F64		hl_wpn_egon_ammo	= 0.0;
+
+F64		hl_wpn_egon_src[3];
+F64		hl_wpn_egon_hit[3];
+Bool	hl_wpn_egon_beam	= FALSE;
+
+F64		hl_wpn_punch[3];
+F64		hl_wpn_push[3];
+
+//EV_HLDM_CheckTracer's tracerCount, ev_hldm.cpp:40.
+I64		hl_wpn_tracer_count = 0;
+
+F64		hl_wpn_vm_ang[3];
+F64		hl_wpn_vm_bob	= 0.0;
+Bool	hl_wpn_vm_fed	= FALSE;
+
+
+CHLSpr	*hl_wpn_spr_laser	= NULL;
+CHLSpr	*hl_wpn_spr_gauss	= NULL;
+CHLSpr	*hl_wpn_spr_egon	= NULL;
+
+//EGON_FLARE_SPRITE, egon.cpp:30.
+CHLSpr	*hl_wpn_spr_flare	= NULL;
+CHLSpr	*hl_proj_spr_spit	= NULL;
+CHLSpr	*hl_proj_spr_ball	= NULL;
+Bool	 hl_wpn_spr_tried	= FALSE;
+
+#define HLWPN_BEAM_WIDTH	0.1
+#define HLWPN_BEAM_NOISE	0.01
+#define HLWPN_BEAM_SCROLL	0.1
+
+//R_BeamPoints life for the gauss bolt, ev_hldm.cpp:952
+#define HLWPN_BEAM_LIFE		0.1
+
+//nMaxHits is 10 and the punch-through adds one exit segment.
+#define HLWPN_BEAM_MAX		16
+
+class CHLWpnBeam
+{
+	F64	 start[3];
+	F64	 end[3];
+	F64	 width;			//world units
+	F64	 bright;		//0-255
+	F64	 die;
+	I64	 r;
+	I64	 g;
+	I64	 b;
+};
+
+CHLWpnBeam	hl_wpn_beam[HLWPN_BEAM_MAX];
+I64			hl_wpn_beam_next	= 0;
+
+I64		hl_wpn_hornet_phase	= 0;
+
+F64		hl_wpn_hornet_charge = 0.0;
+
+#define HLWPN_HORNET_RECHARGE	0.5
+
+Bool	hl_wpn_spot_on		= FALSE;
+F64		hl_wpn_spot_pos[3];
+Bool	hl_wpn_spot_valid	= FALSE;
+
+Bool	hl_wpn_on_target	= FALSE;
+
+I64		hl_wpn_zoom_fov		= 0;
+
+
+CHLStudio	*hl_wpn_vm			= NULL;
+I64			 hl_wpn_vm_for		= HLWPN_NONE;
+I64			 hl_wpn_vm_seq		= 0;
+F64			 hl_wpn_vm_cycle	= 0.0;
+Bool		 hl_wpn_vm_loop		= TRUE;
+Bool		 hl_wpn_vm_done		= FALSE;
+Bool		 hl_wpn_vm_is_idle	= FALSE;
+
+F64			 hl_wpn_idle_until	= 0.0;
+
+I64			 hl_wpn_vm_ev_frame	= -1;
+
+//g_iSwing, cl_dll/ev_hldm.cpp:1177.
+I64			 hl_wpn_swing_miss	= 0;
+I64			 hl_wpn_swing_hit	= 0;
+
+
+Bool	hl_wpn_slot_held[HLWPN_SLOTS];
+Bool	hl_wpn_next_held	= FALSE;
+Bool	hl_wpn_prev_held	= FALSE;
+
+I64		hl_wpn_cycle_want	= 0;
+
+Bool	hl_wpn_reload_held	= FALSE;
+Bool	hl_wpn_attack_held	= FALSE;
+Bool	hl_wpn_attack2_held	= FALSE;
+
+
+I64		hl_wpn_sel_slot		= -1;		//bucket open in the UI, -1 closed
+F64		hl_wpn_sel_until	= 0.0;
+
+I64		hl_wpn_sel_pos		= -1;		//highlighted entry, -1 = none
+Bool	hl_wpn_fastswitch	= FALSE;
+
+
+F64		hl_wpn_last_time	= 0.0;
+Bool	hl_wpn_spawned		= FALSE;
+I64		hl_wpn_xhair_sheet	= -1;
+I64		hl_wpn_xhair_gen	= -1;
+I64		hl_wpn_picked		= 0;
+
+I64		hl_wpn_icon_for		= HLWPN_NONE;
+I64		hl_wpn_icon_gen		= -1;
+
+
+#define HLWPN_RECT_AMMO		0
+#define HLWPN_RECT_ZOOM		1
+#define HLWPN_RECT_AUTOAIM	2
+#define HLWPN_RECT_ZOOM_AA	3
+#define HLWPN_RECT_KINDS		4
+
+I64		hl_wpn_rect[HLWPN_COUNT * HLWPN_RECT_KINDS * 5];
+Bool	hl_wpn_rect_done[HLWPN_COUNT * HLWPN_RECT_KINDS];
+I64		hl_wpn_rect_gen		= -1;
+
+U0 HLWeaponSetInfo(I64 id, U8 *classname, U8 *hud_name, U8 *view_model,
+	I64 slot, I64 pos, I64 ammo, I64 max_clip, I64 give,
+	F64 damage, I64 bullets, F64 spread, F64 rate, F64 range, F64 reload_time,
+	I64 xcol, I64 xrow,
+	U8 *idle, U8 *fire, U8 *reload, U8 *draw, U8 *fire_snd)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return;
+
+	w = &hl_wpn_info[id];
+
+	HLStrCopy(w->classname, classname, 32);
+	HLStrCopy(w->hud_name, hud_name, 32);
+	HLStrCopy(w->view_model, view_model, 64);
+
+	w->slot        = slot;
+	w->pos         = pos;
+	w->ammo        = ammo;
+	w->max_clip    = max_clip;
+	w->give        = give;
+	w->damage      = damage;
+	w->bullets     = bullets;
+	w->spread      = spread;
+	w->rate        = rate;
+	w->range       = range;
+	w->reload_time = reload_time;
+	w->xhair_col   = xcol;
+	w->xhair_row   = xrow;
+
+	HLStrCopy(w->seq_idle, idle, 24);
+	HLStrCopy(w->seq_fire, fire, 24);
+	HLStrCopy(w->seq_reload, reload, 24);
+	HLStrCopy(w->seq_draw, draw, 24);
+	HLStrCopy(w->fire_snd, fire_snd, 64);
+
+	w->fire_mode   = HLFIRE_BULLET;
+	w->sec_mode    = HLFIRE_NONE;
+	w->sec_ammo    = HLAMMO_NONE;
+	w->sec_damage  = 0.0;
+	w->sec_bullets = 0;
+	w->sec_spread  = 0.0;
+	w->sec_rate    = 0.5;
+	w->pump        = 0.0;
+	w->sec_pump    = 0.0;
+
+	w->reload_snd[0] = 0;
+	w->seq_fire2[0]  = 0;
+	w->sec_snd[0]    = 0;
+}
+
+U0 HLWeaponSetMode(I64 id, I64 fire_mode, I64 sec_mode, I64 sec_ammo,
+	F64 sec_damage, I64 sec_bullets, F64 sec_spread, F64 sec_rate,
+	F64 pump, F64 sec_pump, U8 *reload_snd, U8 *fire2, U8 *sec_snd)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return;
+
+	w = &hl_wpn_info[id];
+
+	w->fire_mode   = fire_mode;
+	w->sec_mode    = sec_mode;
+	w->sec_ammo    = sec_ammo;
+	w->sec_damage  = sec_damage;
+	w->sec_bullets = sec_bullets;
+	w->sec_spread  = sec_spread;
+	w->sec_rate    = sec_rate;
+	w->pump        = pump;
+	w->sec_pump    = sec_pump;
+
+	HLStrCopy(w->reload_snd, reload_snd, 64);
+	HLStrCopy(w->seq_fire2, fire2, 24);
+	HLStrCopy(w->sec_snd, sec_snd, 64);
+}
+
+U0 HLWeaponInit()
+{
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		hl_wpn_have[i]  = FALSE;
+		hl_wpn_clip[i]  = 0;
+		hl_wpn_next[i]  = 0.0;
+		hl_wpn_next2[i] = 0.0;
+	}
+
+	for (i = 0; i < HLAMMO_COUNT; i++)
+		hl_wpn_ammo[i] = 0;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+		hl_proj[i].kind = HLPRJ_FREE;
+
+	hl_proj_live    = 0;
+	hl_proj_dropped = 0;
+
+	for (i = 0; i < HLPRJ_KINDS; i++)
+	{
+		hl_proj_mdl[i]   = NULL;
+		hl_proj_tried[i] = FALSE;
+	}
+
+	for (i = 0; i < HLPRJ_KINDS * HLST_MAX_CONTROLLERS; i++)
+		hl_proj_ctl[i] = 0.0;
+
+	//*_MAX_CARRY from weapons.h
+	hl_wpn_ammo_max[HLAMMO_9MM]        = 250;
+	hl_wpn_ammo_max[HLAMMO_357]        = 36;
+	hl_wpn_ammo_max[HLAMMO_BUCKSHOT]   = 125;
+	hl_wpn_ammo_max[HLAMMO_ARGRENADE]  = 10;
+	hl_wpn_ammo_max[HLAMMO_BOLT]       = 50;
+	hl_wpn_ammo_max[HLAMMO_ROCKET]     = 5;
+	hl_wpn_ammo_max[HLAMMO_URANIUM]    = 100;
+	hl_wpn_ammo_max[HLAMMO_HANDGRENADE] = 10;
+	hl_wpn_ammo_max[HLAMMO_SATCHEL]    = 5;
+	hl_wpn_ammo_max[HLAMMO_TRIPMINE]   = 5;
+	hl_wpn_ammo_max[HLAMMO_SNARK]      = 15;
+	hl_wpn_ammo_max[HLAMMO_HORNET]     = 8;
+
+	for (i = 0; i < HLWPN_SLOTS; i++)
+		hl_wpn_slot_held[i] = FALSE;
+
+	hl_wpn_active      = HLWPN_NONE;
+	hl_wpn_reload_done = 0.0;
+	hl_wpn_reloading   = HLWPN_NONE;
+
+	hl_wpn_pump_time     = 0.0;
+	hl_wpn_gren_start    = 0.0;
+	hl_wpn_satchel_ready = 0;
+
+	hl_wpn_gauss_state   = 0;
+	hl_wpn_gauss_start   = 0.0;
+	hl_wpn_gauss_burn    = 0.0;
+	hl_wpn_gauss_full    = 0.0;
+	hl_wpn_gauss_primary = FALSE;
+
+	hl_wpn_egon_on    = FALSE;
+	hl_wpn_egon_mode  = HLFIRE_EGON_WIDE;
+	hl_wpn_egon_pulse = 0.0;
+	hl_wpn_egon_ammo  = 0.0;
+
+	hl_wpn_egon_beam = FALSE;
+	HLVecSet(hl_wpn_egon_src, 0.0, 0.0, 0.0);
+	HLVecSet(hl_wpn_egon_hit, 0.0, 0.0, 0.0);
+
+	HLVecSet(hl_wpn_punch, 0.0, 0.0, 0.0);
+	HLVecSet(hl_wpn_push, 0.0, 0.0, 0.0);
+
+	HLVecSet(hl_wpn_vm_ang, 0.0, 0.0, 0.0);
+	hl_wpn_vm_bob = 0.0;
+	hl_wpn_vm_fed = FALSE;
+
+	hl_wpn_tracer_count = 0;
+
+	hl_wpn_shell_reload = 0;
+	hl_wpn_shell_next   = 0.0;
+	hl_wpn_sv_aim       = TRUE;
+
+	for (i = 0; i < HLWPN_BEAM_MAX; i++)
+		hl_wpn_beam[i].die = 0.0;
+
+	hl_wpn_beam_next = 0;
+
+	hl_wpn_spr_laser = NULL;
+	hl_wpn_spr_gauss = NULL;
+	hl_wpn_spr_egon  = NULL;
+	hl_wpn_spr_flare = NULL;
+	hl_wpn_spr_tried = FALSE;
+
+	hl_wpn_hornet_phase  = 0;
+	hl_wpn_hornet_charge = 0.0;
+
+	hl_wpn_spot_on    = FALSE;
+	hl_wpn_spot_valid = FALSE;
+	HLVecSet(hl_wpn_spot_pos, 0.0, 0.0, 0.0);
+
+	hl_wpn_on_target = FALSE;
+	hl_wpn_zoom_fov  = 0;
+
+	hl_wpn_vm       = NULL;
+	hl_wpn_vm_for   = HLWPN_NONE;
+	hl_wpn_swing_miss = 0;
+	hl_wpn_swing_hit  = 0;
+
+	hl_wpn_vm_seq      = 0;
+	hl_wpn_vm_cycle    = 0.0;
+	hl_wpn_vm_loop     = TRUE;
+	hl_wpn_vm_done     = FALSE;
+	hl_wpn_vm_is_idle  = FALSE;
+	hl_wpn_idle_until  = 0.0;
+
+	hl_wpn_next_held    = FALSE;
+	hl_wpn_prev_held    = FALSE;
+	hl_wpn_reload_held  = FALSE;
+	hl_wpn_cycle_want   = 0;
+	hl_wpn_attack_held  = FALSE;
+	hl_wpn_attack2_held = FALSE;
+
+	hl_wpn_sel_slot   = -1;
+	hl_wpn_sel_until  = 0.0;
+	hl_wpn_sel_pos    = -1;
+	hl_wpn_fastswitch = FALSE;
+
+	hl_wpn_last_time   = 0.0;
+	hl_wpn_spawned     = FALSE;
+	hl_wpn_xhair_sheet = -1;
+	hl_wpn_xhair_gen   = -1;
+	hl_wpn_picked      = 0;
+	hl_wpn_icon_for    = HLWPN_NONE;
+	hl_wpn_icon_gen    = -1;
+
+	for (i = 0; i < HLWPN_COUNT * HLWPN_RECT_KINDS; i++)
+		hl_wpn_rect_done[i] = FALSE;
+
+	for (i = 0; i < HLWPN_COUNT * HLWPN_RECT_KINDS * 5; i++)
+		hl_wpn_rect[i] = 0;
+
+	hl_wpn_rect_gen = -1;
+
+	HLWeaponSetInfo(HLWPN_CROWBAR, "weapon_crowbar", "crowbar",
+		"models/v_crowbar.mdl", 0, 0,
+		HLAMMO_NONE, HLWPN_NOCLIP, 0,
+		10.0, 1, 0.0, 0.5, 32.0, 0.0,
+		-1, -1,
+		"idle1", "attack1miss", "", "draw", "");
+
+	//glock: GlockFire(0.01, 0.3, TRUE) for the primary
+	HLWeaponSetInfo(HLWPN_GLOCK, "weapon_9mmhandgun", "9mmhandgun",
+		"models/v_9mmhandgun.mdl", 1, 0,
+		HLAMMO_9MM, 17, 17,
+		8.0, 1, 0.01, 0.3, 8192.0, 1.5,
+		1, 0,
+		"idle1", "shoot", "reload", "draw", "weapons/pl_gun3.wav");
+
+	//python: VECTOR_CONE_1DEGREES unconditionally, python.cpp:198.
+	HLWeaponSetInfo(HLWPN_PYTHON, "weapon_357", "357",
+		"models/v_357.mdl", 1, 1,
+		HLAMMO_357, 6, 6,
+		40.0, 1, 0.00873, 0.75, 8192.0, 2.0,
+		2, 0,
+		"idle1", "fire1", "reload", "draw", "weapons/357_shot1.wav");
+
+	//mp5
+	HLWeaponSetInfo(HLWPN_MP5, "weapon_9mmAR", "9mmAR",
+		"models/v_9mmar.mdl", 2, 0,
+		HLAMMO_9MM, 50, 25,
+		5.0, 1, 0.02618, 0.1, 8192.0, 1.5,
+		0, 2,
+		"idle1", "shoot", "reload", "deploy", "weapons/hks1.wav");
+
+	HLWeaponSetInfo(HLWPN_CROSSBOW, "weapon_crossbow", "crossbow",
+		"models/v_crossbow.mdl", 2, 2,
+		HLAMMO_BOLT, 5, 5,
+		50.0, 1, 0.0, 0.75, 8192.0, 4.5,
+		3, 0,
+		"idle1", "fire1", "reload", "draw1", "weapons/xbow_fire1.wav");
+
+	HLWeaponSetInfo(HLWPN_SHOTGUN, "weapon_shotgun", "shotgun",
+		"models/v_shotgun.mdl", 2, 1,
+		HLAMMO_BUCKSHOT, 8, 12,
+		5.0, 6, 0.08716, 0.75, 2048.0, 2.5,
+		2, 1,
+		"sm_idle", "shoot", "reload", "draw", "weapons/sbarrel1.wav");
+
+	HLWeaponSetInfo(HLWPN_RPG, "weapon_rpg", "rpg_rocket",
+		"models/v_rpg.mdl", 3, 0,
+		HLAMMO_ROCKET, 1, 1,
+		100.0, 1, 0.0, 1.5, 0.0, 2.0,
+		1, 2,
+		"idle", "fire", "reload", "draw1", "weapons/rocketfire1.wav");
+
+	HLWeaponSetInfo(HLWPN_GAUSS, "weapon_gauss", "gauss",
+		"models/v_gauss.mdl", 3, 1,
+		HLAMMO_URANIUM, HLWPN_NOCLIP, 20,
+		20.0, 1, 0.0, 0.2, 8192.0, 0.0,
+		2, 2,
+		"idle", "fire", "", "draw", "weapons/gauss2.wav");
+
+	HLWeaponSetInfo(HLWPN_EGON, "weapon_egon", "egon",
+		"models/v_egon.mdl", 3, 2,
+		HLAMMO_URANIUM, HLWPN_NOCLIP, 20,
+		14.0, 1, 0.0, 0.1, 2048.0, 0.0,
+		3, 2,
+		"idle1", "fire1", "", "draw", "");
+
+	HLWeaponSetInfo(HLWPN_HORNETGUN, "weapon_hornetgun", "hornet",
+		"models/v_hgun.mdl", 3, 3,
+		HLAMMO_HORNET, HLWPN_NOCLIP, 8,
+		7.0, 1, 0.0, 0.25, 0.0, 0.0,
+		3, 1,
+		"idle1", "Shoot", "", "up", "");
+
+	HLWeaponSetInfo(HLWPN_HANDGRENADE, "weapon_handgrenade", "grenade",
+		"models/v_grenade.mdl", 4, 0,
+		HLAMMO_HANDGRENADE, HLWPN_NOCLIP, 5,
+		100.0, 1, 0.0, 0.5, 0.0, 0.0,
+		-1, -1,
+		"idle", "pinpull", "", "draw", "");
+
+	HLWeaponSetInfo(HLWPN_TRIPMINE, "weapon_tripmine", "tripmine",
+		"models/v_tripmine.mdl", 4, 2,
+		HLAMMO_TRIPMINE, HLWPN_NOCLIP, 1,
+		150.0, 1, 0.0, 0.3, 128.0, 0.0,
+		-1, -1,
+		"idle1", "arm1", "", "draw", "weapons/mine_deploy.wav");
+
+	HLWeaponSetInfo(HLWPN_SATCHEL, "weapon_satchel", "satchel",
+		"models/v_satchel.mdl", 4, 1,
+		HLAMMO_SATCHEL, HLWPN_NOCLIP, 1,
+		150.0, 1, 0.0, 0.5, 0.0, 0.0,
+		-1, -1,
+		"idle1", "drop", "", "draw", "");
+
+	//snark: sk_snark_dmg_pop1 5 when it bursts, fifteen seconds out
+	HLWeaponSetInfo(HLWPN_SNARK, "weapon_snark", "snark",
+		"models/v_squeak.mdl", 4, 3,
+		HLAMMO_SNARK, HLWPN_NOCLIP, 5,
+		5.0, 1, 0.0, 0.3, 0.0, 0.0,
+		-1, -1,
+		"idle1", "throw", "", "up", "squeek/sqk_hunt2.wav");
+
+
+	HLWeaponSetMode(HLWPN_CROWBAR, HLFIRE_MELEE, HLFIRE_NONE, HLAMMO_NONE,
+		0.0, 0, 0.0, 0.5, 0.0, 0.0, "", "", "");
+
+	HLWeaponSetMode(HLWPN_GLOCK, HLFIRE_BULLET, HLFIRE_BULLET, HLAMMO_NONE,
+		8.0, 1, 0.1, 0.2, 0.0, 0.0, "", "shoot", "weapons/pl_gun3.wav");
+
+	HLWeaponSetMode(HLWPN_PYTHON, HLFIRE_BULLET, HLFIRE_NONE, HLAMMO_NONE,
+		0.0, 0, 0.0, 0.5, 0.0, 0.0, "", "", "");
+
+	HLWeaponSetMode(HLWPN_MP5, HLFIRE_BULLET, HLFIRE_M203, HLAMMO_ARGRENADE,
+		100.0, 1, 0.0, 1.0, 0.0, 0.0, "", "grenade", "weapons/glauncher.wav");
+
+	HLWeaponSetMode(HLWPN_CROSSBOW, HLFIRE_BOLT, HLFIRE_ZOOM, HLAMMO_NONE,
+		0.0, 0, 0.0, 1.0, 0.0, 0.0, "weapons/xbow_reload1.wav", "", "");
+
+	//m_flPumpTime: 0.5 after the single barrel, 0.95 after the double
+	HLWeaponSetMode(HLWPN_SHOTGUN, HLFIRE_BULLET, HLFIRE_SHOTGUN2,
+		HLAMMO_NONE, 5.0, 12, 0.08716, 1.5, 0.5, 0.95,
+		"weapons/reload1.wav", "shoot_big", "weapons/dbarrel1.wav");
+
+	HLWeaponSetMode(HLWPN_RPG, HLFIRE_ROCKET, HLFIRE_SPOT, HLAMMO_NONE,
+		0.0, 0, 0.0, 0.2, 0.0, 0.0, "", "", "");
+
+	HLWeaponSetMode(HLWPN_GAUSS, HLFIRE_GAUSS, HLFIRE_GAUSS_CHARGE,
+		HLAMMO_NONE, 0.0, 0, 0.0, 0.1, 0.0, 0.0, "", "fire2",
+		"weapons/gauss2.wav");
+
+	HLWeaponSetMode(HLWPN_EGON, HLFIRE_EGON_WIDE, HLFIRE_EGON_NARROW,
+		HLAMMO_NONE, 6.0, 0, 0.0, 0.1, 0.0, 0.0, "", "fire1", "");
+
+	HLWeaponSetMode(HLWPN_HORNETGUN, HLFIRE_HORNET, HLFIRE_HORNET_FAST,
+		HLAMMO_NONE, 7.0, 0, 0.0, 0.1, 0.0, 0.0, "", "Shoot", "");
+
+	HLWeaponSetMode(HLWPN_HANDGRENADE, HLFIRE_GRENADE, HLFIRE_NONE,
+		HLAMMO_NONE, 0.0, 0, 0.0, 0.5, 0.0, 0.0, "", "throw1", "");
+
+	HLWeaponSetMode(HLWPN_TRIPMINE, HLFIRE_TRIPMINE, HLFIRE_NONE,
+		HLAMMO_NONE, 0.0, 0, 0.0, 0.3, 0.0, 0.0, "", "", "");
+
+	HLWeaponSetMode(HLWPN_SATCHEL, HLFIRE_SATCHEL, HLFIRE_SATCHEL_FIRE,
+		HLAMMO_NONE, 0.0, 0, 0.0, 0.5, 0.0, 0.0, "", "draw", "");
+
+	HLWeaponSetMode(HLWPN_SNARK, HLFIRE_SNARK, HLFIRE_NONE, HLAMMO_NONE,
+		0.0, 0, 0.0, 0.3, 0.0, 0.0, "", "", "");
+}
+
+HLWeaponInit;
+
+U0 HLWeaponBeamSprites()
+{
+	if (hl_wpn_spr_tried)
+		return;
+
+	hl_wpn_spr_tried = TRUE;
+
+	hl_wpn_spr_laser = HLSprLoad("sprites/laserbeam.spr");
+	hl_wpn_spr_gauss = HLSprLoad("sprites/smoke.spr");
+	hl_wpn_spr_egon  = HLSprLoad("sprites/xbeam1.spr");
+	hl_wpn_spr_flare = HLSprLoad("sprites/xspark1.spr");
+	hl_proj_spr_spit = HLSprLoad("sprites/bigspit.spr");
+	hl_proj_spr_ball = hl_wpn_spr_flare;
+}
+
+U0 HLWeaponBeamAdd(F64 *start, F64 *end, F64 width, F64 bright,
+	I64 r, I64 g, I64 b)
+{
+	CHLWpnBeam *w = &hl_wpn_beam[hl_wpn_beam_next];
+
+	hl_wpn_beam_next++;
+
+	if (hl_wpn_beam_next >= HLWPN_BEAM_MAX)
+		hl_wpn_beam_next = 0;
+
+	HLVecCopy(start, w->start);
+	HLVecCopy(end, w->end);
+
+	w->width  = width;
+	w->bright = bright;
+	w->r      = r;
+	w->g      = g;
+	w->b      = b;
+	w->die    = tS + HLWPN_BEAM_LIFE;
+}
+
+
+I64 HLWeaponPool(I64 id)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return 0;
+
+	w = &hl_wpn_info[id];
+
+	if (w->ammo == HLAMMO_NONE)
+		return 0;
+
+	return hl_wpn_ammo[w->ammo];
+}
+
+Bool HLWeaponCanFire(I64 id)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT || !hl_wpn_have[id])
+		return FALSE;
+
+	w = &hl_wpn_info[id];
+
+	if (w->ammo == HLAMMO_NONE)
+		return TRUE;
+
+	if (w->max_clip == HLWPN_NOCLIP)
+		return ToBool(hl_wpn_ammo[w->ammo] > 0);
+
+	return ToBool(hl_wpn_clip[id] > 0);
+}
+
+U8 *HLWeaponClassAlias(U8 *classname)
+{
+	if (!StrICompare(classname, "weapon_glock"))
+		return "weapon_9mmhandgun";
+
+	if (!StrICompare(classname, "weapon_mp5"))
+		return "weapon_9mmAR";
+
+	if (!StrICompare(classname, "weapon_python"))
+		return "weapon_357";
+
+	return classname;
+}
+
+I64 HLWeaponFindByClass(U8 *classname)
+{//weapon_* classname to id, -1 when not in the table
+	U8	*name;
+	I64	 i;
+
+	name = HLWeaponClassAlias(classname);
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		if (!StrICompare(hl_wpn_info[i].classname, name))
+			return i;
+	}
+
+	return -1;
+}
+
+
+I64 HLWeaponSeqFind(CHLStudio *m, U8 *label)
+{
+	I64 i;
+
+	if (!m || !label || !label[0])
+		return -1;
+
+	for (i = 0; i < m->num_seqs; i++)
+	{
+		if (!StrICompare(m->seqs[i].label, label))
+			return i;
+	}
+
+	return -1;
+}
+
+I64 HLWeaponSeqPick(CHLStudio *m, U8 *label)
+{
+	I64 i;
+	I64 n    = 0;
+	I64 pick = 0;
+
+	if (!m || !label || !label[0])
+		return -1;
+
+	for (i = 0; i < m->num_seqs; i++)
+	{
+		if (!StrICompare(m->seqs[i].label, label))
+			n++;
+	}
+
+	if (n < 1)
+		return -1;
+
+	if (n > 1)
+		pick = HLPartRandI(n);
+
+	for (i = 0; i < m->num_seqs; i++)
+	{
+		if (!StrICompare(m->seqs[i].label, label))
+		{
+			if (pick <= 0)
+				return i;
+
+			pick--;
+		}
+	}
+
+	return -1;
+}
+
+U0 HLWeaponIdleArm(F64 delay)
+{
+	if (delay < 0.0)
+		delay = 0.0;
+
+	hl_wpn_idle_until = hl_ent_time + delay;
+}
+
+U0 HLWeaponVmAnim(U8 *label, Bool loop)
+{
+	I64 seq;
+
+	if (!hl_wpn_vm)
+		return;
+
+	seq = HLWeaponSeqPick(hl_wpn_vm, label);
+
+	if (seq < 0)
+		seq = 0;
+
+	hl_wpn_vm_seq      = seq;
+	hl_wpn_vm_cycle    = 0.0;
+	hl_wpn_vm_loop     = loop;
+	hl_wpn_vm_done     = FALSE;
+	hl_wpn_vm_ev_frame = -1;
+	hl_wpn_vm_is_idle  = FALSE;
+
+	if (hl_wpn_active >= 0 && label &&
+		!StrICompare(label, hl_wpn_info[hl_wpn_active].seq_idle))
+		hl_wpn_vm_is_idle = TRUE;
+	else
+		HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+}
+
+U0 HLWeaponIdleThink()
+{
+	CHLWeaponInfo	*w;
+	I64				 idle_seq;
+
+	if (hl_wpn_active < 0 || !hl_wpn_vm)
+		return;
+
+	if (hl_wpn_egon_on || hl_wpn_gauss_state != 0)
+		return;
+
+	if (hl_wpn_reloading >= 0 || hl_wpn_shell_reload != 0)
+		return;
+
+	w = &hl_wpn_info[hl_wpn_active];
+
+	//never armed: do not treat 0 as "due now" or fidget spam replaces fire
+	if (hl_wpn_idle_until <= 0.0)
+	{
+		HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+		return;
+	}
+
+	if (hl_wpn_vm_loop && w->seq_idle[0])
+	{
+		idle_seq = HLWeaponSeqPick(hl_wpn_vm, w->seq_idle);
+
+		if (idle_seq >= 0 && hl_wpn_vm_seq == idle_seq)
+		{
+			hl_wpn_vm_loop    = FALSE;
+			hl_wpn_vm_done    = TRUE;
+			hl_wpn_vm_is_idle = TRUE;
+			hl_wpn_vm_cycle   = 1.0;
+			HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+			return;
+		}
+	}
+
+	if (hl_wpn_vm_loop && !hl_wpn_vm_is_idle)
+		return;
+
+	if (hl_ent_time < hl_wpn_idle_until)
+		return;
+
+	if (!hl_wpn_vm_loop && !hl_wpn_vm_done)
+		return;
+
+	if (!w->seq_idle[0])
+		return;
+
+	HLWeaponVmAnim(w->seq_idle, FALSE);
+}
+
+U0 HLWeaponVmFire(I64 id, Bool loop)
+{
+	CHLWeaponInfo	*w;
+	U8				*label;
+	I64				 which;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return;
+
+	w     = &hl_wpn_info[id];
+	label = w->seq_fire;
+
+	//EV_Crowbar, cl_dll/ev_hldm.cpp:1177-1185
+	if (id == HLWPN_CROWBAR)
+	{
+		which = hl_wpn_swing_miss % 3;
+		hl_wpn_swing_miss++;
+
+		if (which == 1)
+			label = "attack2";
+		else if (which == 2)
+			label = "attack3";
+	}
+
+	//EV_EgonFire
+	if (id == HLWPN_EGON)
+	{
+		which = HLPartRandI(4);
+
+		if (which == 1)
+			label = "fire2";
+		else if (which == 2)
+			label = "fire3";
+		else if (which == 3)
+			label = "fire4";
+	}
+
+	HLWeaponVmAnim(label, loop);
+}
+
+U0 HLWeaponVmEvents()
+{
+	CHLStSeq	*sq;
+	CHLStEvent	*ev;
+	F64			 cycle;
+	F64			 muzzle[3];
+	F64			 vm_ang[3];
+	I64			 frame;
+	I64			 last;
+	I64			 i;
+
+	if (!hl_wpn_vm || !hl_wpn_vm->events)
+		return;
+
+	if (hl_wpn_vm_seq < 0 || hl_wpn_vm_seq >= hl_wpn_vm->num_seqs)
+		return;
+
+	sq = &hl_wpn_vm->seqs[hl_wpn_vm_seq];
+
+	if (sq->num_events < 1)
+		return;
+
+	cycle = hl_wpn_vm_cycle;
+
+	if (cycle < 0.0)	cycle = 0.0;
+	if (cycle > 1.0)	cycle = 1.0;
+
+	frame = ToI64(cycle * ToF64(sq->num_frames - 1));
+
+	if (frame < 0)						frame = 0;
+	if (frame > sq->num_frames - 1)		frame = sq->num_frames - 1;
+
+	last = hl_wpn_vm_ev_frame;
+
+	if (last < 0 || frame < last)
+		last = -1;
+
+	if (frame == last)
+		return;
+
+	for (i = 0; i < sq->num_events; i++)
+	{
+		ev = &hl_wpn_vm->events[sq->first_event + i];
+
+		if (ev->frame <= last || ev->frame > frame)
+			goto qwve_next;
+
+		if (ev->code == HLST_EV_CL_SOUND && ev->options[0])
+			HLSndPlayAt(ev->options, hl_snd_listener, 1.0, 0.0, 0,
+				HLCHAN_AUTO);
+
+		//5001, EF_MUZZLEFLASH: an elight on attachment 0, const.h:105.
+		if (ev->code == HLST_EV_MUZZLEFLASH &&
+			HLStudioAttachCount(hl_wpn_vm) > 0)
+		{
+			vm_ang[0] = -hl_wpn_vm_ang[0];
+			vm_ang[1] = hl_wpn_vm_ang[1];
+			vm_ang[2] = hl_wpn_vm_ang[2];
+
+			if (HLStudioAttachment(hl_wpn_vm, hl_snd_listener, vm_ang,
+				hl_wpn_vm_seq, hl_wpn_vm_cycle, 0.0, 0, muzzle))
+				HLFxMuzzleFlash(muzzle, 1.0, tS);
+		}
+
+qwve_next:
+	}
+
+	hl_wpn_vm_ev_frame = frame;
+}
+
+U0 HLWeaponSetActive(I64 id)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT || !hl_wpn_have[id])
+		return;
+
+	if (hl_wpn_active == HLWPN_HANDGRENADE && hl_wpn_gren_start != 0.0)
+		return;
+
+	HLSndStop(HLWPN_SND_ENT, HLCHAN_STATIC);
+	HLSndStop(HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+	hl_wpn_egon_on       = FALSE;
+	hl_wpn_egon_beam     = FALSE;
+	hl_wpn_gauss_state   = 0;
+	hl_wpn_gauss_primary = FALSE;
+
+	hl_wpn_zoom_fov      = 0;
+	hl_wpn_gren_start    = 0.0;
+
+	hl_wpn_shell_reload  = 0;
+
+	hl_wpn_active    = id;
+	hl_wpn_reloading = HLWPN_NONE;
+
+	w = &hl_wpn_info[id];
+
+	if (hl_wpn_vm_for != id)
+	{
+		hl_wpn_vm     = HLStudioCacheGet(w->view_model);
+		hl_wpn_vm_for = id;
+	}
+
+	HLWeaponVmAnim(w->seq_draw, FALSE);
+
+	hl_wpn_next[id]  = hl_ent_time + 0.5;
+	hl_wpn_next2[id] = hl_ent_time + 0.5;
+
+	HLWeaponIdleArm(1.0);
+}
+
+
+#define HLWPN_HIST_MAX		12
+#define HLWPN_HIST_TIME		5.0
+
+#define HLWPN_HIST_EMPTY		0
+#define HLWPN_HIST_AMMO		1
+#define HLWPN_HIST_WEAP		2
+
+class CHLWpnHist
+{
+	I64	type;
+	I64	id;
+	I64	count;
+	F64	die;
+};
+
+CHLWpnHist	hl_wpn_hist[HLWPN_HIST_MAX];
+I64			hl_wpn_hist_slot = 0;
+
+U0 HLWeaponHistInit()
+{
+	I64 i;
+
+	for (i = 0; i < HLWPN_HIST_MAX; i++)
+	{
+		hl_wpn_hist[i].type  = HLWPN_HIST_EMPTY;
+		hl_wpn_hist[i].id    = -1;
+		hl_wpn_hist[i].count = 0;
+		hl_wpn_hist[i].die   = 0.0;
+	}
+
+	hl_wpn_hist_slot = 0;
+}
+
+HLWeaponHistInit;
+
+U0 HLWeaponHistAdd(I64 type, I64 id, I64 count)
+{
+	if (hl_wpn_hist_slot >= HLWPN_HIST_MAX)
+		hl_wpn_hist_slot = 0;
+
+	hl_wpn_hist[hl_wpn_hist_slot].type  = type;
+	hl_wpn_hist[hl_wpn_hist_slot].id    = id;
+	hl_wpn_hist[hl_wpn_hist_slot].count = count;
+
+	hl_wpn_hist[hl_wpn_hist_slot].die = tS + HLWPN_HIST_TIME;
+
+	hl_wpn_hist_slot++;
+}
+
+
+Bool HLWeaponGiveAmmo(I64 type, I64 count)
+{
+	I64 room;
+
+	if (type < 0 || type >= HLAMMO_COUNT || count <= 0)
+		return FALSE;
+
+	room = hl_wpn_ammo_max[type] - hl_wpn_ammo[type];
+
+	if (room <= 0)
+		return FALSE;
+
+	if (count > room)
+		count = room;
+
+	hl_wpn_ammo[type] += count;
+
+	HLWeaponHistAdd(HLWPN_HIST_AMMO, type, count);
+
+	return TRUE;
+}
+
+Bool HLWeaponGive(I64 id)
+{
+	CHLWeaponInfo	*w;
+	Bool			 took = FALSE;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return FALSE;
+
+	w = &hl_wpn_info[id];
+
+	if (!hl_wpn_have[id])
+	{
+		hl_wpn_have[id] = TRUE;
+		hl_wpn_next[id] = 0.0;
+
+		if (w->max_clip == HLWPN_NOCLIP)
+			hl_wpn_clip[id] = 0;
+		else
+		{
+			hl_wpn_clip[id] = w->give;
+
+			if (hl_wpn_clip[id] > w->max_clip)
+				hl_wpn_clip[id] = w->max_clip;
+		}
+
+		took = TRUE;
+
+		//WeaponPickup, ammo.cpp:527 - the weapon's own line in the strip.
+		HLWeaponHistAdd(HLWPN_HIST_WEAP, id, 0);
+
+		if (w->give > hl_wpn_clip[id] && w->ammo != HLAMMO_NONE)
+			HLWeaponGiveAmmo(w->ammo, w->give - hl_wpn_clip[id]);
+
+		if (hl_wpn_active == HLWPN_NONE)
+			HLWeaponSetActive(id);
+	}
+	else if (w->ammo != HLAMMO_NONE && w->give > 0)
+	{
+		took = HLWeaponGiveAmmo(w->ammo, w->give);
+	}
+
+	return took;
+}
+
+U0 HLWeaponGiveAll()
+{
+	U8	line[96];
+	I64	i;
+
+	hl_ent_player_suit  = TRUE;
+	hl_ent_player_armor = HLENT_MAX_ARMOR;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		HLWeaponGive(i);
+
+		if (hl_wpn_info[i].ammo != HLAMMO_NONE)
+			HLWeaponGiveAmmo(hl_wpn_info[i].ammo,
+				hl_wpn_ammo_max[hl_wpn_info[i].ammo]);
+	}
+
+	for (i = 0; i < HLAMMO_COUNT; i++)
+		hl_wpn_ammo[i] = hl_wpn_ammo_max[i];
+
+	StrPrint(line, "impulse 101: %d weapons, suit and full ammo\n", HLWPN_COUNT);
+	HLLog(line);
+
+	"%s", line;
+	"impulse 101: the full gEvilImpulse101 list. The egon and gauss beams and\n"
+	"             the grenade bodies have no visual - see the header.\n";
+}
+
+
+U0 HLWeaponPlayerSpawn()
+{//health 100, armour 0, nothing in hand
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		hl_wpn_have[i] = FALSE;
+		hl_wpn_clip[i] = 0;
+		hl_wpn_next[i] = 0.0;
+	}
+
+	for (i = 0; i < HLAMMO_COUNT; i++)
+		hl_wpn_ammo[i] = 0;
+
+	hl_wpn_active      = HLWPN_NONE;
+	hl_wpn_reloading   = HLWPN_NONE;
+	hl_wpn_reload_done = 0.0;
+	hl_wpn_sel_slot    = -1;
+	hl_wpn_sel_pos     = -1;
+	hl_wpn_picked      = 0;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+		hl_wpn_next2[i] = 0.0;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+		hl_proj[i].kind = HLPRJ_FREE;
+
+	hl_proj_live = 0;
+
+	for (i = 0; i < HLWPN_BEAM_MAX; i++)
+		hl_wpn_beam[i].die = 0.0;
+
+	hl_wpn_beam_next = 0;
+
+	HLWeaponBeamSprites;
+
+	hl_wpn_pump_time     = 0.0;
+	hl_wpn_gren_start    = 0.0;
+	hl_wpn_satchel_ready = 0;
+	hl_wpn_gauss_state   = 0;
+	hl_wpn_gauss_primary = FALSE;
+	hl_wpn_egon_on       = FALSE;
+	hl_wpn_egon_beam     = FALSE;
+	hl_wpn_hornet_phase  = 0;
+	hl_wpn_hornet_charge = 0.0;
+	hl_wpn_spot_on       = FALSE;
+	hl_wpn_spot_valid    = FALSE;
+	hl_wpn_on_target     = FALSE;
+	hl_wpn_zoom_fov      = 0;
+
+	hl_wpn_vm     = NULL;
+	hl_wpn_vm_for = HLWPN_NONE;
+
+	HLEntPlayerReset;
+
+}
+
+U0 HLWeaponAfterRestore()
+{
+	CHLWeaponInfo *w;
+
+	hl_wpn_spawned   = TRUE;
+	hl_wpn_last_time = hl_ent_time;
+
+	hl_wpn_vm = NULL;
+
+	if (hl_wpn_active >= 0 && hl_wpn_active < HLWPN_COUNT &&
+		hl_wpn_have[hl_wpn_active])
+	{
+		w = &hl_wpn_info[hl_wpn_active];
+		hl_wpn_vm     = HLStudioCacheGet(w->view_model);
+		hl_wpn_vm_for = hl_wpn_active;
+	}
+	else
+		hl_wpn_vm_for = HLWPN_NONE;
+}
+
+U0 HLWeaponRemoveAll()
+{//CBasePlayer::RemoveAllItems(FALSE), player.cpp:373.
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		hl_wpn_have[i] = FALSE;
+		hl_wpn_clip[i] = 0;
+	}
+
+	for (i = 0; i < HLAMMO_COUNT; i++)
+		hl_wpn_ammo[i] = 0;
+
+	hl_wpn_active      = HLWPN_NONE;
+	hl_wpn_reloading   = HLWPN_NONE;
+	hl_wpn_reload_done = 0.0;
+	hl_wpn_sel_slot    = -1;
+	hl_wpn_sel_pos     = -1;
+	hl_wpn_zoom_fov    = 0;
+
+	hl_wpn_vm     = NULL;
+	hl_wpn_vm_for = HLWPN_NONE;
+}
+
+U0 HLWeaponPackDeadPlayerItems()
+{//CBasePlayer::PackDeadPlayerItems, player.cpp:684.
+	CHLEntity	*box;
+	F64			 org[3];
+	F64			 ang[3];
+	I64			 i;
+	I64			 id;
+	I64			 ammo;
+	I64			 count;
+
+	id = hl_wpn_active;
+	if (id < 0 || id >= HLWPN_COUNT || !hl_wpn_have[id])
+		return;
+
+	HLVecCopy(hl_ent_player_org, org);
+	HLVecSet(ang, 0.0, hl_ent_player_ang[1], 0.0);
+
+	i = HLEntAlloc;
+	if (i < 0)
+		return;
+
+	box = &hl_entities[i];
+	HLStrCopy(box->classname, "weaponbox", 64);
+	HLVecCopy(org, box->origin);
+	HLVecCopy(ang, box->angles);
+	box->weapons = id + 1;			//0 means empty
+	box->health  = ToF64(hl_wpn_clip[id]);
+	ammo = hl_wpn_info[id].ammo;
+	count = 0;
+	if (ammo >= 0 && ammo < HLAMMO_COUNT)
+		count = hl_wpn_ammo[ammo];
+	box->charge = ToF64(count);
+	HLEntSpawnWeaponBox(hl_map, box);
+	box->spawned = TRUE;
+
+	hl_wpn_have[id] = FALSE;
+	hl_wpn_clip[id] = 0;
+	if (ammo >= 0 && ammo < HLAMMO_COUNT)
+		hl_wpn_ammo[ammo] = 0;
+	if (hl_wpn_active == id)
+		HLWeaponSetActive(HLWPN_NONE);
+}
+
+U0 HLWeaponBoxGive(I64 self)
+{//CWeaponBox::Touch give half - weapons.cpp:1337
+	CHLEntity	*e = HLEntGet(self);
+	I64			 id;
+	I64			 ammo;
+	I64			 count;
+	I64			 clip;
+
+	if (!e || e->ent_class != HLC_WEAPONBOX)
+		return;
+
+	id = e->weapons - 1;
+	if (id < 0 || id >= HLWPN_COUNT)
+	{
+		HLEntRelease(self);
+		return;
+	}
+
+	clip  = ToI64(e->health);
+	count = ToI64(e->charge);
+	ammo  = hl_wpn_info[id].ammo;
+
+	if (!hl_wpn_have[id])
+	{
+		hl_wpn_have[id] = TRUE;
+		hl_wpn_clip[id] = clip;
+		if (hl_wpn_clip[id] < 0)
+			hl_wpn_clip[id] = 0;
+		if (hl_wpn_info[id].max_clip > 0 &&
+			hl_wpn_clip[id] > hl_wpn_info[id].max_clip)
+			hl_wpn_clip[id] = hl_wpn_info[id].max_clip;
+	}
+
+	if (ammo >= 0 && ammo < HLAMMO_COUNT && count > 0)
+		HLWeaponGiveAmmo(ammo, count);
+
+	if (hl_wpn_active < 0)
+		HLWeaponSetActive(id);
+
+	HLEntRelease(self);
+}
+
+U0 HLWeaponBoxSweep(F64 *player_org)
+{
+	CHLEntity	*e;
+	F64			 d[3];
+	I64			 i;
+
+	if (!hl_entities || !player_org || hl_ent_player_dead)
+		return;
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->in_use || e->ent_class != HLC_WEAPONBOX)
+			goto qwbs_next;
+
+		if (e->weapons < 1)
+			goto qwbs_next;
+
+		HLVecSub(player_org, e->origin, d);
+		if (HLVecLength(d) > 48.0)
+			goto qwbs_next;
+
+		HLWeaponBoxGive(i);
+
+qwbs_next:
+	}
+}
+
+
+I64 HLWeaponAmmoForClass(U8 *classname, I64 *_count)
+{//ammo_* classname to (pool, rounds).
+	*_count = 0;
+
+	if (!StrICompare(classname, "ammo_9mmclip"))
+	{
+		*_count = 17;
+		return HLAMMO_9MM;
+	}
+
+	if (!StrICompare(classname, "ammo_glockclip"))
+	{
+		*_count = 17;
+		return HLAMMO_9MM;
+	}
+
+	if (!StrICompare(classname, "ammo_9mmbox"))
+	{
+		*_count = 200;
+		return HLAMMO_9MM;
+	}
+
+	if (!StrICompare(classname, "ammo_9mmAR") ||
+		!StrICompare(classname, "ammo_mp5clip"))
+	{
+		*_count = 50;
+		return HLAMMO_9MM;
+	}
+
+	if (!StrICompare(classname, "ammo_buckshot"))
+	{
+		*_count = 12;
+		return HLAMMO_BUCKSHOT;
+	}
+
+	if (!StrICompare(classname, "ammo_357"))
+	{
+		*_count = 6;
+		return HLAMMO_357;
+	}
+
+	if (!StrICompare(classname, "ammo_ARgrenades") ||
+		!StrICompare(classname, "ammo_mp5grenades"))
+	{
+		*_count = 2;
+		return HLAMMO_ARGRENADE;
+	}
+
+	if (!StrICompare(classname, "ammo_crossbow"))
+	{
+		*_count = 5;
+		return HLAMMO_BOLT;
+	}
+
+	if (!StrICompare(classname, "ammo_rpgclip"))
+	{
+		*_count = 1;
+		return HLAMMO_ROCKET;
+	}
+
+	if (!StrICompare(classname, "ammo_gaussclip") ||
+		!StrICompare(classname, "ammo_egonclip"))
+	{
+		*_count = 20;
+		return HLAMMO_URANIUM;
+	}
+
+
+	return HLAMMO_NONE;
+}
+
+U0 HLWeaponPickups(CHLMap *map, F64 *player_org)
+{
+	CHLEntity	*e;
+	F64			 pmins[3];
+	F64			 pmaxs[3];
+	F64			 imins[3];
+	F64			 imaxs[3];
+	I64			 i;
+	I64			 id;
+	I64			 type;
+	I64			 count = 0;
+	Bool		 took;
+
+	if (!hl_entities || !map || !player_org)
+		return;
+
+	for (i = 0; i < 3; i++)
+	{
+		pmins[i] = player_org[i] + hl_player_mins[i];
+		pmaxs[i] = player_org[i] + hl_player_maxs[i];
+	}
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->in_use || e->brush_model >= 0)
+			goto qwp_next;
+
+		id   = -1;
+		type = HLAMMO_NONE;
+
+		if (!StrNICompare(e->classname, "weapon_", 7))
+			id = HLWeaponFindByClass(e->classname);
+		else if (!StrNICompare(e->classname, "ammo_", 5))
+			type = HLWeaponAmmoForClass(e->classname, &count);
+
+		if (id < 0 && type == HLAMMO_NONE)
+			goto qwp_next;
+
+		//UTIL_SetSize(-16,-16,0)..(16,16,16), rebuilt from the origin
+		imins[0] = e->origin[0] - HLWPN_ITEM_HALF;
+		imins[1] = e->origin[1] - HLWPN_ITEM_HALF;
+		imins[2] = e->origin[2];
+		imaxs[0] = e->origin[0] + HLWPN_ITEM_HALF;
+		imaxs[1] = e->origin[1] + HLWPN_ITEM_HALF;
+		imaxs[2] = e->origin[2] + HLWPN_ITEM_TOP;
+
+		if (pmaxs[0] < imins[0] || pmins[0] > imaxs[0])
+			goto qwp_next;
+		if (pmaxs[1] < imins[1] || pmins[1] > imaxs[1])
+			goto qwp_next;
+		if (pmaxs[2] < imins[2] || pmins[2] > imaxs[2])
+			goto qwp_next;
+
+		took = FALSE;
+
+		if (id >= 0)
+		{
+			took = HLWeaponGive(id);
+
+			if (took)
+				HLSndPlayAt("items/gunpickup2.wav", e->origin, 1.0,
+					HLENT_SND_ATTEN);
+		}
+		else
+		{
+			took = HLWeaponGiveAmmo(type, count);
+
+			if (took)
+				HLSndPlayAt("items/9mmclip1.wav", e->origin, 1.0,
+					HLENT_SND_ATTEN);
+		}
+
+		if (!took)
+			goto qwp_next;
+
+		hl_wpn_picked++;
+
+		HLEntQueueCall(i, HLM_REMOVE, hl_ent_player, HLUSE_TOGGLE, 0.0);
+
+		if (e->target[0])
+			HLEntUseTargets(i, hl_ent_player, HLUSE_TOGGLE, 0.0);
+
+qwp_next:
+	}
+
+	HLEntDrainCalls();
+}
+
+
+I64 HLWeaponPitch(I64 base, I64 span)
+{
+	if (span < 1)
+		return base;
+
+	return base + HLPartRandI(span);
+}
+
+U0 HLWeaponSnd2(U8 *a, U8 *b, F64 *org, F64 vol, F64 atten,
+	I64 entnum, I64 chan, I64 pitch)
+{//RANDOM_LONG(0,1) over two takes
+	if (HLPartRandI(2) == 0)
+		HLSndPlayAt(a, org, vol, atten, entnum, chan, pitch);
+	else
+		HLSndPlayAt(b, org, vol, atten, entnum, chan, pitch);
+}
+
+U0 HLWeaponSnd3(U8 *a, U8 *b, U8 *c, F64 *org, F64 vol, F64 atten,
+	I64 entnum, I64 chan, I64 pitch)
+{//RANDOM_LONG(0,2) over three takes
+	I64 pick = HLPartRandI(3);
+
+	if (pick == 0)
+		HLSndPlayAt(a, org, vol, atten, entnum, chan, pitch);
+	else if (pick == 1)
+		HLSndPlayAt(b, org, vol, atten, entnum, chan, pitch);
+	else
+		HLSndPlayAt(c, org, vol, atten, entnum, chan, pitch);
+}
+
+U0 HLWeaponSndMove(I64 entnum, I64 chan, F64 *org)
+{
+	I64 i;
+
+	for (i = 0; i < HLSND_DYNAMIC_CHANNELS; i++)
+	{
+		if (hl_snd_chan[i].entnum == entnum &&
+			hl_snd_chan[i].entchannel == chan)
+		{
+			HLVecCopy(org, hl_snd_chan[i].origin);
+			return;
+		}
+	}
+}
+
+
+I64 HLProjAlloc()
+{
+	I64 i;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+	{
+		if (hl_proj[i].kind == HLPRJ_FREE)
+			return i;
+	}
+
+	hl_proj_dropped++;
+
+	return -1;
+}
+
+U0 HLProjFree(I64 i)
+{
+	if (i < 0 || i >= HLPROJ_MAX)
+		return;
+
+	HLSndStop(HLWPN_SND_PROJ + i, HLCHAN_WEAPON);
+	HLSndStop(HLWPN_SND_PROJ + i, HLENT_CHAN_BODY);
+
+	hl_proj[i].kind = HLPRJ_FREE;
+}
+
+CHLStudio *HLProjModel(I64 kind)
+{
+	CHLStudio	*m;
+	U8			*path;
+	F64			 setting;
+	I64			 c;
+
+	if (kind <= HLPRJ_FREE || kind >= HLPRJ_KINDS)
+		return NULL;
+
+	if (hl_proj_tried[kind])
+		return hl_proj_mdl[kind];
+
+	hl_proj_tried[kind] = TRUE;
+
+	if (kind == HLPRJ_BOLT || kind == HLPRJ_STUCK)
+		path = "models/crossbow_bolt.mdl";
+	else if (kind == HLPRJ_ROCKET)
+		path = "models/rpgrocket.mdl";
+	else if (kind == HLPRJ_CONTACT)
+		path = "models/grenade.mdl";
+	else if (kind == HLPRJ_TIMED)
+		path = "models/w_grenade.mdl";
+	else if (kind == HLPRJ_SATCHEL)
+		path = "models/w_satchel.mdl";
+	else if (kind == HLPRJ_TRIPMINE)
+		path = "models/v_tripmine.mdl";
+	else if (kind == HLPRJ_SNARK)
+		path = "models/w_squeak.mdl";
+	else if (kind == HLPRJ_HORNET)
+		path = "models/hornet.mdl";
+	else if (kind == HLPRJ_SPIT || kind == HLPRJ_CTRLBALL ||
+		kind == HLPRJ_FLAME)
+	{
+		hl_proj_mdl[kind] = NULL;
+		return NULL;
+	}
+	else
+		path = "models/hornet.mdl";
+
+	m = HLStudioCacheGet(path);
+
+	hl_proj_mdl[kind] = m;
+
+	if (!m)
+		return NULL;
+
+	for (c = 0; c < 4; c++)
+	{
+		setting = HLStudioCtlSetting(m, c, 0.0);
+
+		if (setting >= 0.0)
+			hl_proj_ctl[kind * HLST_MAX_CONTROLLERS + c] = setting;
+	}
+
+	return m;
+}
+
+I64 HLProjSeq(I64 kind)
+{
+	if (kind == HLPRJ_TIMED)
+		return HLPRJ_SEQ_TIMED;
+
+	if (kind == HLPRJ_SATCHEL)
+		return HLPRJ_SEQ_SATCHEL;
+
+	if (kind == HLPRJ_TRIPMINE)
+		return HLPRJ_SEQ_TRIPMINE;
+
+	if (kind == HLPRJ_SNARK)
+		return HLPRJ_SEQ_SNARK;
+
+	return 0;
+}
+
+I64 HLProjBody(I64 kind)
+{
+	if (kind == HLPRJ_TRIPMINE)
+		return HLPRJ_BODY_TRIPMINE;
+
+	return 0;
+}
+
+U0 HLProjAngles(CHLProj *p, F64 *out)
+{
+	F64 speed;
+
+	if (p->kind == HLPRJ_SNARK)
+	{
+		speed = HLVecLength(p->vel);
+
+		if (speed > 1.0)
+			HLVecToAngles(p->vel, out);
+		else
+			HLVecToAngles(p->dir, out);
+
+		out[0] = 0.0;
+		out[2] = 0.0;
+		return;
+	}
+
+	if (p->kind == HLPRJ_TIMED || p->kind == HLPRJ_SATCHEL ||
+		p->kind == HLPRJ_CONTACT || p->kind == HLPRJ_TRIPMINE)
+	{
+		HLVecToAngles(p->dir, out);
+		return;
+	}
+
+	speed = HLVecLength(p->vel);
+
+	if (speed > 1.0)
+		HLVecToAngles(p->vel, out);
+	else
+		HLVecToAngles(p->dir, out);
+}
+
+I64 HLProjSpawn(I64 kind, F64 *org, F64 *vel, F64 damage, F64 life,
+	F64 gravity, F64 friction, Bool bounce, I64 owner)
+{
+	CHLProj	*p;
+	I64		 i;
+
+	i = HLProjAlloc;
+
+	if (i < 0)
+		return -1;
+
+	p = &hl_proj[i];
+
+	p->kind = kind;
+
+	HLVecCopy(org, p->org);
+	HLVecCopy(vel, p->vel);
+	HLVecCopy(vel, p->dir);
+	HLVecNormalize(p->dir);
+
+	p->gravity   = gravity;
+	p->friction  = friction;
+	p->damage    = damage;
+	p->bounce    = bounce;
+	p->on_ground = FALSE;
+	p->armed     = FALSE;
+	p->owner     = owner;
+	p->beam_len  = 0.0;
+	HLVecCopy(org, p->beam_end);
+	p->arm       = 0.0;
+	p->next_hurt = 0.0;
+	p->next_hop  = 0.0;
+	p->next_puff = 0.0;
+
+	p->seq       = HLProjSeq(kind);
+	p->frame     = 0.0;
+	p->anim_rate = 1.0;
+
+	if (kind == HLPRJ_TIMED)
+		p->seq += HLPartRandI(4);
+
+	p->next_hunt = hl_ent_time + 1.0e6;
+	p->enemy     = -1;
+	HLVecCopy(org, p->prev_org);
+	HLVecCopy(p->dir, p->aim);
+
+	HLProjModel(kind);
+
+	if (life > 0.0)
+		p->die = hl_ent_time + life;
+	else
+		p->die = 0.0;
+
+	return i;
+}
+
+U0 HLProjDrainAI()
+{
+	CHLAIProjReq	*r;
+	I64				 i;
+	I64				 kind;
+	I64				 n;
+
+	n = hl_ai_proj_q_n;
+	hl_ai_proj_q_n = 0;
+
+	for (i = 0; i < n; i++)
+	{
+		r = &hl_ai_proj_q[i];
+
+		if (r->kind == HLAIPRJ_SPIT)
+			kind = HLPRJ_SPIT;
+		else if (r->kind == HLAIPRJ_HORNET)
+			kind = HLPRJ_HORNET;
+		else if (r->kind == HLAIPRJ_GRENADE)
+			kind = HLPRJ_TIMED;
+		else if (r->kind == HLAIPRJ_CTRLBALL)
+			kind = HLPRJ_CTRLBALL;
+		else if (r->kind == HLAIPRJ_FLAME)
+			kind = HLPRJ_FLAME;
+		else if (r->kind == HLAIPRJ_ROCKET)
+			kind = HLPRJ_ROCKET;
+		else
+			goto qpda_next;
+
+		HLProjSpawn(kind, r->org, r->vel, r->damage, r->life,
+			r->gravity, r->friction, r->bounce, r->owner);
+
+qpda_next:
+	}
+}
+
+U0 HLWeaponRadiusDamage(CHLMap *map, F64 *src, F64 damage, F64 radius,
+	I64 attacker, I64 bits = HLDMG_BLAST)
+{//::RadiusDamage, dlls/combat.cpp:1038.
+	CHLEntity	*e;
+	CHLTrace	 tr;
+	F64			 spot[3];
+	F64			 from[3];
+	F64			 zero[3];
+	F64			 delta[3];
+	F64			 falloff;
+	F64			 dist;
+	F64			 hurt;
+	I64			 i;
+
+	if (!hl_entities || !map || radius <= 0.0)
+		return;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	falloff = damage / radius;
+
+	HLVecCopy(src, from);
+	from[2] += 1.0;
+
+	HLVecCopy(hl_ent_player_org, spot);
+	spot[2] += (hl_player_mins[2] + hl_player_maxs[2]) * 0.5;
+
+	HLVecSub(spot, from, delta);
+	dist = HLVecLength(delta);
+
+	if (dist <= radius && !hl_ent_player_dead)
+	{
+		HLTraceEntity(map, from, spot, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.fraction >= 1.0)
+		{
+			hurt = damage - dist * falloff;
+
+			if (hurt > 0.0)
+				HLEntHurtPlayer(hurt, bits, src);
+		}
+	}
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		if (!e->in_use || e->takedamage == HLDMG_TAKE_NO)
+			goto qwrd_next;
+
+		if (e->absmax[0] > e->absmin[0] || e->absmax[2] > e->absmin[2])
+		{
+			spot[0] = (e->absmin[0] + e->absmax[0]) * 0.5;
+			spot[1] = (e->absmin[1] + e->absmax[1]) * 0.5;
+			spot[2] = (e->absmin[2] + e->absmax[2]) * 0.5;
+		}
+		else
+			HLVecCopy(e->origin, spot);
+
+		HLVecSub(spot, from, delta);
+		dist = HLVecLength(delta);
+
+		if (dist > radius)
+			goto qwrd_next;
+
+		HLTraceEntity(map, from, spot, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.fraction < 1.0 && hl_trace_native_ent != i)
+			goto qwrd_next;
+
+		hurt = damage - dist * falloff;
+
+		if (hurt <= 0.0)
+			goto qwrd_next;
+
+		HLDmgHurt(i, attacker, hurt, bits);
+
+qwrd_next:
+	}
+
+	HLEntDrainCalls();
+}
+
+U0 HLProjExplode(CHLMap *map, I64 i)
+{
+	CHLProj	*p;
+	F64		 dmg;
+
+	if (i < 0 || i >= HLPROJ_MAX)
+		return;
+
+	p   = &hl_proj[i];
+	dmg = p->damage;
+
+	HLFxExplosionCreate(map, p->org, ToI64(dmg), tS);
+
+	HLWeaponSnd3("weapons/explode3.wav", "weapons/explode4.wav",
+		"weapons/explode5.wav", p->org, 1.0, HLENT_SND_ATTEN, 0, 0,
+		HLPITCH_NORM);
+
+	//CBaseMonster::RadiusDamage - the blast reaches dmg * 2.5
+	HLWeaponRadiusDamage(map, p->org, dmg, dmg * 2.5, p->owner);
+
+	//CGrenade::Explode's aftermath, ggrenade.cpp:110-112.
+	HLWeaponSnd3("weapons/debris1.wav", "weapons/debris2.wav",
+		"weapons/debris3.wav", p->org, 0.55, HLENT_SND_ATTEN, 0,
+		HLENT_CHAN_BODY, HLPITCH_NORM);
+
+	HLProjFree(i);
+}
+
+U0 HLProjBounceSound(I64 i)
+{
+	CHLProj	*p;
+	F64		 left;
+	I64		 pitch;
+
+	if (i < 0 || i >= HLPROJ_MAX)
+		return;
+
+	p = &hl_proj[i];
+
+	if (p->kind == HLPRJ_SATCHEL)
+	{
+		HLWeaponSnd3("weapons/g_bounce1.wav", "weapons/g_bounce2.wav",
+			"weapons/g_bounce3.wav", p->org, 1.0, HLENT_SND_ATTEN, 0,
+			HLENT_CHAN_BODY, HLPITCH_NORM);
+		return;
+	}
+
+	if (p->kind == HLPRJ_SNARK)
+	{
+		left = p->die - hl_ent_time;
+
+		if (left < 0.0)
+			left = 0.0;
+
+		pitch = ToI64(155.0 - 60.0 * (left / HLPRJ_SNARK_LIFE));
+
+		if (pitch < 80)
+			pitch = 80;
+
+		HLWeaponSnd3("squeek/sqk_hunt1.wav", "squeek/sqk_hunt2.wav",
+			"squeek/sqk_hunt3.wav", p->org, 1.0, HLENT_SND_ATTEN, 0,
+			HLENT_CHAN_VOICE, pitch);
+		return;
+	}
+
+	HLWeaponSnd3("weapons/grenade_hit1.wav", "weapons/grenade_hit2.wav",
+		"weapons/grenade_hit3.wav", p->org, 0.25, HLENT_SND_ATTEN, 0,
+		HLENT_CHAN_BODY, HLPITCH_NORM);
+}
+
+U0 HLProjBoltTouch(CHLMap *map, I64 i, CHLTrace *tr)
+{
+	CHLProj	*p = &hl_proj[i];
+	I64		 hit;
+
+	hit = hl_trace_native_ent;
+
+	if (hit >= 0)
+	{
+		HLDmgHurt(hit, p->owner, p->damage, HLDMG_BULLET | HLDMG_NEVERGIB);
+		HLEntDrainCalls();
+
+		//CCrossbowBolt::BoltTouch, crossbow.cpp:128-130, on CHAN_BODY
+		HLWeaponSnd2("weapons/xbow_hitbod1.wav", "weapons/xbow_hitbod2.wav",
+			tr->end_pos, 1.0, HLENT_SND_ATTEN, 0, HLENT_CHAN_BODY,
+			HLPITCH_NORM);
+
+		HLProjFree(i);
+		return;
+	}
+
+	//crossbow.cpp:140 - 0.95..1.0 gain at 98 + RANDOM_LONG(0,7)
+	HLSndPlayAt("weapons/xbow_hit1.wav", tr->end_pos, 0.97, HLENT_SND_ATTEN,
+		0, HLENT_CHAN_BODY, HLWeaponPitch(98, 8));
+
+	//EV_FireCrossbow2's world branch, ev_hldm.cpp:1286
+	HLFxSparkShower(tr->end_pos, tr->plane_normal, tS);
+
+	//stands in the wall, twelve units back along its flight
+	HLVecMA(tr->end_pos, -12.0, p->dir, p->org);
+	HLVecSet(p->vel, 0.0, 0.0, 0.0);
+
+	p->kind = HLPRJ_STUCK;
+	p->die  = hl_ent_time + HLPRJ_BOLT_STICK;
+}
+
+U0 HLProjAnimSpeed(CHLProj *p)
+{//the last three lines of CGrenade::BounceTouch, ggrenade.cpp:290-294.
+	F64 rate;
+
+	rate = HLVecLength(p->vel) / 200.0;
+
+	if (rate > 1.0)
+		rate = 1.0;
+	else if (rate < 0.5)
+		rate = 0.0;
+
+	p->anim_rate = rate;
+}
+
+U0 HLProjTouch(CHLMap *map, I64 i, CHLTrace *tr)
+{
+	CHLProj	*p = &hl_proj[i];
+	F64		 back;
+	F64		 dot;
+	F64		 speed;
+	I64		 hit;
+	I64		 bits;
+	Bool	 muted = FALSE;
+
+	if (p->kind == HLPRJ_BOLT)
+	{
+		HLProjBoltTouch(map, i, tr);
+		return;
+	}
+
+	if (p->kind == HLPRJ_CONTACT || p->kind == HLPRJ_ROCKET)
+	{
+		HLVecCopy(tr->end_pos, p->org);
+		HLProjExplode(map, i);
+		return;
+	}
+
+	if (p->kind == HLPRJ_HORNET || p->kind == HLPRJ_SPIT ||
+		p->kind == HLPRJ_CTRLBALL)
+	{
+		hit = hl_trace_native_ent;
+
+		if (hit >= 0)
+		{
+			if (p->kind == HLPRJ_HORNET)
+			{
+				HLWeaponSnd3("hornet/ag_hornethit1.wav",
+					"hornet/ag_hornethit2.wav", "hornet/ag_hornethit3.wav",
+					p->org, 1.0, HLATTN_NORM, 0, HLENT_CHAN_VOICE, HLPITCH_NORM);
+
+				//CHornet::DieTouch, dlls/hornet.cpp:410 - DMG_BULLET
+				HLDmgHurt(hit, p->owner, p->damage, HLDMG_BULLET);
+			}
+			else if (p->kind == HLPRJ_SPIT)
+			{
+				//CSquidSpit::Touch, bullsquid.cpp - DMG_ACID
+				HLDmgHurt(hit, p->owner, p->damage, HLDMG_ACID);
+			}
+			else
+			{
+				HLDmgHurt(hit, p->owner, p->damage, HLDMG_ENERGYBEAM);
+			}
+
+			HLEntDrainCalls();
+		}
+
+		HLProjFree(i);
+		return;
+	}
+
+	HLVecCopy(tr->end_pos, p->org);
+
+	if (p->kind == HLPRJ_SNARK)
+	{
+		if (hl_ent_time < p->next_puff)
+			muted = TRUE;
+		else
+		{
+			p->next_puff = hl_ent_time + 0.1;
+
+			//squeakgrenade.cpp:376.
+			p->next_hunt = hl_ent_time;
+		}
+	}
+
+	//a bouncing grenade clubs what it lands on for 1, debounced a second
+	hit = hl_trace_native_ent;
+	speed = HLVecLength(p->vel);
+
+	if (muted)
+		hit = -1;
+
+	if (hit >= 0 && speed > 100.0 && hl_ent_time > p->next_hurt)
+	{
+		//DMG_CLUB from CGrenade::BounceTouch, dlls/ggrenade.cpp:233.
+		bits = HLDMG_CLUB;
+
+		if (p->kind == HLPRJ_SNARK)
+			bits = HLDMG_SLASH;
+
+		HLDmgHurt(hit, p->owner, 1.0, bits);
+		HLEntDrainCalls();
+		p->next_hurt = hl_ent_time + 1.0;
+
+		if (p->kind == HLPRJ_SNARK)
+			HLSndPlayAt("squeek/sqk_deploy1.wav", p->org, 1.0, HLENT_SND_ATTEN,
+				0, HLCHAN_WEAPON, HLWeaponPitch(100, 40));
+	}
+
+	//SV_Physics_Toss: backoff 2.0 - friction for MOVETYPE_BOUNCE
+	back = 2.0 - p->friction;
+
+	dot = HLVecDot(p->vel, tr->plane_normal);
+	HLVecMA(p->vel, -back * dot, tr->plane_normal, p->vel);
+
+	if (tr->plane_normal[2] > 0.7)
+	{
+		speed = Sqrt(p->vel[0] * p->vel[0] + p->vel[1] * p->vel[1] +
+			p->vel[2] * 0.45 * p->vel[2] * 0.45);
+
+		if (speed <= HLPRJ_REST_SPEED)
+		{
+			HLVecSet(p->vel, 0.0, 0.0, 0.0);
+			p->on_ground = TRUE;
+
+			//BounceTouch's FL_ONGROUND arm, ggrenade.cpp:264
+			if (p->kind == HLPRJ_TIMED)
+				p->seq = 1;
+
+			p->anim_rate = 0.0;
+			return;
+		}
+
+		//static friction, ggrenade.cpp:262-266.
+		if (p->kind != HLPRJ_SNARK)
+			HLVecScale(p->vel, 0.8, p->vel);
+
+		HLProjAnimSpeed(p);
+
+		//CGrenade::BounceTouch, ggrenade.cpp:258-267
+		if (!muted)
+			HLProjBounceSound(i);
+
+		return;
+	}
+
+	if (p->kind == HLPRJ_SATCHEL)
+		HLVecScale(p->vel, 0.95, p->vel);
+
+	HLProjAnimSpeed(p);
+
+	if (!muted)
+		HLProjBounceSound(i);
+}
+
+U0 HLProjMineThink(CHLMap *map, I64 i)
+{
+	CHLProj		*p = &hl_proj[i];
+	CHLTrace	 tr;
+	F64			 end[3];
+	F64			 zero[3];
+	F64			 len;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+	HLVecMA(p->org, HLPRJ_MINE_BEAM, p->dir, end);
+
+	HLTraceEntity(map, p->org, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+	len = HLPRJ_MINE_BEAM * tr.fraction;
+
+	//MakeBeam's vecTmpEnd, tripmine.cpp:255.
+	HLVecCopy(tr.end_pos, p->beam_end);
+
+	if (!p->armed)
+	{
+		if (hl_ent_time < p->arm)
+			return;
+
+		p->armed    = TRUE;
+		p->beam_len = len;
+
+		HLSndStop(HLWPN_SND_PROJ + i, HLENT_CHAN_BODY);
+
+		//tripmine.cpp:225, EMIT_SOUND_DYN at 0.5 and pitch 75. CHAN_VOICE there;
+		HLSndPlayAt("weapons/mine_activate.wav", p->org, 0.5, HLENT_SND_ATTEN,
+			0, HLCHAN_WEAPON, 75);
+		return;
+	}
+
+	if (len < p->beam_len - 8.0)
+		HLProjExplode(map, i);
+}
+
+U0 HLProjSnarkThink(CHLMap *map, I64 i)
+{//CSqueakGrenade::HuntThink, squeakgrenade.cpp:200-317.
+	CHLProj		*p = &hl_proj[i];
+	CHLEntity	*e;
+	CHLTrace	 tr;
+	F64			 zero[3];
+	F64			 eye[3];
+	F64			 delta[3];
+	F64			 left;
+	F64			 dist;
+	F64			 best_dist;
+	F64			 speed;
+	F64			 adj;
+	I64			 best;
+	I64			 ent;
+	I64			 s;
+
+	if (hl_ent_time < p->next_hop)
+		return;
+
+	p->next_hop = hl_ent_time + 0.1;
+
+	if (p->on_ground)
+	{
+		HLVecScale(p->vel, 0.9, p->vel);
+		p->vel[2] += 8.0;
+
+		p->on_ground = FALSE;
+	}
+
+	HLVecSub(p->org, p->prev_org, delta);
+
+	if (HLVecLength(delta) < 1.0)
+	{
+		p->vel[0] = HLFxRandF(-100.0, 100.0);
+		p->vel[1] = HLFxRandF(-100.0, 100.0);
+	}
+
+	HLVecCopy(p->org, p->prev_org);
+
+	if (hl_ent_time < p->next_hunt)
+		return;
+
+	p->next_hunt = hl_ent_time + 2.0;
+
+	left = p->die - hl_ent_time;
+
+	if (left <= 0.5 && left >= 0.3)
+		HLSndPlayAt("squeek/sqk_die1.wav", p->org, 1.0, HLENT_SND_ATTEN, 0,
+			HLENT_CHAN_VOICE, HLWeaponPitch(100, 64));
+
+	if (!map || !hl_entities)
+		return;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	e = HLEntGet(p->enemy);
+
+	if (!e || !e->in_use || e->health <= 0.0)
+	{
+		best      = -1;
+		best_dist = 512.0;
+
+		for (s = 0; s < hl_ai_mon_count; s++)
+		{
+			ent = hl_ai_mon[s].ent;
+			e   = HLEntGet(ent);
+
+			if (!e || !e->in_use || e->health <= 0.0 || ent == p->owner)
+				goto qpst_next;
+
+			HLVecSub(e->origin, p->org, delta);
+			dist = HLVecLength(delta);
+
+			if (dist > best_dist)
+				goto qpst_next;
+
+			HLVecCopy(e->origin, eye);
+			eye[2] += hl_ai_mon_info[hl_ai_mon[s].kind].view_ofs;
+
+			HLTraceEntity(map, p->org, eye, zero, zero, hl_move_pass, TRUE,
+				&tr);
+
+			if (tr.fraction < 1.0)
+				goto qpst_next;
+
+			best      = ent;
+			best_dist = dist;
+
+qpst_next:
+		}
+
+		p->enemy = best;
+	}
+
+	if (p->enemy < 0)
+		return;
+
+	e = HLEntGet(p->enemy);
+
+	if (!e)
+		return;
+
+	s = -1;
+
+	if (p->enemy >= 0 && p->enemy < HLENT_MAX)
+		s = hl_ai_mon_of[p->enemy];
+
+	HLVecCopy(e->origin, eye);
+
+	if (s >= 0)
+		eye[2] += hl_ai_mon_info[hl_ai_mon[s].kind].view_ofs;
+
+	HLTraceEntity(map, p->org, eye, zero, zero, hl_move_pass, TRUE, &tr);
+
+	if (tr.fraction >= 1.0)
+	{
+		HLVecSub(eye, p->org, delta);
+
+		if (HLVecNormalize(delta) > 0.0)
+			HLVecCopy(delta, p->aim);
+	}
+
+	//:279-286. The slower it is going the harder it turns
+	speed = HLVecLength(p->vel);
+	adj   = 50.0 / (speed + 10.0);
+
+	if (adj > 1.2)
+		adj = 1.2;
+
+	HLVecScale(p->vel, adj, p->vel);
+	HLVecMA(p->vel, 300.0, p->aim, p->vel);
+}
+
+U0 HLProjRocketThink(CHLMap *map, I64 i)
+{
+	CHLProj		*p = &hl_proj[i];
+	CHLTrace	 tr;
+	F64			 target[3];
+	F64			 delta[3];
+	F64			 zero[3];
+	F64			 speed;
+
+	if (hl_ent_time < p->arm)
+		return;
+
+	if (!p->armed)
+	{
+		p->armed = TRUE;
+
+		HLSndPlayAt("weapons/rocket1.wav", p->org, 1.0, 0.5,
+			HLWPN_SND_PROJ + i, HLCHAN_WEAPON, HLPITCH_NORM, TRUE);
+	}
+
+	HLWeaponSndMove(HLWPN_SND_PROJ + i, HLCHAN_WEAPON, p->org);
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	HLVecCopy(p->dir, target);
+
+	if (hl_wpn_spot_on && hl_wpn_spot_valid)
+	{
+		HLTraceEntity(map, p->org, hl_wpn_spot_pos, zero, zero, hl_move_pass,
+			FALSE, &tr);
+
+		if (tr.fraction >= 0.90)
+		{
+			HLVecSub(hl_wpn_spot_pos, p->org, delta);
+
+			if (HLVecNormalize(delta) > 0.0)
+			{
+				if (HLVecDot(p->dir, delta) > 0.0)
+					HLVecCopy(delta, target);
+			}
+		}
+	}
+
+	speed = HLVecLength(p->vel);
+
+	if (hl_ent_time - p->arm < 1.0)
+	{
+		HLVecScale(p->vel, 0.2, p->vel);
+		HLVecMA(p->vel, speed * 0.8 + 400.0, target, p->vel);
+
+		if (HLVecLength(p->vel) > 2000.0)
+		{
+			HLVecNormalize(p->vel);
+			HLVecScale(p->vel, 2000.0, p->vel);
+		}
+	}
+	else
+	{
+		HLVecScale(p->vel, 0.2, p->vel);
+		HLVecMA(p->vel, speed * 0.798, target, p->vel);
+
+		if (HLVecLength(p->vel) < 1500.0)
+		{
+			HLProjExplode(map, i);
+			return;
+		}
+	}
+
+	HLVecCopy(p->vel, p->dir);
+	HLVecNormalize(p->dir);
+}
+
+U0 HLProjAnimAdvance(CHLProj *p, F64 dt)
+{
+	CHLStudio	*m;
+	CHLStSeq	*sq;
+	F64			 span;
+
+	if (p->anim_rate <= 0.0)
+		return;
+
+	m = hl_proj_mdl[p->kind];
+
+	if (!m || p->seq < 0 || p->seq >= m->num_seqs)
+		return;
+
+	sq = &m->seqs[p->seq];
+
+	span = ToF64(sq->num_frames - 1);
+
+	if (span < 1.0)
+		span = 1.0;
+
+	p->frame += dt * p->anim_rate * sq->fps / span;
+
+	p->frame -= ToF64(ToI64(p->frame));
+
+	if (p->frame < 0.0)
+		p->frame = 0.0;
+}
+
+U0 HLProjFlameThink(CHLMap *map, I64 i)
+{//CGargantua::FlameUpdate + FlameDamage, gargantua.cpp:552 and :608.
+	CHLProj		*p = &hl_proj[i];
+	CHLEntity	*owner;
+	CHLEntity	*e;
+	CHLTrace	 tr;
+	F64			 src[3];
+	F64			 end[3];
+	F64			 spot[3];
+	F64			 aim[3];
+	F64			 delta[3];
+	F64			 zero[3];
+	F64			 dist;
+	F64			 along;
+	F64			 hurt;
+	F64			 mid[3];
+	I64			 j;
+
+	if (!map)
+		return;
+
+	if (hl_ent_time < p->next_hurt)
+		return;
+
+	p->next_hurt = hl_ent_time + HLPRJ_FLAME_TICK;
+
+	HLVecCopy(p->org, src);
+	HLVecCopy(p->dir, aim);
+	HLVecNormalize(aim);
+
+	owner = NULL;
+	if (p->owner >= 0)
+		owner = HLEntGet(p->owner);
+
+	if (owner)
+	{
+		HLVecCopy(owner->origin, src);
+		src[2] += owner->maxs[2] * 0.6;
+		HLAngleVectors(owner->angles, aim, NULL, NULL);
+		HLVecCopy(src, p->org);
+		HLVecCopy(aim, p->dir);
+	}
+
+	HLVecMA(src, HLPRJ_FLAME_LEN, aim, end);
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	mid[0] = (src[0] + end[0]) * 0.5;
+	mid[1] = (src[1] + end[1]) * 0.5;
+	mid[2] = (src[2] + end[2]) * 0.5;
+
+	if (!hl_ent_player_dead)
+	{
+		HLVecCopy(hl_ent_player_org, spot);
+		spot[2] += (hl_player_mins[2] + hl_player_maxs[2]) * 0.5;
+		HLVecSub(spot, mid, delta);
+		along = HLVecDot(aim, delta);
+
+		if (along > HLPRJ_FLAME_LEN * 0.5)
+			along = HLPRJ_FLAME_LEN * 0.5;
+		else if (along < -HLPRJ_FLAME_LEN * 0.5)
+			along = -HLPRJ_FLAME_LEN * 0.5;
+
+		HLVecMA(mid, along, aim, src);
+		HLVecSub(spot, src, delta);
+		dist = HLVecLength(delta);
+
+		if (dist <= 96.0)
+		{
+			HLTraceEntity(map, src, spot, zero, zero, hl_move_pass, FALSE,
+				&tr);
+
+			if (tr.fraction >= 1.0)
+			{
+				hurt = p->damage;
+				if (dist > 64.0)
+					hurt = p->damage - (dist - 64.0) * 0.4;
+
+				if (hurt > 0.0)
+					HLEntHurtPlayer(hurt, HLDMG_BURN, p->org);
+			}
+		}
+	}
+
+	for (j = 0; j < hl_num_entities; j++)
+	{
+		e = &hl_entities[j];
+
+		if (!e->in_use || e->takedamage == HLDMG_TAKE_NO)
+			goto qpft_next;
+
+		if (j == p->owner)
+			goto qpft_next;
+
+		if (e->absmax[0] > e->absmin[0] || e->absmax[2] > e->absmin[2])
+		{
+			spot[0] = (e->absmin[0] + e->absmax[0]) * 0.5;
+			spot[1] = (e->absmin[1] + e->absmax[1]) * 0.5;
+			spot[2] = (e->absmin[2] + e->absmax[2]) * 0.5;
+		}
+		else
+			HLVecCopy(e->origin, spot);
+
+		HLVecSub(spot, mid, delta);
+		along = HLVecDot(aim, delta);
+
+		if (along > HLPRJ_FLAME_LEN * 0.5)
+			along = HLPRJ_FLAME_LEN * 0.5;
+		else if (along < -HLPRJ_FLAME_LEN * 0.5)
+			along = -HLPRJ_FLAME_LEN * 0.5;
+
+		HLVecMA(mid, along, aim, src);
+		HLVecSub(spot, src, delta);
+		dist = HLVecLength(delta);
+
+		if (dist > 96.0)
+			goto qpft_next;
+
+		HLTraceEntity(map, src, spot, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.fraction < 1.0)
+			goto qpft_next;
+
+		hurt = p->damage;
+		if (dist > 64.0)
+			hurt = p->damage - (dist - 64.0) * 0.4;
+
+		if (hurt > 0.0)
+			HLEntTakeDamageType(j, p->owner, hurt, HLDMG_BURN);
+
+qpft_next:
+	}
+}
+
+U0 HLProjFrame(CHLMap *map, F64 dt)
+{
+	CHLProj		*p;
+	CHLTrace	 tr;
+	F64			 start[3];
+	F64			 end[3];
+	F64			 zero[3];
+	I64			 i;
+
+	if (!map || dt <= 0.0)
+		return;
+
+	HLProjDrainAI;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	hl_proj_live = 0;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+	{
+		p = &hl_proj[i];
+
+		if (p->kind == HLPRJ_FREE)
+			goto qwpf_next;
+
+		hl_proj_live++;
+
+		HLProjAnimAdvance(p, dt);
+
+
+		if (p->kind == HLPRJ_STUCK)
+		{
+			if (p->die > 0.0 && hl_ent_time >= p->die)
+				HLProjFree(i);
+
+			goto qwpf_next;
+		}
+
+		if (p->kind == HLPRJ_TRIPMINE)
+		{
+			HLProjMineThink(map, i);
+			goto qwpf_next;
+		}
+
+		if (p->kind == HLPRJ_FLAME)
+		{
+			if (p->die > 0.0 && hl_ent_time >= p->die)
+			{
+				HLProjFree(i);
+				goto qwpf_next;
+			}
+
+			HLProjFlameThink(map, i);
+			goto qwpf_next;
+		}
+
+		if (p->die > 0.0 && hl_ent_time >= p->die)
+		{
+			if (p->kind == HLPRJ_HORNET || p->kind == HLPRJ_SPIT ||
+				p->kind == HLPRJ_CTRLBALL)
+				HLProjFree(i);
+			else
+			{
+				if (p->kind == HLPRJ_SNARK)
+				{
+					//CSqueakGrenade::Killed
+					HLSndPlayAt("squeek/sqk_blast1.wav", p->org, 1.0, 0.5,
+						0, HLCHAN_ITEM);
+
+					HLFxBloodDrips(p->org, zero, HLBLOOD_YELLOW, 80, tS);
+
+					//squeakgrenade.cpp:195 puts the splat on CHAN_VOICE;
+					HLSndPlayAt("common/bodysplat.wav", p->org, 0.75,
+						HLENT_SND_ATTEN, 0, HLCHAN_WEAPON, 200);
+				}
+
+				HLProjExplode(map, i);
+			}
+
+			goto qwpf_next;
+		}
+
+		if (p->kind == HLPRJ_ROCKET)
+			HLProjRocketThink(map, i);
+
+		if (p->kind == HLPRJ_FREE)
+			goto qwpf_next;
+
+		if (p->kind == HLPRJ_SNARK)
+			HLProjSnarkThink(map, i);
+
+
+		if (p->gravity > 0.0 && !p->on_ground)
+			p->vel[2] -= HLPHYS_GRAVITY * p->gravity * dt;
+
+		HLVecCopy(p->org, start);
+		HLVecMA(start, dt, p->vel, end);
+
+		HLTraceEntity(map, start, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (p->kind == HLPRJ_ROCKET && tS >= p->next_puff)
+		{
+			p->next_puff = tS + HLPRJ_PUFF_STEP;
+
+			HLFxSmoke(start, HLPRJ_PUFF_SCALE, tS);
+
+			HLDlightAdd(start, HLPRJ_GLOW_RADIUS, HLPRJ_PUFF_STEP, 0.0, tS,
+				255, 190, 100, -(2000 + i));
+		}
+
+		HLVecCopy(tr.end_pos, p->org);
+
+		if (tr.all_solid)
+		{
+			HLProjFree(i);
+			goto qwpf_next;
+		}
+
+		if (tr.fraction < 1.0)
+		{
+			p->on_ground = FALSE;
+			HLProjTouch(map, i, &tr);
+		}
+		else if (p->vel[2] != 0.0 || !p->bounce)
+			p->on_ground = FALSE;
+
+qwpf_next:
+	}
+}
+
+U0 HLProjDetonateSatchels(CHLMap *map)
+{
+	I64 i;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+	{
+		if (hl_proj[i].kind == HLPRJ_SATCHEL)
+			HLProjExplode(map, i);
+	}
+}
+
+I64 HLProjCountSatchels()
+{
+	I64 i;
+	I64 n = 0;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+	{
+		if (hl_proj[i].kind == HLPRJ_SATCHEL)
+			n++;
+	}
+
+	return n;
+}
+
+
+I64 HLWeaponTextureAt(CHLMap *map, F64 *start, F64 *end)
+{
+	CHLFace		*f;
+	CHLTexInfo	*ti;
+	U8			*name;
+	I64			 face;
+
+	if (!map || !map->nodes || !map->faces || !map->textures ||
+		map->num_models < 1)
+		return HLTEX_CONCRETE;
+
+	face = HLSndSurfAtPoint(map, map->models[0].head_node[0], start, end);
+
+	if (face < 0 || face >= map->num_faces)
+		return HLTEX_CONCRETE;
+
+	f  = &map->faces[face];
+	ti = &map->texinfo[f->tex_info];
+
+	if (ti->miptex < 0 || ti->miptex >= map->num_textures)
+		return HLTEX_CONCRETE;
+
+	name = map->textures[ti->miptex].name;
+
+	if (name[0] == '-' || name[0] == '+')
+		name += 2;
+
+	if (name[0] == '{' || name[0] == '!' || name[0] == '~' || name[0] == ' ')
+		name++;
+
+	return HLSndMaterialFor(name);
+}
+
+U0 HLWeaponTextureSound(I64 mat, F64 *org, Bool flesh)
+{//EV_HLDM_PlayTextureSound
+	U8	 name[64];
+	U8	*prefix;
+	F64	 fvol;
+	I64	 pitch;
+	I64	 num;
+
+	pitch = HLWeaponPitch(96, 16);
+
+	if (flesh || mat == HLTEX_FLESH)
+	{
+		HLWeaponSnd2("weapons/bullet_hit1.wav", "weapons/bullet_hit2.wav",
+			org, 1.0, HLATTN_NORM, 0, HLCHAN_STATIC, pitch);
+		return;
+	}
+
+	//CHAR_TEX_WOOD - debris/wood1-3
+	if (mat == HLTEX_WOOD)
+	{
+		HLWeaponSnd3("debris/wood1.wav", "debris/wood2.wav",
+			"debris/wood3.wav", org, 0.9, HLATTN_NORM, 0, HLCHAN_STATIC,
+			pitch);
+		return;
+	}
+
+	//CHAR_TEX_GLASS and CHAR_TEX_COMPUTER share debris/glass1-3
+	if (mat == HLTEX_GLASS || mat == HLTEX_COMPUTER)
+	{
+		HLWeaponSnd3("debris/glass1.wav", "debris/glass2.wav",
+			"debris/glass3.wav", org, 0.8, HLATTN_NORM, 0, HLCHAN_STATIC,
+			pitch);
+		return;
+	}
+
+	fvol = 0.9;
+
+	if (mat == HLTEX_VENT)
+		fvol = 0.5;
+	else if (mat == HLTEX_TILE)
+		fvol = 0.8;
+
+	prefix = HLSndStepPrefix(HLSndStepForMaterial(mat));
+
+	num = 1 + HLPartRandI(2);
+
+	StrPrint(name, "player/%s%d.wav", prefix, num);
+
+	HLSndPlayAt(name, org, fvol, HLATTN_NORM, 0, HLCHAN_STATIC, pitch);
+}
+
+U0 HLWeaponBulletImpact(CHLMap *map, F64 *src, CHLTrace *tr, Bool flesh,
+	Bool decal)
+{
+	U8	*snd;
+	I64	 mat;
+	I64	 pick;
+
+	mat = HLWeaponTextureAt(map, src, tr->end_pos);
+
+	HLWeaponTextureSound(mat, tr->end_pos, flesh);
+
+	if (!decal)
+		return;
+
+	HLFxGunshotDecal(tr->end_pos, tr->plane_normal, tS);
+
+	if (HLPartRandI(2) != 0)
+		return;
+
+	pick = HLPartRandI(5);
+
+	if (pick == 0)
+		snd = "weapons/ric1.wav";
+	else if (pick == 1)
+		snd = "weapons/ric2.wav";
+	else if (pick == 2)
+		snd = "weapons/ric3.wav";
+	else if (pick == 3)
+		snd = "weapons/ric4.wav";
+	else
+		snd = "weapons/ric5.wav";
+
+	HLSndPlayAt(snd, tr->end_pos, 1.0, HLATTN_NORM, 0, HLCHAN_AUTO,
+		HLPITCH_NORM);
+}
+
+
+#define HLWPN_AUTOAIM_2DEG		0.0348994967025
+#define HLWPN_AUTOAIM_5DEG		0.08715574274766
+#define HLWPN_AUTOAIM_10DEG		0.1736481776669
+
+//flDist in GetAutoaimVector, player.cpp:4436
+#define HLWPN_AUTOAIM_DIST		8192.0
+
+//angles.x and angles.y limits, player.cpp:4465-4472
+#define HLWPN_AUTOAIM_PITCH		25.0
+#define HLWPN_AUTOAIM_YAW		12.0
+
+
+U0 HLWeaponPunch(I64 id, Bool secondary)
+{
+	F64 pitch = 0.0;
+
+	if (id == HLWPN_GLOCK)
+		pitch = -2.0;					//ev_hldm.cpp:497, :542
+	else if (id == HLWPN_PYTHON)
+		pitch = -10.0;					//ev_hldm.cpp:798
+	else if (id == HLWPN_MP5)
+	{
+		if (secondary)
+			pitch = -10.0;				//ev_hldm.cpp:750
+		else
+			pitch = HLPartRand(2.0);	//RANDOM_FLOAT(-2,2), ev_hldm.cpp:707
+	}
+	else if (id == HLWPN_SHOTGUN)
+	{
+		if (secondary)
+			pitch = -10.0;				//ev_hldm.cpp:595
+		else
+			pitch = -5.0;				//ev_hldm.cpp:650
+	}
+	else if (id == HLWPN_CROSSBOW)
+		pitch = -2.0;					//ev_hldm.cpp:1328
+	else if (id == HLWPN_RPG)
+		pitch = -5.0;					//ev_hldm.cpp:1367
+	else if (id == HLWPN_GAUSS)
+		pitch = -2.0;					//ev_hldm.cpp:911
+	else if (id == HLWPN_HORNETGUN)
+		pitch = ToF64(HLPartRandI(3));	//RANDOM_LONG(0,2), ev_hldm.cpp:1551
+	else
+		return;
+
+	hl_wpn_punch[0] = pitch;
+	hl_wpn_punch[1] = 0.0;
+	hl_wpn_punch[2] = 0.0;
+}
+
+F64 HLWeaponAutoaimFor(I64 id, Bool secondary)
+{
+	if (id == HLWPN_GLOCK)
+	{
+		if (secondary)
+			return 0.0;
+
+		return HLWPN_AUTOAIM_10DEG;
+	}
+
+	if (id == HLWPN_PYTHON)
+		return HLWPN_AUTOAIM_10DEG;		//python.cpp:195
+
+	if (id == HLWPN_MP5 && !secondary)
+		return HLWPN_AUTOAIM_5DEG;		//mp5.cpp:157
+
+	if (id == HLWPN_SHOTGUN)
+		return HLWPN_AUTOAIM_5DEG;		//shotgun.cpp:153, :226
+
+	return 0.0;
+}
+
+
+Bool HLWeaponDrowned(I64 id)
+{
+	if (hl_pm_waterlevel < 3)
+		return FALSE;
+
+	return ToBool(id == HLWPN_SHOTGUN || id == HLWPN_PYTHON ||
+		id == HLWPN_MP5 || id == HLWPN_GAUSS || id == HLWPN_EGON);
+}
+
+
+#define HLHIT_GENERIC		0
+#define HLHIT_HEAD			1
+#define HLHIT_CHEST			2
+#define HLHIT_STOMACH		3
+#define HLHIT_LEFTARM		4
+#define HLHIT_RIGHTARM		5
+#define HLHIT_LEFTLEG		6
+#define HLHIT_RIGHTLEG		7
+
+//not one of the shared groups
+#define HLHIT_HGRUNT_HELMET	11
+
+#define HLHIT_MUL_HEAD		3.0		//sk_monster_head, skill.cfg:353
+#define HLHIT_MUL_CHEST		1.0		//sk_monster_chest, skill.cfg:357
+#define HLHIT_MUL_STOMACH	1.0		//sk_monster_stomach, skill.cfg:361
+#define HLHIT_MUL_ARM		1.0		//sk_monster_arm, skill.cfg:365
+#define HLHIT_MUL_LEG		1.0		//sk_monster_leg, skill.cfg:369
+
+F64 HLWeaponHitGroupScale(I64 ent, F64 *start, F64 *end, I64 *_group = NULL)
+{//CBaseMonster::TraceAttack's per-hitgroup multiplier, combat.cpp:1326-1355.
+	CHLEntity	*e;
+	F64			 frac;
+	F64			 cycle;
+	I64			 box;
+	I64			 group;
+
+	if (_group)
+		*_group = HLHIT_GENERIC;
+
+	if (ent < 0 || ent >= hl_num_entities || !hl_entities)
+		return 1.0;
+
+	e = &hl_entities[ent];
+
+	if (HLStudioHitBoxCount(e->studio) < 1)
+		return 1.0;
+
+	cycle = HLAIEntityCycle(e);
+
+	group = HLStudioTrace(e->studio, e->origin, e->angles, e->seq, cycle, 0.0,
+		start, end, &frac, &box, e->controllers, 0.0);
+
+	if (_group)
+		*_group = group;
+
+	if (group == HLHIT_HEAD)
+		return HLHIT_MUL_HEAD;
+
+	if (group == HLHIT_CHEST)
+		return HLHIT_MUL_CHEST;
+
+	if (group == HLHIT_STOMACH)
+		return HLHIT_MUL_STOMACH;
+
+	if (group == HLHIT_LEFTARM || group == HLHIT_RIGHTARM)
+		return HLHIT_MUL_ARM;
+
+	if (group == HLHIT_LEFTLEG || group == HLHIT_RIGHTLEG)
+		return HLHIT_MUL_LEG;
+
+	return 1.0;
+}
+
+
+F64 HLWeaponAngleDelta(F64 a)
+{//fold a difference of two angles into [-180, 180], player.cpp:4456-4463
+	while (a > 180.0)
+		a -= 360.0;
+	while (a < -180.0)
+		a += 360.0;
+
+	return a;
+}
+
+U0 HLWeaponAutoaim(CHLMap *map, F64 *src, F64 *forward, F64 *right, F64 *up,
+	F64 delta, F64 *out_f, F64 *out_r, F64 *out_u)
+{
+	CHLEntity	*e;
+	CHLTrace	 tr;
+	F64			 zero[3];
+	F64			 end[3];
+	F64			 center[3];
+	F64			 dir[3];
+	F64			 best_dir[3];
+	F64			 cur[3];
+	F64			 ang[3];
+	F64			 aim[3];
+	F64			 best_dot;
+	F64			 dot;
+	F64			 dist;
+	I64			 i;
+	I64			 s;
+	I64			 best = -1;
+
+	hl_wpn_on_target = FALSE;
+
+	HLVecCopy(forward, out_f);
+	HLVecCopy(right, out_r);
+	HLVecCopy(up, out_u);
+
+	//delta 0 is a weapon that aims raw - no candidate could clear best_dot
+	if (!map || !hl_wpn_sv_aim || !hl_entities || delta <= 0.0)
+		return;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	HLVecToAngles(forward, cur);
+	cur[0] = -cur[0];
+
+	HLVecMA(src, HLWPN_AUTOAIM_DIST, forward, end);
+	HLTraceEntity(map, src, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+	i = hl_trace_native_ent;
+
+	if (i >= 0 && i < hl_num_entities &&
+		hl_entities[i].takedamage != HLDMG_TAKE_NO)
+	{
+		hl_wpn_on_target = TRUE;
+		return;
+	}
+
+	best_dot = delta;
+
+	for (i = 0; i < hl_num_entities; i++)
+	{
+		e = &hl_entities[i];
+
+		s = -1;
+
+		if (i < HLENT_MAX)
+			s = hl_ai_mon_of[i];
+
+		if (s < 0)
+			goto qwaa_next;
+
+		if (!e->in_use || e->takedamage == HLDMG_TAKE_NO || e->health <= 0.0)
+			goto qwaa_next;
+
+		if (HLAIRelationship(HLAITargetClass(i), HLCLASS_PLAYER) <= HLREL_NONE)
+			goto qwaa_next;
+
+		center[0] = (e->absmin[0] + e->absmax[0]) * 0.5;
+		center[1] = (e->absmin[1] + e->absmax[1]) * 0.5;
+		center[2] = (e->absmin[2] + e->absmax[2]) * 0.5;
+
+		HLVecSub(center, src, dir);
+		dist = HLVecNormalize(dir);
+
+		if (HLVecDot(dir, forward) < 0.0)
+			goto qwaa_next;
+
+		dot = Abs(HLVecDot(dir, right)) + Abs(HLVecDot(dir, up)) * 0.5;
+
+		dot *= 1.0 + 0.2 * (dist / HLWPN_AUTOAIM_DIST);
+
+		if (dot > best_dot)
+			goto qwaa_next;
+
+		HLTraceEntity(map, src, center, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.fraction < 1.0 && hl_trace_native_ent != i)
+			goto qwaa_next;
+
+		best_dot = dot;
+		best     = i;
+		HLVecCopy(dir, best_dir);
+
+qwaa_next:
+	}
+
+	if (best < 0)
+		return;
+
+	hl_wpn_on_target = TRUE;
+
+	HLVecToAngles(best_dir, ang);
+	ang[0] = -ang[0];
+
+	aim[0] = HLWeaponAngleDelta(ang[0] - cur[0]);
+	aim[1] = HLWeaponAngleDelta(ang[1] - cur[1]);
+
+	if (aim[0] > HLWPN_AUTOAIM_PITCH)
+		aim[0] = HLWPN_AUTOAIM_PITCH;
+	if (aim[0] < -HLWPN_AUTOAIM_PITCH)
+		aim[0] = -HLWPN_AUTOAIM_PITCH;
+
+	if (aim[1] > HLWPN_AUTOAIM_YAW)
+		aim[1] = HLWPN_AUTOAIM_YAW;
+	if (aim[1] < -HLWPN_AUTOAIM_YAW)
+		aim[1] = -HLWPN_AUTOAIM_YAW;
+
+	//m_vecAutoAim = angles * 0.9, player.cpp:4484
+	ang[0] = cur[0] + aim[0] * 0.9;
+	ang[1] = cur[1] + aim[1] * 0.9;
+	ang[2] = cur[2];
+
+	HLAngleVectors(ang, out_f, out_r, out_u);
+}
+
+
+I64 HLWeaponTracerFreq(I64 id)
+{
+	if (id == HLWPN_MP5)
+		return 2;
+
+	return 0;
+}
+
+F64 HLWeaponWaterHeight(CHLMap *map, F64 *point, F64 minz, F64 maxz)
+{//UTIL_WaterLevel
+	F64 mid[3];
+	F64 lo = minz;
+	F64 hi = maxz;
+	F64 diff;
+
+	HLVecCopy(point, mid);
+	mid[2] = lo;
+
+	if (HLPointContents(map, mid) != HLCONTENTS_WATER)
+		return lo;
+
+	mid[2] = hi;
+
+	if (HLPointContents(map, mid) == HLCONTENTS_WATER)
+		return hi;
+
+	diff = hi - lo;
+
+	while (diff > 1.0)
+	{
+		mid[2] = lo + diff / 2.0;
+
+		if (HLPointContents(map, mid) == HLCONTENTS_WATER)
+			lo = mid[2];
+		else
+			hi = mid[2];
+
+		diff = hi - lo;
+	}
+
+	return mid[2];
+}
+
+U0 HLWeaponBubbleTrail(CHLMap *map, F64 *from, F64 *to, I64 count)
+{//UTIL_BubbleTrail, util.cpp:1525.
+	F64 height;
+
+	if (count < 1)
+		return;
+
+	height = HLWeaponWaterHeight(map, from, from[2], from[2] + 256.0) - from[2];
+
+	if (height < 8.0)
+	{
+		height = HLWeaponWaterHeight(map, to, to[2], to[2] + 256.0) - to[2];
+
+		if (height < 8.0)
+			return;
+
+		height = height + to[2] - from[2];
+	}
+
+	HLFxBubbleTrail(from, to, height, count, 8.0, tS);
+}
+
+Bool HLWeaponHelmetDeflects(I64 ent, I64 group)
+{//CHGrunt::TraceAttack, hgrunt.cpp:606-619.
+	I64 s;
+
+	if (group != HLHIT_HGRUNT_HELMET || ent < 0 || ent >= HLENT_MAX)
+		return FALSE;
+
+	s = hl_ai_mon_of[ent];
+
+	if (s < 0 || hl_ai_mon[s].kind != HLMON_HGRUNT)
+		return FALSE;
+
+	return TRUE;
+}
+
+U0 HLWeaponFireBullets(CHLMap *map, F64 *src, F64 *forward, F64 *right,
+	F64 *up, I64 count, F64 spread, F64 damage, F64 range,
+	I64 tracer_freq = 0)
+{
+	CHLTrace	tr;
+	F64			 dir[3];
+	F64			 end[3];
+	F64			 zero[3];
+	F64			 tsrc[3];
+	F64			 x;
+	F64			 y;
+	F64			 scale;
+	Bool		 tracer;
+	Bool		 decal;
+	I64			 i;
+	I64			 j;
+	I64			 hit;
+	I64			 group;
+	I64			 blood;
+	I64			 bits;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	bits = HLDMG_BULLET | HLDMG_NEVERGIB;
+
+	if (damage > 16.0)
+		bits = HLDMG_BULLET | HLDMG_ALWAYSGIB;
+
+	for (i = 0; i < count; i++)
+	{
+		//combat.cpp:1522
+		x = 0.0;
+		y = 0.0;
+
+		if (spread > 0.0)
+		{
+			x = HLPartRandCone() * spread;
+			y = HLPartRandCone() * spread;
+		}
+
+		HLVecCopy(forward, dir);
+		HLVecMA(dir, x, right, dir);
+		HLVecMA(dir, y, up, dir);
+		HLVecNormalize(dir);
+
+		HLVecMA(src, range, dir, end);
+
+		HLTraceEntity(map, src, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+		//EV_HLDM_CheckTracer, ev_hldm.cpp:316.
+		tracer = FALSE;
+
+		if (tracer_freq != 0)
+		{
+			if ((hl_wpn_tracer_count % tracer_freq) == 0)
+			{
+				for (j = 0; j < 3; j++)
+					tsrc[j] = src[j] + right[j] * 2.0 + forward[j] * 16.0;
+
+				tsrc[2] -= 4.0;
+
+				if (tracer_freq != 1)
+					tracer = TRUE;
+
+				HLFxTracer(tsrc, tr.end_pos, tS);
+			}
+
+			hl_wpn_tracer_count++;
+		}
+
+		HLWeaponBubbleTrail(map, src, tr.end_pos,
+			ToI64(range * tr.fraction / 64.0));
+
+		if (tr.fraction >= 1.0 || tr.all_solid)
+			goto qwfb_next;
+
+		hit = hl_trace_native_ent;
+
+		decal = HLEntTraceDecalSurface(&tr);
+
+		if (hit >= 0)
+		{
+			group = HLHIT_GENERIC;
+			scale = HLWeaponHitGroupScale(hit, src, end, &group);
+			HLAttackDirSet(dir, group);
+
+			if (HLWeaponHelmetDeflects(hit, group))
+			{
+				HLDmgHurt(hit, hl_ent_player, 0.01, bits);
+				HLFxRicochet(tr.end_pos, 1.0, tS);
+			}
+			else
+			{
+				HLDmgHurt(hit, hl_ent_player, damage * scale, bits);
+
+				blood = HLBLOOD_RED;
+
+				if (hit < hl_num_entities && hl_entities)
+					blood = hl_entities[hit].blood_color;
+
+				HLFxSpawnBlood(tr.end_pos, dir, blood, damage * scale, tS);
+			}
+		}
+
+		if (!tracer)
+			HLWeaponBulletImpact(map, src, &tr, ToBool(hit >= 0), decal);
+
+qwfb_next:
+	}
+}
+
+Bool HLWeaponMelee(CHLMap *map, F64 *src, F64 *forward, F64 damage, F64 range)
+{
+	CHLTrace	tr;
+	F64			 end[3];
+	F64			 zero[3];
+	F64			 hmins[3];
+	F64			 hmaxs[3];
+	F64			 scale;
+	Bool		 decal;
+	I64			 hit;
+	I64			 group;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+	HLVecMA(src, range, forward, end);
+
+	HLTraceEntity(map, src, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+	//UTIL_TraceHull head_hull when the line cleared, crowbar.cpp:181-192.
+	if (tr.fraction >= 1.0 || tr.all_solid)
+	{
+		HLVecSet(hmins, -16.0, -16.0, -18.0);
+		HLVecSet(hmaxs,  16.0,  16.0,  18.0);
+		HLTraceEntity(map, src, end, hmins, hmaxs, hl_move_pass, FALSE, &tr);
+	}
+
+	if (tr.fraction >= 1.0 || tr.all_solid)
+	{
+		HLSndPlayAt("weapons/cbar_miss1.wav", hl_snd_listener, 1.0, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON);
+		return FALSE;
+	}
+
+	hit = hl_trace_native_ent;
+
+	decal = HLEntTraceDecalSurface(&tr);
+
+	if (hit >= 0)
+	{
+		//crowbar.cpp:243 goes through TraceAttack
+		group = HLHIT_GENERIC;
+		scale = HLWeaponHitGroupScale(hit, src, end, &group);
+		HLAttackDirSet(forward, group);
+		HLDmgHurt(hit, hl_ent_player, damage * scale, HLDMG_CLUB);
+
+		//CCrowbar::Swing's flesh branch
+		HLWeaponSnd3("weapons/cbar_hitbod1.wav", "weapons/cbar_hitbod2.wav",
+			"weapons/cbar_hitbod3.wav", tr.end_pos, 1.0, HLENT_SND_ATTEN, 0,
+			HLCHAN_ITEM, HLPITCH_NORM);
+
+		return TRUE;
+	}
+
+	//the world branch, crowbar.cpp:299-302.
+	HLWeaponTextureSound(HLWeaponTextureAt(map, src, tr.end_pos), tr.end_pos,
+		FALSE);
+
+	HLWeaponSnd2("weapons/cbar_hit1.wav", "weapons/cbar_hit2.wav", tr.end_pos,
+		1.0, HLENT_SND_ATTEN, 0, HLCHAN_ITEM, HLWeaponPitch(98, 4));
+
+	//CCrowbar::Smack, crowbar.cpp:158
+	if (decal)
+		HLFxGunshotDecal(tr.end_pos, tr.plane_normal, tS);
+
+	return TRUE;
+}
+
+U0 HLWeaponFireGauss(CHLMap *map, F64 *src, F64 *aim, F64 damage, Bool primary)
+{
+	CHLTrace	tr;
+	CHLTrace	beam;
+	F64			dir[3];
+	F64			from[3];
+	F64			dest[3];
+	F64			end[3];
+	F64			refl[3];
+	F64			zero[3];
+	F64			n;
+	F64			thick;
+	F64			radius;
+	F64			bwidth;
+	F64			bbright;
+	F64			glow;
+	F64			life;
+	I64			bg;
+	I64			bb;
+	I64			hits = 10;
+	I64			hit;
+	I64			group;
+	F64			scale;
+	Bool		punched = FALSE;
+	Bool		decal   = FALSE;
+
+	//R_BeamPoints, ev_hldm.cpp:966-980.
+	if (primary)
+	{
+		bwidth  = 1.0;
+		bbright = 128.0;
+		bg      = 128;
+		bb      = 0;
+	}
+	else
+	{
+		bwidth  = 2.5;
+		bbright = damage;
+		bg      = 255;
+		bb      = 255;
+	}
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+	HLVecCopy(aim, dir);
+	HLVecCopy(src, from);
+
+	while (damage > 10.0 && hits > 0)
+	{
+		hits--;
+
+		HLVecMA(from, 8192.0, dir, dest);
+		HLTraceEntity(map, from, dest, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.all_solid)
+			return;
+
+		HLVecCopy(tr.end_pos, end);
+
+		HLWeaponBeamAdd(from, end, bwidth, bbright, 255, bg, bb);
+
+		hit = hl_trace_native_ent;
+
+		decal = HLEntTraceDecalSurface(&tr);
+
+		//gauss.cpp:444 is a TraceAttack
+		if (hit >= 0)
+		{
+			group = HLHIT_GENERIC;
+			scale = HLWeaponHitGroupScale(hit, from, dest, &group);
+			HLAttackDirSet(dir, group);
+			HLDmgHurt(hit, hl_ent_player, damage * scale, HLDMG_BULLET);
+			HLEntDrainCalls();
+		}
+
+		if (tr.fraction >= 1.0)
+			return;
+
+		if (decal)
+		{
+			HLFxGunshotDecal(end, tr.plane_normal, tS);
+
+			glow = damage;
+
+			if (glow > 255.0)
+				glow = 255.0;
+
+			if (hl_wpn_spr_flare)
+				HLTEntSpawn(hl_wpn_spr_flare, end, NULL, 0.2, glow,
+					HLTENT_MODE_ADD, 10.0, 0.2, HLTENT_FADEOUT, tS);
+		}
+
+		n = -HLVecDot(tr.plane_normal, dir);
+
+		if (n < 0.5)
+		{
+			//r = 2 * normal * n + dir
+			HLVecCopy(dir, refl);
+			HLVecMA(refl, 2.0 * n, tr.plane_normal, refl);
+			HLVecCopy(refl, dir);
+			HLVecNormalize(dir);
+
+			HLVecMA(end, 8.0, dir, from);
+
+			HLFxSparkShower(end, dir, tS);
+
+			//reflection glow, ev_hldm.cpp:1011
+			glow = damage * n;
+
+			if (glow > 255.0)
+				glow = 255.0;
+
+			if (hl_wpn_spr_flare)
+			{
+				life = damage * n * 0.05;
+
+				if (life < 0.1)
+					life = 0.1;
+
+				HLTEntSpawn(hl_wpn_spr_flare, end, NULL, 0.2, glow,
+					HLTENT_MODE_ADD, 10.0, life, HLTENT_FADEOUT, tS);
+			}
+
+			HLWeaponRadiusDamage(map, end, damage * n, damage * n * 2.5,
+				hl_ent_player);
+
+			if (n == 0.0)
+				n = 0.1;
+
+			damage = damage * (1.0 - n);
+			goto qwfg_again;
+		}
+
+		if (punched)
+			return;
+
+		punched = TRUE;
+
+		if (primary)
+			return;
+
+		HLVecMA(end, 8.0, dir, from);
+		HLTraceEntity(map, from, dest, zero, zero, hl_move_pass, FALSE, &beam);
+
+		if (beam.all_solid)
+			return;
+
+		HLVecCopy(beam.end_pos, dest);
+		HLTraceEntity(map, dest, end, zero, zero, hl_move_pass, FALSE, &beam);
+
+		HLVecSub(beam.end_pos, end, refl);
+		thick = HLVecLength(refl);
+
+		if (thick >= damage)
+			return;
+
+		if (thick == 0.0)
+			thick = 1.0;
+
+		damage -= thick;
+
+		//exit blast. single player uses damage * 2.5 for the radius
+		radius = damage * 2.5;
+
+		HLVecMA(beam.end_pos, 8.0, dir, from);
+		HLWeaponRadiusDamage(map, from, damage, radius, hl_ent_player);
+
+		//exit flare, ev_hldm.cpp:1033 area / punch-through exit
+		glow = damage;
+
+		if (glow > 255.0)
+			glow = 255.0;
+
+		if (hl_wpn_spr_flare)
+			HLTEntSpawn(hl_wpn_spr_flare, beam.end_pos, NULL, 1.0, glow,
+				HLTENT_MODE_ADD, 10.0, 0.1, HLTENT_FADEOUT, tS);
+
+		HLVecMA(beam.end_pos, 1.0, dir, from);
+
+qwfg_again:
+	}
+}
+
+U0 HLWeaponFireEgon(CHLMap *map, F64 *src, F64 *aim, F64 damage, Bool wide)
+{
+	CHLTrace	tr;
+	F64			dest[3];
+	F64			zero[3];
+	F64			scale;
+	Bool		decal;
+	I64			hit;
+	I64			bits;
+	I64			group;
+
+	hl_wpn_egon_beam = FALSE;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+	HLVecMA(src, 2048.0, aim, dest);
+
+	HLTraceEntity(map, src, dest, zero, zero, hl_move_pass, FALSE, &tr);
+
+	if (tr.all_solid)
+		return;
+
+	HLVecCopy(src, hl_wpn_egon_src);
+	HLVecCopy(tr.end_pos, hl_wpn_egon_hit);
+	hl_wpn_egon_beam = TRUE;
+
+	if (hl_ent_time < hl_wpn_egon_pulse)
+		return;
+
+	hit = hl_trace_native_ent;
+
+	decal = HLEntTraceDecalSurface(&tr);
+
+	//egon.cpp:307 and :344 are TraceAttacks.
+	bits = HLDMG_ENERGYBEAM;
+
+	if (wide)
+		bits = HLDMG_ENERGYBEAM | HLDMG_ALWAYSGIB;
+
+	if (hit >= 0)
+	{
+		group = HLHIT_GENERIC;
+		scale = HLWeaponHitGroupScale(hit, src, dest, &group);
+		HLAttackDirSet(aim, group);
+		HLDmgHurt(hit, hl_ent_player, damage * scale, bits);
+		HLEntDrainCalls();
+	}
+
+	if (tr.fraction < 1.0 && decal)
+		HLFxGunshotDecal(tr.end_pos, tr.plane_normal, tS);
+
+	//EGON_PULSE_INTERVAL and EGON_DISCHARGE_INTERVAL are both 0.1
+	hl_wpn_egon_pulse = hl_ent_time + 0.1;
+
+	//single player: wide burns 10 charges a second, narrow 3
+	if (hl_ent_time >= hl_wpn_egon_ammo)
+	{
+		if (hl_wpn_ammo[HLAMMO_URANIUM] > 0)
+			hl_wpn_ammo[HLAMMO_URANIUM]--;
+
+		if (wide)
+			hl_wpn_egon_ammo = hl_ent_time + 0.1;
+		else
+			hl_wpn_egon_ammo = hl_ent_time + 0.166;
+	}
+}
+
+U0 HLWeaponEgonStop()
+{
+	if (!hl_wpn_egon_on)
+		return;
+
+	hl_wpn_egon_on   = FALSE;
+
+	//EV_EgonStop drops both beams with the sound, ev_hldm.cpp:1512-1523
+	hl_wpn_egon_beam = FALSE;
+
+	//EV_EgonStop, ev_hldm.cpp:1500-1504: kill the run loop, then the shutdown.
+	HLSndStop(HLWPN_SND_ENT, HLCHAN_STATIC);
+
+	HLSndPlayAt(HLWPN_EGON_OFF, hl_snd_listener, 0.98, HLATTN_NORM,
+		HLWPN_SND_ENT, HLCHAN_WEAPON, 100);
+
+	if (hl_wpn_active >= 0)
+	{
+		hl_wpn_next[hl_wpn_active]  = hl_ent_time + 0.5;
+		hl_wpn_next2[hl_wpn_active] = hl_ent_time + 0.5;
+
+		HLWeaponVmAnim(hl_wpn_info[hl_wpn_active].seq_idle, FALSE);
+		HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+	}
+}
+
+U0 HLWeaponReleaseGauss(CHLMap *map, F64 *eye, F64 *forward)
+{
+	CHLWeaponInfo	*w;
+	F64				 charge;
+	F64				 damage;
+	I64				 id = hl_wpn_active;
+
+	if (id < 0 || hl_wpn_gauss_state == 0)
+		return;
+
+	w = &hl_wpn_info[id];
+
+	charge = hl_ent_time - hl_wpn_gauss_start;
+
+	//GetFullChargeTime is 4 in single player
+	if (charge > 4.0)
+		damage = 200.0;
+	else
+		damage = 200.0 * (charge / 4.0);
+
+	hl_wpn_gauss_state   = 0;
+	hl_wpn_gauss_primary = FALSE;
+
+	HLWeaponVmAnim(w->seq_fire2, FALSE);
+
+	HLSndStop(HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+	//EV_FireGauss
+	HLSndPlayAt("weapons/gauss2.wav", eye, 0.5 + damage / 400.0, HLATTN_NORM,
+		0, HLCHAN_WEAPON, HLWeaponPitch(85, 32));
+
+	HLWeaponPunch(id, FALSE);
+
+	hl_wpn_push[0] -= forward[0] * damage * 5.0;
+	hl_wpn_push[1] -= forward[1] * damage * 5.0;
+
+	HLWeaponFireGauss(map, eye, forward, damage, FALSE);
+
+	hl_wpn_next[id]  = hl_ent_time + 0.2;
+	hl_wpn_next2[id] = hl_ent_time + 0.2;
+}
+
+Bool HLWeaponTakeRound(I64 id)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return FALSE;
+
+	w = &hl_wpn_info[id];
+
+	if (w->ammo == HLAMMO_NONE)
+		return TRUE;
+
+	if (w->max_clip == HLWPN_NOCLIP)
+	{
+		if (hl_wpn_ammo[w->ammo] <= 0)
+			return FALSE;
+
+		hl_wpn_ammo[w->ammo]--;
+		return TRUE;
+	}
+
+	if (hl_wpn_clip[id] <= 0)
+		return FALSE;
+
+	hl_wpn_clip[id]--;
+
+	return TRUE;
+}
+
+U0 HLWeaponHornetRecharge()
+{
+	if (hl_wpn_ammo[HLAMMO_HORNET] >= hl_wpn_ammo_max[HLAMMO_HORNET])
+		return;
+
+	while (hl_wpn_ammo[HLAMMO_HORNET] < hl_wpn_ammo_max[HLAMMO_HORNET] &&
+		hl_wpn_hornet_charge < hl_ent_time)
+	{
+		hl_wpn_ammo[HLAMMO_HORNET]++;
+		hl_wpn_hornet_charge += HLWPN_HORNET_RECHARGE;
+	}
+}
+
+U0 HLWeaponThrowGrenade(F64 *eye, F64 *forward)
+{
+	F64	dir[3];
+	F64	vel[3];
+	F64	src[3];
+	F64	flat;
+	F64	pitch;
+	F64	speed;
+	F64	fuse;
+
+	if (hl_wpn_gren_start == 0.0)
+		return;
+
+	pitch = -ASin(forward[2]) * 180.0 / 3.14159265358979;
+
+	if (pitch < 0.0)
+		pitch = -10.0 + pitch * (80.0 / 90.0);
+	else
+		pitch = -10.0 + pitch * (100.0 / 90.0);
+
+	speed = (90.0 - pitch) * 6.5;
+
+	if (speed > 1000.0)
+		speed = 1000.0;
+
+	flat = Sqrt(forward[0] * forward[0] + forward[1] * forward[1]);
+
+	if (flat < 0.0001)
+	{
+		dir[0] = 0.0;
+		dir[1] = 0.0;
+	}
+	else
+	{
+		dir[0] = forward[0] / flat * Cos(pitch * 3.14159265358979 / 180.0);
+		dir[1] = forward[1] / flat * Cos(pitch * 3.14159265358979 / 180.0);
+	}
+
+	dir[2] = -Sin(pitch * 3.14159265358979 / 180.0);
+	HLVecNormalize(dir);
+
+	HLVecMA(eye, 16.0, dir, src);
+	HLVecScale(dir, speed, vel);
+
+	fuse = hl_wpn_gren_start - hl_ent_time + 3.0;
+
+	if (fuse < 0.0)
+		fuse = 0.0;
+
+	//CGrenade::ShootTimed: gravity 0.5, friction 0.8, bounces
+	HLProjSpawn(HLPRJ_TIMED, src, vel, hl_wpn_info[HLWPN_HANDGRENADE].damage,
+		fuse, 0.5, 0.8, TRUE, hl_ent_player);
+
+	hl_wpn_ammo[HLAMMO_HANDGRENADE]--;
+	hl_wpn_gren_start = 0.0;
+
+	HLWeaponVmAnim(hl_wpn_info[HLWPN_HANDGRENADE].seq_fire2, FALSE);
+
+	hl_wpn_next[HLWPN_HANDGRENADE] = hl_ent_time + 0.5;
+}
+
+U0 HLWeaponFireSound(I64 id, F64 *eye)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return;
+
+	w = &hl_wpn_info[id];
+	eye = hl_snd_listener;
+
+	//EV_FireGlock1/2, ev_hldm.cpp:504 - one take, 0.92..1.0 at 98 + rand(3)
+	if (id == HLWPN_GLOCK)
+	{
+		HLSndPlayAt("weapons/pl_gun3.wav", eye, 0.96, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(98, 4));
+		return;
+	}
+
+	//EV_FirePython, ev_hldm.cpp:804-807 - two takes at 0.8..0.9
+	if (id == HLWPN_PYTHON)
+	{
+		HLWeaponSnd2("weapons/357_shot1.wav", "weapons/357_shot2.wav", eye,
+			0.85, 0.0, HLWPN_SND_ENT, HLCHAN_WEAPON, HLPITCH_NORM);
+		return;
+	}
+
+	//EV_FireMP5, ev_hldm.cpp:717-720 - hks1 or hks2 at 94 + rand(0xf).
+	if (id == HLWPN_MP5)
+	{
+		HLWeaponSnd2("weapons/hks1.wav", "weapons/hks2.wav", eye, 1.0,
+			0.0, HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(94, 16));
+		return;
+	}
+
+	//EV_FireShotGunSingle, ev_hldm.cpp:657 - 0.95..1.0 at 93 + rand(0x1f)
+	if (id == HLWPN_SHOTGUN)
+	{
+		HLSndPlayAt("weapons/sbarrel1.wav", eye, 0.97, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(93, 32));
+		return;
+	}
+
+	//EV_FireCrossbow
+	if (id == HLWPN_CROSSBOW)
+	{
+		HLSndPlayAt("weapons/xbow_fire1.wav", eye, 1.0, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(93, 16));
+
+		HLSndPlayAt("weapons/xbow_reload1.wav", eye, 0.97, 0.0,
+			HLWPN_SND_ENT, HLCHAN_ITEM, HLWeaponPitch(93, 16));
+		return;
+	}
+
+	//EV_FireRpg
+	if (id == HLWPN_RPG)
+	{
+		HLSndPlayAt("weapons/rocketfire1.wav", eye, 0.9, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON, HLPITCH_NORM);
+
+		HLSndPlayAt("weapons/glauncher.wav", eye, 0.7, 0.0,
+			HLWPN_SND_ENT, HLCHAN_ITEM, HLPITCH_NORM);
+		return;
+	}
+
+	//EV_HornetGunFire, ev_hldm.cpp:1557-1559.
+	if (id == HLWPN_HORNETGUN)
+	{
+		HLWeaponSnd3("agrunt/ag_fire1.wav", "agrunt/ag_fire2.wav",
+			"agrunt/ag_fire3.wav", eye, 1.0, 0.0, HLWPN_SND_ENT, HLCHAN_WEAPON,
+			HLPITCH_NORM);
+		return;
+	}
+
+	//CSqueak::PrimaryAttack
+	if (id == HLWPN_SNARK)
+	{
+		HLWeaponSnd2("squeek/sqk_hunt2.wav", "squeek/sqk_hunt3.wav", eye, 1.0,
+			0.0, HLWPN_SND_ENT, HLENT_CHAN_VOICE, 105);
+		return;
+	}
+
+	if (!w->fire_snd[0])
+		return;
+
+	HLSndPlayAt(w->fire_snd, eye, 1.0, 0.0, HLWPN_SND_ENT, HLCHAN_WEAPON);
+}
+
+U0 HLWeaponSecFireSound(I64 id, F64 *eye)
+{
+	CHLWeaponInfo *w;
+
+	if (id < 0 || id >= HLWPN_COUNT)
+		return;
+
+	w = &hl_wpn_info[id];
+	eye = hl_snd_listener;
+
+	//EV_FireShotGunDouble, ev_hldm.cpp:605 - 0.98..1.0 at 85 + rand(0x1f)
+	if (id == HLWPN_SHOTGUN)
+	{
+		HLSndPlayAt("weapons/dbarrel1.wav", eye, 0.99, 0.0,
+			HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(85, 32));
+		return;
+	}
+
+	if (id == HLWPN_MP5)
+	{
+		HLWeaponSnd2("weapons/glauncher.wav", "weapons/glauncher2.wav", eye,
+			1.0, 0.0, HLWPN_SND_ENT, HLCHAN_WEAPON, HLWeaponPitch(94, 16));
+		return;
+	}
+
+	if (id == HLWPN_GLOCK)
+	{
+		HLWeaponFireSound(id, eye);
+		return;
+	}
+
+	if (!w->sec_snd[0])
+		return;
+
+	HLSndPlayAt(w->sec_snd, eye, 1.0, 0.0, HLWPN_SND_ENT, HLCHAN_WEAPON);
+}
+
+U0 HLWeaponPrimary(CHLMap *map, F64 *eye, F64 *forward, F64 *right, F64 *up,
+	Bool edge)
+{
+	CHLWeaponInfo	*w;
+	CHLTrace		 tr;
+	F64				 src[3];
+	F64				 vel[3];
+	F64				 zero[3];
+	F64				 end[3];
+	F64				 aim_f[3];
+	F64				 aim_r[3];
+	F64				 aim_u[3];
+	I64				 id = hl_wpn_active;
+	I64				 mode;
+	I64				 slot;
+
+	if (id < 0 || !map)
+		return;
+
+	if (hl_wpn_reloading == id)
+		return;
+
+	w    = &hl_wpn_info[id];
+	mode = w->fire_mode;
+
+	HLVecSet(zero, 0.0, 0.0, 0.0);
+
+	if (mode == HLFIRE_EGON_WIDE)
+	{
+		//CEgon::Attack, egon.cpp:177-188
+		if (hl_pm_waterlevel >= 3)
+		{
+			if (hl_wpn_egon_on)
+				HLWeaponEgonStop;
+			else if (edge)
+				HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			return;
+		}
+
+		if (hl_wpn_ammo[HLAMMO_URANIUM] <= 0)
+		{
+			HLWeaponEgonStop;
+
+			if (edge)
+				HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			return;
+		}
+
+		if (!hl_wpn_egon_on)
+		{
+			hl_wpn_egon_on    = TRUE;
+			hl_wpn_egon_mode  = HLFIRE_EGON_WIDE;
+			hl_wpn_egon_pulse = hl_ent_time;
+			hl_wpn_egon_ammo  = hl_ent_time;
+
+			HLWeaponVmFire(id, TRUE);
+
+			//EV_EgonFire, ev_hldm.cpp:1424-1433
+			HLSndPlayAt(HLWPN_EGON_START, eye, 0.9, HLATTN_NORM,
+				HLWPN_SND_ENT, HLCHAN_WEAPON, 100);
+
+			HLSndPlayAt(HLWPN_EGON_RUN, eye, 0.9, HLATTN_NORM,
+				HLWPN_SND_ENT, HLCHAN_STATIC, 100, TRUE);
+		}
+
+		HLWeaponFireEgon(map, eye, forward, w->damage, TRUE);
+		return;
+	}
+
+	if (hl_ent_time < hl_wpn_next[id])
+		return;
+
+	if (mode == HLFIRE_GRENADE)
+	{
+		if (edge && hl_wpn_gren_start == 0.0 &&
+			hl_wpn_ammo[HLAMMO_HANDGRENADE] > 0)
+		{
+			hl_wpn_gren_start = hl_ent_time;
+			HLWeaponVmAnim(w->seq_fire, FALSE);
+		}
+
+		return;
+	}
+
+	if (HLWeaponDrowned(id))
+	{
+		if (edge)
+			HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+		hl_wpn_next[id] = hl_ent_time + 0.15;
+
+		if (id == HLWPN_GAUSS)
+			hl_wpn_next2[id] = hl_ent_time + 0.15;
+
+		return;
+	}
+
+	if (!HLWeaponCanFire(id))
+	{
+		if (edge)
+			HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+		hl_wpn_next[id] = hl_ent_time + 0.2;
+		return;
+	}
+
+	if (mode == HLFIRE_GAUSS && hl_wpn_ammo[HLAMMO_URANIUM] < 2)
+	{
+		if (edge)
+			HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+		hl_wpn_next[id] = hl_ent_time + 0.5;
+		return;
+	}
+
+	hl_wpn_next[id] = hl_ent_time + w->rate;
+
+	HLWeaponVmFire(id, FALSE);
+
+	if (mode == HLFIRE_MELEE)
+	{
+		if (HLWeaponMelee(map, eye, forward, w->damage, w->range))
+		{
+			hl_wpn_next[id] = hl_ent_time + 0.25;
+
+			if (id == HLWPN_CROWBAR)
+			{
+				if (hl_wpn_swing_hit % 2 == 1)
+					HLWeaponVmAnim("attack3hit", FALSE);
+				else
+					HLWeaponVmAnim("attack2hit", FALSE);
+
+				hl_wpn_swing_hit++;
+			}
+		}
+
+		return;
+	}
+
+	if (mode == HLFIRE_BULLET)
+	{
+		HLWeaponTakeRound(id);
+		HLWeaponFireSound(id, eye);
+		HLWeaponPunch(id, FALSE);
+
+		hl_wpn_shell_reload = 0;
+
+		HLWeaponAutoaim(map, eye, forward, right, up,
+			HLWeaponAutoaimFor(id, FALSE), aim_f, aim_r, aim_u);
+
+		HLWeaponFireBullets(map, eye, aim_f, aim_r, aim_u, w->bullets,
+			w->spread, w->damage, w->range, HLWeaponTracerFreq(id));
+
+		if (w->pump > 0.0)
+			hl_wpn_pump_time = hl_ent_time + w->pump;
+
+		return;
+	}
+
+	if (mode == HLFIRE_BOLT)
+	{
+		HLWeaponTakeRound(id);
+		HLWeaponFireSound(id, eye);
+		HLWeaponPunch(id, FALSE);
+
+		//GetGunPosition() - v_up * 2
+		HLVecMA(eye, -2.0, up, src);
+
+		if (hl_pm_waterlevel >= 3)
+			HLVecScale(forward, HLPRJ_BOLT_SPEED * 0.5, vel);
+		else
+			HLVecScale(forward, HLPRJ_BOLT_SPEED, vel);
+
+		//MOVETYPE_FLY with gravity 0.5
+		HLProjSpawn(HLPRJ_BOLT, src, vel, w->damage, 0.0, 0.5, 0.0, FALSE,
+			hl_ent_player);
+		return;
+	}
+
+	if (mode == HLFIRE_ROCKET)
+	{
+		HLWeaponTakeRound(id);
+		HLWeaponFireSound(id, eye);
+		HLWeaponPunch(id, FALSE);
+
+		//GetGunPosition() + forward*16 + right*8 + up*-8
+		HLVecMA(eye, 16.0, forward, src);
+		HLVecMA(src, 8.0, right, src);
+		HLVecMA(src, -8.0, up, src);
+
+		//CRpgRocket::Spawn launches at 250 and lights the motor 0.4s later
+		HLVecScale(forward, 250.0, vel);
+
+		slot = HLProjSpawn(HLPRJ_ROCKET, src, vel, w->damage, 0.0, 0.5, 0.0,
+			FALSE, hl_ent_player);
+
+		if (slot >= 0)
+			hl_proj[slot].arm = hl_ent_time + 0.4;
+
+		return;
+	}
+
+	if (mode == HLFIRE_GAUSS)
+	{
+		hl_wpn_ammo[HLAMMO_URANIUM] -= 2;
+		hl_wpn_gauss_primary = TRUE;
+		hl_wpn_gauss_state   = 0;
+
+		HLWeaponPunch(id, FALSE);
+
+		//EV_FireGauss
+		HLSndPlayAt("weapons/gauss2.wav", eye, 0.5 + w->damage / 400.0,
+			HLATTN_NORM, 0, HLCHAN_WEAPON, HLWeaponPitch(85, 32));
+
+		HLWeaponFireGauss(map, eye, forward, w->damage, TRUE);
+		return;
+	}
+
+	if (mode == HLFIRE_HORNET)
+	{
+		HLWeaponTakeRound(id);
+		HLWeaponPunch(id, FALSE);
+
+		hl_wpn_hornet_charge = hl_ent_time + HLWPN_HORNET_RECHARGE;
+
+		if (hl_wpn_ammo[HLAMMO_HORNET] == 0)
+			hl_wpn_next[id] += HLWPN_HORNET_RECHARGE;
+
+		//GetGunPosition() + forward*16 + right*8 + up*-12, at 300
+		HLVecMA(eye, 16.0, forward, src);
+		HLVecMA(src, 8.0, right, src);
+		HLVecMA(src, -12.0, up, src);
+		HLVecScale(forward, 300.0, vel);
+
+		HLProjSpawn(HLPRJ_HORNET, src, vel, w->damage, HLPRJ_HORNET_LIFE,
+			0.0, 0.0, FALSE, hl_ent_player);
+
+		HLWeaponFireSound(id, eye);
+		return;
+	}
+
+	if (mode == HLFIRE_TRIPMINE)
+	{
+		//placed against whatever is within 128 units
+		HLVecMA(eye, w->range, forward, end);
+		HLTraceEntity(map, eye, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.fraction >= 1.0)
+			return;
+
+		HLWeaponTakeRound(id);
+
+		HLVecMA(tr.end_pos, 8.0, tr.plane_normal, src);
+		HLVecSet(vel, 0.0, 0.0, 0.0);
+
+		slot = HLProjSpawn(HLPRJ_TRIPMINE, src, vel, w->damage, 0.0, 0.0, 0.0,
+			FALSE, hl_ent_player);
+
+		if (slot >= 0)
+		{
+			HLVecCopy(tr.plane_normal, hl_proj[slot].dir);
+			hl_proj[slot].arm = hl_ent_time + HLPRJ_MINE_ARM;
+		}
+
+		//CTripmineGrenade::Spawn, tripmine.cpp:133-134
+		HLSndPlayAt(w->fire_snd, tr.end_pos, 1.0, HLENT_SND_ATTEN, 0,
+			HLCHAN_WEAPON);
+
+		if (slot >= 0)
+			HLSndPlayAt("weapons/mine_charge.wav", tr.end_pos, 0.2,
+				HLENT_SND_ATTEN, HLWPN_SND_PROJ + slot, HLENT_CHAN_BODY);
+
+		return;
+	}
+
+	if (mode == HLFIRE_SATCHEL)
+	{
+		if (hl_wpn_satchel_ready == 2)
+			return;
+
+		HLWeaponTakeRound(id);
+
+		//thrown at 274 from the feet, not the eye
+		HLVecCopy(eye, src);
+		src[2] -= hl_view_ofs_z;
+		HLVecScale(forward, 274.0, vel);
+
+		HLProjSpawn(HLPRJ_SATCHEL, src, vel, w->damage, 0.0, 0.5, 0.8, TRUE,
+			hl_ent_player);
+
+		hl_wpn_satchel_ready = 1;
+		return;
+	}
+
+	if (mode == HLFIRE_SNARK)
+	{
+		HLVecMA(eye, 24.0, forward, src);
+		HLVecMA(eye, 60.0, forward, end);
+		HLTraceEntity(map, src, end, zero, zero, hl_move_pass, FALSE, &tr);
+
+		if (tr.all_solid || tr.start_solid || tr.fraction <= 0.0)
+			return;
+
+		HLWeaponTakeRound(id);
+
+		HLVecScale(forward, 200.0, vel);
+
+		//gravity 0.5 and friction 0.5, squeakgrenade.cpp:131-132.
+		HLProjSpawn(HLPRJ_SNARK, tr.end_pos, vel, w->damage, HLPRJ_SNARK_LIFE,
+			0.5, 0.5, TRUE, hl_ent_player);
+
+		HLWeaponFireSound(id, eye);
+		return;
+	}
+}
+
+U0 HLWeaponSecondary(CHLMap *map, F64 *eye, F64 *forward, F64 *right, F64 *up,
+	Bool edge)
+{
+	CHLWeaponInfo	*w;
+	F64				 src[3];
+	F64				 vel[3];
+	F64				 aim_f[3];
+	F64				 aim_r[3];
+	F64				 aim_u[3];
+	I64				 id = hl_wpn_active;
+	I64				 mode;
+	I64				 slot;
+
+	if (id < 0 || !map)
+		return;
+
+	if (hl_wpn_reloading == id)
+		return;
+
+	w    = &hl_wpn_info[id];
+	mode = w->sec_mode;
+
+	if (mode == HLFIRE_NONE)
+		return;
+
+
+	if (mode == HLFIRE_EGON_NARROW)
+	{
+		//CEgon::Attack, egon.cpp:177-188 - the same body serves both modes
+		if (hl_pm_waterlevel >= 3)
+		{
+			if (hl_wpn_egon_on)
+				HLWeaponEgonStop;
+			else if (edge)
+				HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			return;
+		}
+
+		if (hl_wpn_ammo[HLAMMO_URANIUM] <= 0)
+		{
+			HLWeaponEgonStop;
+			return;
+		}
+
+		if (!hl_wpn_egon_on)
+		{
+			hl_wpn_egon_on    = TRUE;
+			hl_wpn_egon_mode  = HLFIRE_EGON_NARROW;
+			hl_wpn_egon_pulse = hl_ent_time;
+			hl_wpn_egon_ammo  = hl_ent_time;
+
+			HLWeaponVmAnim(w->seq_fire2, TRUE);
+
+			HLSndPlayAt(HLWPN_EGON_START, eye, 0.98, HLATTN_NORM,
+				HLWPN_SND_ENT, HLCHAN_WEAPON, 125);
+
+			HLSndPlayAt(HLWPN_EGON_RUN, eye, 0.98, HLATTN_NORM,
+				HLWPN_SND_ENT, HLCHAN_STATIC, 125, TRUE);
+		}
+
+		HLWeaponFireEgon(map, eye, forward, w->sec_damage, FALSE);
+		return;
+	}
+
+	if (mode == HLFIRE_GAUSS_CHARGE)
+	{
+		//gauss.cpp:179-194
+		if (hl_pm_waterlevel >= 3)
+		{
+			if (hl_wpn_gauss_state != 0)
+			{
+				HLSndStop(HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+				HLSndPlayAt("weapons/electro4.wav", eye, 1.0, HLATTN_NORM, 0,
+					HLCHAN_WEAPON, HLWeaponPitch(80, 64));
+
+				HLWeaponVmAnim(w->seq_idle, FALSE);
+				HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+				hl_wpn_gauss_state = 0;
+			}
+			else if (edge)
+				HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			hl_wpn_next[id]  = hl_ent_time + 0.5;
+			hl_wpn_next2[id] = hl_ent_time + 0.5;
+			return;
+		}
+
+		//CGauss::SecondaryAttack, m_fInAttack 0 -> 1 -> 2
+		if (hl_wpn_gauss_state == 0)
+		{
+			if (hl_wpn_ammo[HLAMMO_URANIUM] <= 0)
+			{
+				if (edge)
+					HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+				hl_wpn_next[id] = hl_ent_time + 0.5;
+				return;
+			}
+
+			hl_wpn_gauss_primary = FALSE;
+
+			hl_wpn_ammo[HLAMMO_URANIUM]--;
+
+			hl_wpn_gauss_state = 1;
+			hl_wpn_gauss_start = hl_ent_time;
+			hl_wpn_gauss_burn  = hl_ent_time;
+
+			//GetFullChargeTime is 4 seconds in single player
+			hl_wpn_gauss_full = hl_ent_time + 4.0;
+
+			HLWeaponVmAnim("spinup", FALSE);
+
+			//EV_SpinGauss
+			HLSndPlayAt("ambience/pulsemachine.wav", eye, 1.0, HLATTN_NORM,
+				HLWPN_SND_ENT, HLCHAN_WEAPON, HLPITCH_NORM, TRUE);
+			return;
+		}
+
+		if (hl_wpn_gauss_state == 1)
+		{
+			hl_wpn_gauss_state = 2;
+			HLWeaponVmAnim("spin", TRUE);
+			return;
+		}
+
+		//spinning: eat a charge every 0.3s until fully charged
+		if (hl_ent_time >= hl_wpn_gauss_burn &&
+			hl_ent_time < hl_wpn_gauss_full)
+		{
+			if (hl_wpn_ammo[HLAMMO_URANIUM] > 0)
+				hl_wpn_ammo[HLAMMO_URANIUM]--;
+
+			hl_wpn_gauss_burn = hl_ent_time + 0.3;
+		}
+
+		if (hl_wpn_ammo[HLAMMO_URANIUM] <= 0)
+		{
+			HLWeaponReleaseGauss(map, eye, forward);
+			return;
+		}
+
+		if (hl_wpn_gauss_start < hl_ent_time - 10.0)
+		{
+			//gauss.cpp:287-288, and the spin dies with it
+			HLSndStop(HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			HLSndPlayAt("weapons/electro4.wav", eye, 1.0, HLATTN_NORM, 0,
+				HLCHAN_WEAPON, HLWeaponPitch(80, 64));
+			HLSndPlayAt("weapons/electro6.wav", eye, 1.0, HLATTN_NORM, 0,
+				HLCHAN_ITEM, HLWeaponPitch(75, 64));
+
+			//TakeDamage(pev, pev, 50, DMG_SHOCK), gauss.cpp:290.
+			HLEntHurtPlayer(50.0, HLDMG_SHOCK);
+
+			hl_wpn_gauss_state = 0;
+			hl_wpn_next[id]    = hl_ent_time + 1.0;
+
+			HLWeaponVmAnim(w->seq_idle, FALSE);
+			HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+		}
+
+		return;
+	}
+
+
+	if (hl_ent_time < hl_wpn_next2[id])
+		return;
+
+	if (!edge && (mode == HLFIRE_SPOT || mode == HLFIRE_ZOOM ||
+		mode == HLFIRE_SATCHEL_FIRE))
+		return;
+
+	if (HLWeaponDrowned(id) && (mode == HLFIRE_SHOTGUN2 || mode == HLFIRE_M203 ||
+		mode == HLFIRE_BULLET))
+	{
+		if (edge)
+			HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+		hl_wpn_next[id] = hl_ent_time + 0.15;
+		return;
+	}
+
+	hl_wpn_next2[id] = hl_ent_time + w->sec_rate;
+
+	if (mode == HLFIRE_SHOTGUN2)
+	{
+		if (hl_wpn_clip[id] <= 1)
+			return;
+
+		hl_wpn_clip[id] -= 2;
+
+		HLWeaponVmAnim(w->seq_fire2, FALSE);
+		HLWeaponSecFireSound(id, eye);
+		HLWeaponPunch(id, TRUE);
+
+		//shotgun.cpp:260
+		hl_wpn_shell_reload = 0;
+
+		HLWeaponAutoaim(map, eye, forward, right, up,
+			HLWeaponAutoaimFor(id, TRUE), aim_f, aim_r, aim_u);
+
+		HLWeaponFireBullets(map, eye, aim_f, aim_r, aim_u, w->sec_bullets,
+			w->sec_spread, w->sec_damage, w->range);
+
+		hl_wpn_next[id] = hl_ent_time + w->sec_rate;
+
+		if (w->sec_pump > 0.0)
+			hl_wpn_pump_time = hl_ent_time + w->sec_pump;
+
+		return;
+	}
+
+	if (mode == HLFIRE_M203)
+	{
+		if (hl_wpn_ammo[HLAMMO_ARGRENADE] <= 0)
+		{
+			HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+			return;
+		}
+
+		hl_wpn_ammo[HLAMMO_ARGRENADE]--;
+
+		HLWeaponVmAnim(w->seq_fire2, FALSE);
+		HLWeaponSecFireSound(id, eye);
+		HLWeaponPunch(id, TRUE);
+
+		HLVecMA(eye, 16.0, forward, src);
+		HLVecScale(forward, 800.0, vel);
+
+		HLProjSpawn(HLPRJ_CONTACT, src, vel, w->sec_damage, 0.0, 0.5, 0.0,
+			FALSE, hl_ent_player);
+
+		hl_wpn_next[id] = hl_ent_time + 1.0;
+		return;
+	}
+
+	if (mode == HLFIRE_HORNET_FAST)
+	{
+		if (hl_wpn_ammo[HLAMMO_HORNET] <= 0)
+			return;
+
+		hl_wpn_ammo[HLAMMO_HORNET]--;
+
+		HLWeaponPunch(id, TRUE);
+
+		hl_wpn_hornet_charge = hl_ent_time + HLWPN_HORNET_RECHARGE;
+
+		if (hl_wpn_ammo[HLAMMO_HORNET] == 0)
+		{
+			hl_wpn_next[id]  += HLWPN_HORNET_RECHARGE;
+			hl_wpn_next2[id] += HLWPN_HORNET_RECHARGE;
+		}
+
+		HLVecMA(eye, 16.0, forward, src);
+		HLVecMA(src, 8.0, right, src);
+		HLVecMA(src, -12.0, up, src);
+
+		hl_wpn_hornet_phase++;
+
+		if (hl_wpn_hornet_phase > 8)
+			hl_wpn_hornet_phase = 1;
+
+		slot = hl_wpn_hornet_phase;
+
+		if (slot == 1 || slot == 2 || slot == 8)
+			HLVecMA(src, 8.0, up, src);
+
+		if (slot == 4 || slot == 5 || slot == 6)
+			HLVecMA(src, -8.0, up, src);
+
+		if (slot == 2 || slot == 3 || slot == 4)
+			HLVecMA(src, 8.0, right, src);
+
+		if (slot == 6 || slot == 7 || slot == 8)
+			HLVecMA(src, -8.0, right, src);
+
+		//the fast mode fires at 1200, four times the tracking speed
+		HLVecScale(forward, 1200.0, vel);
+
+		HLProjSpawn(HLPRJ_HORNET, src, vel, w->sec_damage, HLPRJ_HORNET_LIFE,
+			0.0, 0.0, FALSE, hl_ent_player);
+
+		HLWeaponVmAnim(w->seq_fire2, FALSE);
+		return;
+	}
+
+	if (mode == HLFIRE_SATCHEL_FIRE)
+	{
+		if (hl_wpn_satchel_ready != 1)
+			return;
+
+		HLWeaponVmAnim(w->seq_fire2, FALSE);
+		HLProjDetonateSatchels(map);
+
+		hl_wpn_satchel_ready = 2;
+		hl_wpn_next[id]      = hl_ent_time + 0.5;
+		return;
+	}
+
+	if (mode == HLFIRE_SPOT)
+	{
+		hl_wpn_spot_on = ToBool(!hl_wpn_spot_on);
+		return;
+	}
+
+	if (mode == HLFIRE_ZOOM)
+	{
+		if (hl_wpn_zoom_fov)
+			hl_wpn_zoom_fov = 0;
+		else
+			hl_wpn_zoom_fov = 20;
+
+		return;
+	}
+
+	if (mode == HLFIRE_BULLET)
+	{
+		if (!HLWeaponCanFire(id))
+		{
+			if (edge)
+				HLSndPlayAt(HLWPN_EMPTY_SND, hl_snd_listener, 0.8, 0.0,
+					HLWPN_SND_ENT, HLCHAN_WEAPON);
+
+			hl_wpn_next[id] = hl_ent_time + 0.2;
+			return;
+		}
+
+		HLWeaponTakeRound(id);
+		HLWeaponVmAnim(w->seq_fire2, FALSE);
+		HLWeaponSecFireSound(id, eye);
+		HLWeaponPunch(id, TRUE);
+
+		HLWeaponAutoaim(map, eye, forward, right, up,
+			HLWeaponAutoaimFor(id, TRUE), aim_f, aim_r, aim_u);
+
+		HLWeaponFireBullets(map, eye, aim_f, aim_r, aim_u, w->sec_bullets,
+			w->sec_spread, w->sec_damage, w->range);
+
+		hl_wpn_next[id] = hl_ent_time + w->sec_rate;
+	}
+}
+
+U0 HLWeaponVmSeq(U8 *label, U8 *fallback, Bool loop)
+{
+	if (HLWeaponSeqFind(hl_wpn_vm, label) >= 0)
+		HLWeaponVmAnim(label, loop);
+	else
+		HLWeaponVmAnim(fallback, loop);
+}
+
+U0 HLWeaponShotgunReload()
+{//CShotgun::Reload
+	I64 id   = HLWPN_SHOTGUN;
+	I64 room = hl_wpn_info[id].max_clip - hl_wpn_clip[id];
+	I64 have = hl_wpn_ammo[HLAMMO_BUCKSHOT];
+
+	if (hl_wpn_active != id)
+	{
+		hl_wpn_shell_reload = 0;
+		return;
+	}
+
+	if (have <= 0 || room <= 0)
+	{
+		//"reload debounce has timed out" - the pump, shotgun.cpp:333-338
+		if (hl_wpn_shell_reload != 0 && hl_ent_time >= hl_wpn_shell_next)
+		{
+			HLWeaponVmSeq("pump", hl_wpn_info[id].seq_idle, FALSE);
+
+			HLSndPlayAt("weapons/scock1.wav", hl_snd_listener, 1.0, HLATTN_NORM,
+				0, HLCHAN_ITEM, HLWeaponPitch(95, 32));
+
+			hl_wpn_shell_reload = 0;
+			hl_wpn_shell_next   = hl_ent_time + 1.5;
+		}
+
+		return;
+	}
+
+	if (hl_ent_time < hl_wpn_next[id])
+		return;
+
+	if (hl_wpn_shell_reload == 0)
+	{
+		HLWeaponVmSeq("start_reload", hl_wpn_info[id].seq_reload, FALSE);
+
+		hl_wpn_shell_reload = 1;
+		hl_wpn_shell_next   = hl_ent_time + 0.6;
+		hl_wpn_next[id]     = hl_ent_time + 1.0;
+		hl_wpn_next2[id]    = hl_ent_time + 1.0;
+		return;
+	}
+
+	if (hl_ent_time < hl_wpn_shell_next)
+		return;
+
+	if (hl_wpn_shell_reload == 2)
+	{
+		hl_wpn_clip[id]++;
+		hl_wpn_ammo[HLAMMO_BUCKSHOT]--;
+		hl_wpn_shell_reload = 1;
+
+		if (hl_wpn_clip[id] >= hl_wpn_info[id].max_clip ||
+			hl_wpn_ammo[HLAMMO_BUCKSHOT] <= 0)
+			return;
+	}
+
+	hl_wpn_shell_reload = 2;
+
+	HLWeaponSnd2("weapons/reload1.wav", "weapons/reload3.wav",
+		hl_snd_listener, 1.0, HLATTN_NORM, 0, HLCHAN_ITEM,
+		HLWeaponPitch(85, 32));
+
+	HLWeaponVmAnim(hl_wpn_info[id].seq_reload, FALSE);
+
+	hl_wpn_shell_next = hl_ent_time + 0.5;
+}
+
+U0 HLWeaponStartReload()
+{//DefaultReload, bulk.
+	CHLWeaponInfo	*w;
+	I64				 id = hl_wpn_active;
+	I64				 room;
+	I64				 have;
+
+	if (id < 0 || hl_wpn_reloading == id)
+		return;
+
+	w = &hl_wpn_info[id];
+
+	if (w->ammo == HLAMMO_NONE || w->max_clip == HLWPN_NOCLIP)
+		return;
+
+	if (id == HLWPN_SHOTGUN)
+	{
+		HLWeaponShotgunReload;
+		return;
+	}
+
+	room = w->max_clip - hl_wpn_clip[id];
+	have = hl_wpn_ammo[w->ammo];
+
+	if (room <= 0 || have <= 0)
+		return;
+
+	hl_wpn_reloading   = id;
+	hl_wpn_reload_done = hl_ent_time + w->reload_time;
+
+	if (id == HLWPN_CROSSBOW)
+		hl_wpn_zoom_fov = 0;
+
+	HLWeaponVmAnim(w->seq_reload, FALSE);
+
+	if (w->reload_snd[0])
+		HLSndPlayAt(w->reload_snd, hl_snd_listener, 1.0, HLATTN_NORM, 0,
+			HLCHAN_ITEM, HLWeaponPitch(93, 16));
+
+	hl_wpn_next[id] = hl_wpn_reload_done;
+}
+
+U0 HLWeaponFinishReload()
+{
+	CHLWeaponInfo	*w;
+	I64				 id = hl_wpn_reloading;
+	I64				 room;
+
+	hl_wpn_reloading = HLWPN_NONE;
+
+	if (id < 0)
+		return;
+
+	w = &hl_wpn_info[id];
+
+	room = w->max_clip - hl_wpn_clip[id];
+
+	if (room > hl_wpn_ammo[w->ammo])
+		room = hl_wpn_ammo[w->ammo];
+
+	if (room <= 0)
+		return;
+
+	hl_wpn_clip[id]      += room;
+	hl_wpn_ammo[w->ammo] -= room;
+}
+
+
+I64 HLWeaponInSlot(I64 slot, I64 pos)
+{
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		if (hl_wpn_info[i].slot == slot && hl_wpn_info[i].pos == pos)
+			return i;
+	}
+
+	return -1;
+}
+
+I64 HLWeaponNextInSlot(I64 slot, I64 after)
+{
+ //-1 when the bucket holds nothing owned
+	I64 pos;
+	I64 id;
+	I64 n;
+
+	for (n = 1; n <= HLWPN_COUNT; n++)
+	{
+		pos = (after + n) % HLWPN_COUNT;
+		id  = HLWeaponInSlot(slot, pos);
+
+		if (id >= 0 && hl_wpn_have[id])
+			return id;
+	}
+
+	return -1;
+}
+
+U0 HLWeaponSelectSlot(I64 slot)
+{//SlotInput, cl_dll/hud_ammo.cpp.
+	I64 start = -1;
+	I64 id;
+
+	if (slot < 0 || slot >= HLWPN_SLOTS)
+		return;
+
+	if (hl_wpn_sel_slot != slot)
+		hl_wpn_sel_pos = -1;
+
+	hl_wpn_sel_slot  = slot;
+	hl_wpn_sel_until = hl_ent_time + HLWPN_SEL_TIME;
+
+	if (hl_wpn_fastswitch)
+	{
+		if (hl_wpn_active >= 0 && hl_wpn_info[hl_wpn_active].slot == slot)
+			start = hl_wpn_info[hl_wpn_active].pos;
+
+		id = HLWeaponNextInSlot(slot, start);
+
+		if (id >= 0 && id != hl_wpn_active)
+			HLWeaponSetActive(id);
+
+		hl_wpn_sel_pos = -1;
+		return;
+	}
+
+	id = HLWeaponNextInSlot(slot, hl_wpn_sel_pos);
+
+	if (id < 0)
+	{
+		hl_wpn_sel_pos = -1;
+		return;
+	}
+
+	hl_wpn_sel_pos = hl_wpn_info[id].pos;
+}
+
+Bool HLWeaponConfirmSelection()
+{
+	I64 id;
+
+	if (hl_wpn_fastswitch || hl_wpn_sel_slot < 0 || hl_wpn_sel_pos < 0)
+		return FALSE;
+
+	id = HLWeaponInSlot(hl_wpn_sel_slot, hl_wpn_sel_pos);
+
+	hl_wpn_sel_slot = -1;
+	hl_wpn_sel_pos  = -1;
+
+	if (id < 0 || !hl_wpn_have[id])
+		return TRUE;
+
+	if (id != hl_wpn_active)
+		HLWeaponSetActive(id);
+
+	return TRUE;
+}
+
+U0 HLWeaponCancelSelection()
+{
+	hl_wpn_sel_slot = -1;
+	hl_wpn_sel_pos  = -1;
+}
+
+U0 HLWeaponCycle(I64 step)
+{
+	I64 n;
+	I64 id;
+
+	if (hl_wpn_active < 0)
+		id = 0;
+	else
+		id = hl_wpn_active;
+
+	for (n = 1; n <= HLWPN_COUNT; n++)
+	{
+		id = id + step;
+
+		while (id < 0)
+			id += HLWPN_COUNT;
+
+		id = id % HLWPN_COUNT;
+
+		if (hl_wpn_have[id] && id != hl_wpn_active)
+		{
+			HLWeaponSetActive(id);
+
+			hl_wpn_sel_slot  = hl_wpn_info[id].slot;
+			hl_wpn_sel_until = hl_ent_time + HLWPN_SEL_TIME;
+			return;
+		}
+	}
+}
+
+
+U0 HLWeaponInput(CHLMap *map, F64 *eye, F64 *forward, F64 *right, F64 *up)
+{
+	CHLTrace spot_tr;
+	CHLEntity *tank;
+	F64		 spot_end[3];
+	F64		 spot_zero[3];
+	F64		 aim_f[3];
+	F64		 aim_r[3];
+	F64		 aim_u[3];
+	I64		 i;
+	Bool	 now;
+	Bool	 atk;
+	Bool	 atk2;
+
+	for (i = 0; i < HLWPN_SLOTS; i++)
+	{
+		now = ToBool(Bt(kbd.down_bitmap, Char2ScanCode('1' + i)));
+
+		if (now && !hl_wpn_slot_held[i])
+			HLWeaponSelectSlot(i);
+
+		hl_wpn_slot_held[i] = now;
+	}
+
+	now = ToBool(Bt(kbd.down_bitmap, Char2ScanCode('q')));
+	if (now && !hl_wpn_next_held)
+	{
+		HLWeaponCancelSelection;
+		HLWeaponCycle(1);
+	}
+	hl_wpn_next_held = now;
+
+	now = ToBool(Bt(kbd.down_bitmap, Char2ScanCode('z')));
+	if (now && !hl_wpn_prev_held)
+	{
+		HLWeaponCancelSelection;
+		HLWeaponCycle(-1);
+	}
+	hl_wpn_prev_held = now;
+
+	if (hl_wpn_cycle_want)
+	{
+		HLWeaponCancelSelection;
+
+		if (hl_wpn_cycle_want > 0)
+			HLWeaponCycle(1);
+		else
+			HLWeaponCycle(-1);
+
+		hl_wpn_cycle_want = 0;
+	}
+
+	now = ToBool(Bt(kbd.down_bitmap, Char2ScanCode('r')));
+	if (now && !hl_wpn_reload_held)
+	{
+		HLWeaponCancelSelection;
+		HLWeaponStartReload;
+	}
+	hl_wpn_reload_held = now;
+
+	atk  = ToBool(mouse_hard.raw_bttns[0] || mouse_hard.bttns[0]);
+	atk2 = ToBool(mouse_hard.raw_bttns[1] || mouse_hard.bttns[1]);
+
+	//CFuncTank::ControllerPostFrame, func_tank.cpp:394.
+	if (hl_ent_tank_mount >= 0)
+	{
+		tank = HLEntGet(hl_ent_tank_mount);
+
+		if (tank && tank->tank_mounted && atk)
+		{
+			if (hl_ent_time >= tank->tank_next_fire)
+			{
+				HLTankFire(hl_ent_tank_mount);
+				if (tank->tank_fire_rate > 0.0)
+					tank->tank_next_fire = hl_ent_time +
+						(1.0 / tank->tank_fire_rate);
+				else
+					tank->tank_next_fire = hl_ent_time + 0.1;
+			}
+		}
+
+		hl_wpn_attack_held  = atk;
+		hl_wpn_attack2_held = atk2;
+		return;
+	}
+
+	if (atk2)
+		HLWeaponSecondary(map, eye, forward, right, up,
+			ToBool(!hl_wpn_attack2_held));
+	else if (atk)
+	{
+		if (hl_wpn_attack_held || !HLWeaponConfirmSelection)
+			HLWeaponPrimary(map, eye, forward, right, up,
+				ToBool(!hl_wpn_attack_held));
+	}
+	else
+	{
+		if (hl_wpn_active >= 0 && hl_wpn_reloading != hl_wpn_active &&
+			hl_wpn_clip[hl_wpn_active] == 0 &&
+			hl_ent_time >= hl_wpn_next[hl_wpn_active])
+			HLWeaponStartReload;
+	}
+
+	if (!atk && hl_wpn_attack_held)
+	{
+		if (hl_wpn_active == HLWPN_HANDGRENADE)
+			HLWeaponThrowGrenade(eye, forward);
+
+		if (hl_wpn_gauss_state != 0 && hl_wpn_active == HLWPN_GAUSS)
+			HLWeaponReleaseGauss(map, eye, forward);
+
+		if (hl_wpn_egon_on && hl_wpn_egon_mode == HLFIRE_EGON_WIDE)
+			HLWeaponEgonStop;
+	}
+
+	if (!atk2 && hl_wpn_attack2_held)
+	{
+		if (hl_wpn_gauss_state != 0 && hl_wpn_active == HLWPN_GAUSS)
+			HLWeaponReleaseGauss(map, eye, forward);
+
+		if (hl_wpn_egon_on && hl_wpn_egon_mode == HLFIRE_EGON_NARROW)
+			HLWeaponEgonStop;
+	}
+
+	hl_wpn_attack_held  = atk;
+	hl_wpn_attack2_held = atk2;
+
+	if (hl_wpn_satchel_ready == 2 && !hl_wpn_attack2_held &&
+		HLProjCountSatchels() < 1)
+		hl_wpn_satchel_ready = 0;
+
+	hl_wpn_spot_valid = FALSE;
+
+	if (hl_wpn_spot_on && hl_wpn_active == HLWPN_RPG)
+	{
+		HLVecMA(eye, 8192.0, forward, spot_end);
+		HLVecSet(spot_zero, 0.0, 0.0, 0.0);
+
+		HLTraceEntity(map, eye, spot_end, spot_zero, spot_zero, hl_move_pass,
+			FALSE, &spot_tr);
+
+		if (spot_tr.fraction < 1.0)
+		{
+			HLVecCopy(spot_tr.end_pos, hl_wpn_spot_pos);
+			hl_wpn_spot_valid = TRUE;
+		}
+	}
+
+	hl_wpn_on_target = FALSE;
+
+	if (hl_wpn_active >= 0)
+		HLWeaponAutoaim(map, eye, forward, right, up,
+			HLWeaponAutoaimFor(hl_wpn_active, FALSE), aim_f, aim_r, aim_u);
+}
+
+
+U0 HLWeaponFrame(F64 dt, CHLMap *map = NULL, F64 *eye = NULL,
+	F64 *forward = NULL, F64 *right = NULL, F64 *up = NULL)
+{
+	CHLStSeq	*sq;
+	F64			 feet[3];
+	F64			 span;
+
+	if (dt < 0.0)
+		dt = 0.0;
+
+	if (dt > HLWPN_MAX_DT)
+		dt = HLWPN_MAX_DT;
+
+	if (hl_ent_pack_weapons_pending)
+	{
+		hl_ent_pack_weapons_pending = FALSE;
+		HLWeaponPackDeadPlayerItems;
+	}
+
+	if (hl_ent_tank_rocket_pending)
+	{
+		hl_ent_tank_rocket_pending = FALSE;
+		HLProjSpawn(HLPRJ_ROCKET, hl_ent_tank_rocket_org, hl_ent_tank_rocket_vel,
+			hl_ent_tank_rocket_dmg, 0.0, 0.5, 0.0, FALSE, -1);
+	}
+
+	if (hl_wpn_reloading >= 0 && hl_ent_time >= hl_wpn_reload_done)
+		HLWeaponFinishReload;
+
+	if (hl_wpn_shell_reload != 0)
+		HLWeaponShotgunReload;
+
+	if (hl_wpn_sel_slot >= 0 && hl_ent_time >= hl_wpn_sel_until)
+	{
+		hl_wpn_sel_slot = -1;
+		hl_wpn_sel_pos  = -1;
+	}
+
+	if (hl_wpn_pump_time > 0.0 && hl_ent_time >= hl_wpn_pump_time)
+	{
+		HLSndPlayAt("weapons/scock1.wav", hl_snd_listener, 1.0, 0.0);
+		hl_wpn_pump_time = 0.0;
+	}
+
+	if (hl_wpn_active == HLWPN_HORNETGUN)
+		HLWeaponHornetRecharge;
+
+	if (map && eye && forward && right && up)
+	{
+		HLVecCopy(eye, feet);
+		feet[2] -= hl_view_ofs_z;
+
+		//CBasePlayerItem::DefaultTouch
+		HLWeaponPickups(map, feet);
+		HLWeaponBoxSweep(feet);
+
+		if (!hl_ent_input_locked)
+			HLWeaponInput(map, eye, forward, right, up);
+	}
+
+	if (map)
+		HLProjFrame(map, dt);
+
+	if (!hl_wpn_vm || hl_wpn_vm_seq < 0 || hl_wpn_vm_seq >= hl_wpn_vm->num_seqs)
+	{
+		HLWeaponIdleThink;
+		return;
+	}
+
+	sq = &hl_wpn_vm->seqs[hl_wpn_vm_seq];
+
+	span = ToF64(sq->num_frames);
+
+	if (span < 2.0)
+		span = 2.0;
+
+	hl_wpn_vm_cycle += dt * sq->fps / (span - 1.0);
+
+	HLWeaponVmEvents;
+
+	if (hl_wpn_vm_cycle < 1.0)
+	{
+		HLWeaponIdleThink;
+		return;
+	}
+
+	if (hl_wpn_vm_loop)
+	{
+		while (hl_wpn_vm_cycle >= 1.0)
+			hl_wpn_vm_cycle -= 1.0;
+
+		hl_wpn_vm_ev_frame = -1;
+		HLWeaponIdleThink;
+		return;
+	}
+
+	hl_wpn_vm_cycle = 1.0;
+
+	if (!hl_wpn_vm_done)
+	{
+		hl_wpn_vm_done = TRUE;
+
+		//hold last frame; next fidget after a Glock-style 10..15s gap
+		HLWeaponIdleArm(10.0 + ToF64(HLPartRandI(6)));
+	}
+
+	HLWeaponIdleThink;
+}
+
+I64 HLWeaponAmmo()
+{
+	CHLWeaponInfo *w;
+
+	if (hl_wpn_active < 0)
+		return -1;
+
+	w = &hl_wpn_info[hl_wpn_active];
+
+	if (w->ammo == HLAMMO_NONE)
+		return -1;
+
+	if (w->max_clip == HLWPN_NOCLIP)
+		return hl_wpn_ammo[w->ammo];
+
+	return hl_wpn_clip[hl_wpn_active];
+}
+
+I64 HLWeaponReserve()
+{
+	CHLWeaponInfo *w;
+
+	if (hl_wpn_active < 0)
+		return -1;
+
+	w = &hl_wpn_info[hl_wpn_active];
+
+	if (w->ammo == HLAMMO_NONE || w->max_clip == HLWPN_NOCLIP)
+		return -1;
+
+	return hl_wpn_ammo[w->ammo];
+}
+
+
+U0 HLProjDraw(CHLCanvas *c)
+{
+	CHLProj		*p;
+	CHLStudio	*m;
+	CHLSpr		*sp;
+	F64			 ang[3];
+	F64			 cycle;
+	I64			 seq;
+	I64			 i;
+	I64			 lit;
+
+	if (!c || !hl_map)
+		return;
+
+	for (i = 0; i < HLPROJ_MAX; i++)
+	{
+		p = &hl_proj[i];
+
+		if (p->kind == HLPRJ_FREE)
+			goto qpd_next;
+
+		if (p->kind == HLPRJ_SPIT || p->kind == HLPRJ_CTRLBALL)
+		{
+			sp = hl_proj_spr_spit;
+
+			if (p->kind == HLPRJ_CTRLBALL)
+				sp = hl_proj_spr_ball;
+
+			if (sp)
+			{
+				lit = HLLightPoint(hl_map, p->org);
+				HLSprDraw(c, sp, 0, p->org, lit, HLRENDER_TRANSADD, 1.0);
+			}
+
+			goto qpd_next;
+		}
+
+		m = HLProjModel(p->kind);
+
+		if (!m)
+			goto qpd_next;
+
+		seq = p->seq;
+
+		if (seq < 0 || seq >= m->num_seqs)
+			seq = 0;
+
+		cycle = p->frame;
+
+		HLProjAngles(p, ang);
+
+		HLStudioDraw(c, m, p->org, ang, seq, cycle, 0.0,
+			HLProjBody(p->kind), 0, HLLightPoint(hl_map, p->org),
+			&hl_proj_ctl[p->kind * HLST_MAX_CONTROLLERS]);
+
+qpd_next:
+	}
+}
+
+U0 HLWeaponBeamSpr(CHLCanvas *c, CHLSpr *sp, F64 *start, F64 *end,
+	F64 width, F64 amplitude, F64 scroll, I64 r, I64 g, I64 b, F64 bright)
+{
+	CHLSprFrame	*fr;
+	I64			 lit;
+
+	if (!c || !sp || sp->num_frames < 1 || !sp->palette)
+		return;
+
+	fr = &sp->frames[0];
+
+	lit = ToI64(bright);
+
+	if (lit < 0)
+		lit = 0;
+
+	if (lit > 255)
+		lit = 255;
+
+	HLDrawBeam(c, start, end, fr->pixels, sp->palette, fr->width, fr->height,
+		width, amplitude, scroll, tS, r, g, b, lit);
+}
+
+U0 HLWeaponDrawBeams(CHLCanvas *c)
+{
+	CHLProj		*p;
+	CHLWpnBeam	*w;
+	F64			 start[3];
+	F64			 vm_ang[3];
+	F64			 blend;
+	F64			 pulse;
+	F64			 core_scroll;
+	F64			 core_noise;
+	F64			 hum_noise;
+	I64			 cr;
+	I64			 cg;
+	I64			 hr;
+	I64			 hg;
+	I64			 hb;
+	I64			 frame;
+	I64			 i;
+
+	if (!c || !hl_map)
+		return;
+
+
+	if (hl_wpn_spr_laser)
+	{
+		for (i = 0; i < HLPROJ_MAX; i++)
+		{
+			p = &hl_proj[i];
+
+			if (p->kind != HLPRJ_TRIPMINE || !p->armed)
+				goto qwdb_mine;
+
+			HLWeaponBeamSpr(c, hl_wpn_spr_laser, p->org, p->beam_end,
+				10.0 * HLWPN_BEAM_WIDTH, 0.0, 255.0 * HLWPN_BEAM_SCROLL,
+				0, 214, 198, 64.0);
+
+qwdb_mine:
+		}
+	}
+
+
+	if (hl_wpn_spr_gauss)
+	{
+		for (i = 0; i < HLWPN_BEAM_MAX; i++)
+		{
+			w = &hl_wpn_beam[i];
+
+			if (tS >= w->die)
+				goto qwdb_ring;
+
+			HLWeaponBeamSpr(c, hl_wpn_spr_gauss, w->start, w->end,
+				w->width, 0.0, 0.0, w->r, w->g, w->b, w->bright);
+
+qwdb_ring:
+		}
+	}
+
+	if (hl_wpn_spot_on && hl_wpn_spot_valid && hl_wpn_spr_flare &&
+		hl_wpn_spr_flare->num_frames > 0)
+	{
+		frame = ToI64(tS * 8.0) % hl_wpn_spr_flare->num_frames;
+
+		if (frame < 0)
+			frame = 0;
+
+		HLSprDraw(c, hl_wpn_spr_flare, frame, hl_wpn_spot_pos, 255,
+			HLRENDER_GLOW, 0.5);
+	}
+
+
+	if (!hl_wpn_egon_on || !hl_wpn_egon_beam || !hl_wpn_spr_egon)
+		return;
+
+	//timedist
+	blend = (hl_wpn_egon_pulse - hl_ent_time) / 0.1;
+
+	if (blend < 0.0)
+		blend = 0.0;
+
+	if (blend > 1.0)
+		blend = 1.0;
+
+	blend = 1.0 - blend;
+
+	pulse = 64.0 + 80.0 * Abs(Sin(tS * 10.0));
+
+	if (hl_wpn_egon_mode == HLFIRE_EGON_WIDE)
+	{
+		cr          = ToI64(30.0 + 25.0 * blend);
+		cg          = ToI64(30.0 + 30.0 * blend);
+		core_scroll = 50.0;
+		core_noise  = 20.0;
+		hum_noise   = 8.0;
+		hr          = 50;
+		hg          = 50;
+		hb          = 255;
+	}
+	else
+	{
+		cr          = ToI64(60.0 + 25.0 * blend);
+		cg          = ToI64(120.0 + 30.0 * blend);
+		core_scroll = 110.0;
+		core_noise  = 5.0;
+		hum_noise   = 2.0;
+		hr          = 80;
+		hg          = 120;
+		hb          = 255;
+	}
+
+	HLVecCopy(hl_wpn_egon_src, start);
+
+	if (hl_wpn_vm && HLStudioAttachCount(hl_wpn_vm) > 0)
+	{
+		vm_ang[0] = -hl_wpn_vm_ang[0];
+		vm_ang[1] = hl_wpn_vm_ang[1];
+		vm_ang[2] = hl_wpn_vm_ang[2];
+
+		HLStudioAttachment(hl_wpn_vm, c->origin, vm_ang, hl_wpn_vm_seq,
+			hl_wpn_vm_cycle, 0.0, 0, start);
+	}
+
+	HLWeaponBeamSpr(c, hl_wpn_spr_egon, start, hl_wpn_egon_hit,
+		(40.0 - blend * 20.0) * HLWPN_BEAM_WIDTH,
+		core_noise * HLWPN_BEAM_NOISE, core_scroll * HLWPN_BEAM_SCROLL,
+		cr, cg, ToI64(pulse), 255.0 - blend * 180.0);
+
+	HLWeaponBeamSpr(c, hl_wpn_spr_egon, start, hl_wpn_egon_hit,
+		55.0 * HLWPN_BEAM_WIDTH, hum_noise * HLWPN_BEAM_NOISE,
+		25.0 * HLWPN_BEAM_SCROLL, hr, hg, hb, 100.0);
+
+	if (hl_wpn_spr_flare && hl_wpn_spr_flare->num_frames > 0)
+	{
+		frame = ToI64(tS * 8.0) % hl_wpn_spr_flare->num_frames;
+
+		if (frame < 0)
+			frame = 0;
+
+		HLSprDraw(c, hl_wpn_spr_flare, frame, hl_wpn_egon_hit, 255,
+			HLRENDER_GLOW, 1.0);
+	}
+}
+
+U0 HLWeaponDrawViewModel(CHLCanvas *c)
+{
+	F64 ang[3];
+	F64 org[3];
+	F64 bob;
+
+	if (!c || !hl_wpn_vm || hl_wpn_active < 0)
+		return;
+
+	if (hl_wpn_vm_fed)
+	{
+		ang[0] = -hl_wpn_vm_ang[0];
+		ang[1] =  hl_wpn_vm_ang[1];
+		ang[2] =  hl_wpn_vm_ang[2];
+	}
+	else
+	{
+		HLVecToAngles(c->forward, ang);
+	}
+
+	bob = hl_wpn_vm_bob;
+
+	//"throw in a little tilt"
+	ang[0] -= bob * 0.3;
+	ang[1] -= bob * 0.5;
+	ang[2] -= bob;
+
+	HLVecMA(c->origin, bob * 0.4, c->forward, org);
+	org[2] -= 1.0;
+
+	HLStudioDraw(c, hl_wpn_vm, org, ang, hl_wpn_vm_seq, hl_wpn_vm_cycle,
+		0.0, 0, 0, HLWPN_VM_LIGHT, NULL, 0.0, 1024);
+}
+
+
+Bool HLWeaponSprRect(U8 *hud_name, U8 *want, I64 *_sheet, I64 *_x, I64 *_y,
+	I64 *_w, I64 *_h)
+{
+	U8	*d;
+	U8	 path[96];
+	U8	 low[32];
+	U8	 want_res[8];
+	U8	 line[192];
+	U8	 tok[HLHUD_TOKENS * HLHUD_SHEET_MAX];
+	I64	 size = 0;
+	I64	 pos  = 0;
+	I64	 len;
+	I64	 i;
+	I64	 ch;
+	Bool found = FALSE;
+
+	*_sheet = -1;
+	*_x = 0;
+	*_y = 0;
+	*_w = 0;
+	*_h = 0;
+
+	if (!hud_name || !hud_name[0])
+		return FALSE;
+
+	i = 0;
+
+	while (hud_name[i] && i < 31)
+	{
+		ch = hud_name[i];
+
+		if (ch >= 'A' && ch <= 'Z')
+			ch += 32;
+
+		low[i] = ch;
+		i++;
+	}
+
+	low[i] = 0;
+
+	StrPrint(path, "sprites/weapon_%s.txt", low);
+	StrPrint(want_res, "%d", hl_hud_res);
+
+	d = HLFileData(path, &size);
+
+	if (!d || size < 8)
+		return FALSE;
+
+	while (pos < size)
+	{
+		len = 0;
+
+		while (pos < size && d[pos] != '\n' && len < 191)
+		{
+			line[len] = d[pos];
+			len++;
+			pos++;
+		}
+
+		line[len] = 0;
+
+		while (pos < size && d[pos] != '\n')
+			pos++;
+
+		pos++;
+
+		if (!len || line[0] == '/')
+			goto qwsr_next;
+
+		if (HLHudSplit(line, tok) != HLHUD_TOKENS)
+			goto qwsr_next;
+
+		if (StrICompare(&tok[0], want))
+			goto qwsr_next;
+
+		if (StrCompare(&tok[1 * HLHUD_SHEET_MAX], want_res))
+			goto qwsr_next;
+
+		*_sheet = HLHudSheet(&tok[2 * HLHUD_SHEET_MAX]);
+		*_x = ToI64(HLAtoF(&tok[3 * HLHUD_SHEET_MAX]));
+		*_y = ToI64(HLAtoF(&tok[4 * HLHUD_SHEET_MAX]));
+		*_w = ToI64(HLAtoF(&tok[5 * HLHUD_SHEET_MAX]));
+		*_h = ToI64(HLAtoF(&tok[6 * HLHUD_SHEET_MAX]));
+
+		found = ToBool(*_sheet >= 0);
+		goto qwsr_done;
+
+qwsr_next:
+	}
+
+qwsr_done:
+	return found;
+}
+
+
+U0 HLWeaponRectFlush()
+{
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT * HLWPN_RECT_KINDS; i++)
+		hl_wpn_rect_done[i] = FALSE;
+
+	for (i = 0; i < HLWPN_COUNT * HLWPN_RECT_KINDS * 5; i++)
+		hl_wpn_rect[i] = 0;
+
+	hl_wpn_rect_gen = hl_hud_gen;
+}
+
+Bool HLWeaponRect(I64 id, I64 kind, I64 *_sheet, I64 *_x, I64 *_y, I64 *_w,
+	I64 *_h)
+{
+	I64 slot;
+	I64 base;
+
+	*_sheet = -1;
+	*_x = 0;
+	*_y = 0;
+	*_w = 0;
+	*_h = 0;
+
+	if (id < 0 || id >= HLWPN_COUNT || kind < 0 || kind >= HLWPN_RECT_KINDS)
+		return FALSE;
+
+	if (hl_wpn_rect_gen != hl_hud_gen)
+		HLWeaponRectFlush;
+
+	slot = id * HLWPN_RECT_KINDS + kind;
+	base = slot * 5;
+
+	if (!hl_wpn_rect_done[slot])
+	{
+		hl_wpn_rect_done[slot] = TRUE;
+
+		if (kind == HLWPN_RECT_AMMO)
+			HLWeaponSprRect(hl_wpn_info[id].hud_name, "ammo",
+				&hl_wpn_rect[base], &hl_wpn_rect[base + 1],
+				&hl_wpn_rect[base + 2], &hl_wpn_rect[base + 3],
+				&hl_wpn_rect[base + 4]);
+		else if (kind == HLWPN_RECT_ZOOM)
+			HLWeaponSprRect(hl_wpn_info[id].hud_name, "zoom",
+				&hl_wpn_rect[base], &hl_wpn_rect[base + 1],
+				&hl_wpn_rect[base + 2], &hl_wpn_rect[base + 3],
+				&hl_wpn_rect[base + 4]);
+		else if (kind == HLWPN_RECT_AUTOAIM)
+			HLWeaponSprRect(hl_wpn_info[id].hud_name, "autoaim",
+				&hl_wpn_rect[base], &hl_wpn_rect[base + 1],
+				&hl_wpn_rect[base + 2], &hl_wpn_rect[base + 3],
+				&hl_wpn_rect[base + 4]);
+		else
+			HLWeaponSprRect(hl_wpn_info[id].hud_name, "zoom_autoaim",
+				&hl_wpn_rect[base], &hl_wpn_rect[base + 1],
+				&hl_wpn_rect[base + 2], &hl_wpn_rect[base + 3],
+				&hl_wpn_rect[base + 4]);
+	}
+
+	*_sheet = hl_wpn_rect[base];
+	*_x = hl_wpn_rect[base + 1];
+	*_y = hl_wpn_rect[base + 2];
+	*_w = hl_wpn_rect[base + 3];
+	*_h = hl_wpn_rect[base + 4];
+
+	return ToBool(*_sheet >= 0 && *_sheet < hl_hud_sheet_count);
+}
+
+U0 HLWeaponPublishIcon()
+{
+	if (hl_wpn_active == hl_wpn_icon_for && hl_wpn_icon_gen == hl_hud_gen)
+		return;
+
+	hl_wpn_icon_for = hl_wpn_active;
+	hl_wpn_icon_gen = hl_hud_gen;
+
+	hl_hud_icon_sheet = -1;
+	hl_hud_icon_w     = 0;
+	hl_hud_icon_h     = 0;
+
+	if (hl_wpn_active < 0)
+		return;
+
+	HLWeaponRect(hl_wpn_active, HLWPN_RECT_AMMO, &hl_hud_icon_sheet,
+		&hl_hud_icon_x, &hl_hud_icon_y, &hl_hud_icon_w, &hl_hud_icon_h);
+}
+
+I64 HLWeaponXhairUnit()
+{
+	if (hl_hud_res >= 2560)
+		return 72;
+
+	if (hl_hud_res >= 1280)
+		return 48;
+
+	//320 and 640 share sprites/crosshairs.spr at 24, per any weapon_*.txt
+	return 24;
+}
+
+U0 HLWeaponDrawCrosshair(CHLCanvas *c)
+{
+	CHLWeaponInfo	*w;
+	U8				*sheet;
+	I64				 unit;
+	I64				 x;
+	I64				 y;
+	I64				 zs;
+	I64				 zx;
+	I64				 zy;
+	I64				 zw;
+	I64				 zh;
+
+	if (!c || hl_wpn_active < 0)
+		return;
+
+	w = &hl_wpn_info[hl_wpn_active];
+
+	if (hl_wpn_zoom_fov)
+	{
+		if (hl_wpn_on_target &&
+			HLWeaponRect(hl_wpn_active, HLWPN_RECT_ZOOM_AA, &zs, &zx, &zy, &zw,
+				&zh))
+		{
+			HLSprDrawRect(c, hl_hud_sheet[zs], 0,
+				ToI64(c->center_x) - zw / 2, ToI64(c->center_y) - zh / 2,
+				zx, zy, zw, zh, HLHUD_R, HLHUD_G, HLHUD_B);
+			return;
+		}
+
+		if (HLWeaponRect(hl_wpn_active, HLWPN_RECT_ZOOM, &zs, &zx, &zy, &zw,
+			&zh))
+		{
+			HLSprDrawRect(c, hl_hud_sheet[zs], 0,
+				ToI64(c->center_x) - zw / 2, ToI64(c->center_y) - zh / 2,
+				zx, zy, zw, zh, HLHUD_R, HLHUD_G, HLHUD_B);
+			return;
+		}
+	}
+
+	if (hl_wpn_on_target &&
+		HLWeaponRect(hl_wpn_active, HLWPN_RECT_AUTOAIM, &zs, &zx, &zy, &zw,
+			&zh))
+	{
+		HLSprDrawRect(c, hl_hud_sheet[zs], 0,
+			ToI64(c->center_x) - zw / 2, ToI64(c->center_y) - zh / 2,
+			zx, zy, zw, zh, HLHUD_R, HLHUD_G, HLHUD_B);
+		return;
+	}
+
+	if (w->xhair_col < 0 || w->xhair_row < 0)
+		return;
+
+	if (hl_wpn_xhair_sheet < 0 || hl_wpn_xhair_gen != hl_hud_gen)
+	{
+		if (hl_hud_res >= 2560)
+			sheet = "2560crosshairs";
+		else if (hl_hud_res >= 1280)
+			sheet = "1280crosshairs";
+		else
+			sheet = "crosshairs";
+
+		hl_wpn_xhair_sheet = HLHudSheet(sheet);
+		hl_wpn_xhair_gen   = hl_hud_gen;
+	}
+
+	if (hl_wpn_xhair_sheet < 0 || hl_wpn_xhair_sheet >= hl_hud_sheet_count)
+		return;
+
+	unit = HLWeaponXhairUnit;
+
+	x = ToI64(c->center_x) - unit / 2;
+	y = ToI64(c->center_y) - unit / 2;
+
+	HLSprDrawRect(c, hl_hud_sheet[hl_wpn_xhair_sheet], 0, x, y,
+		w->xhair_col * unit, w->xhair_row * unit, unit, unit,
+		HLHUD_R, HLHUD_G, HLHUD_B);
+}
+
+U0 HLWeaponFillRect(CHLCanvas *c, I64 x, I64 y, I64 w, I64 h,
+	I64 r, I64 g, I64 b, I64 a)
+{
+	U32	*row;
+	I64	 px;
+	I64	 py;
+	I64	 dr, dg, db;
+	U32	 c32;
+
+	if (!c || w < 1 || h < 1 || a <= 0)
+		return;
+
+	if (a > 255)
+		a = 255;
+
+	for (py = y; py < y + h; py++)
+	{
+		if (py < 0 || py >= c->height)
+			goto qwfr_next_row;
+
+		row = c->pixels + py * c->width;
+
+		for (px = x; px < x + w; px++)
+		{
+			if (px < 0 || px >= c->width)
+				goto qwfr_next_col;
+
+			c32 = row[px];
+
+			dr = (c32 >> 16) & 255;
+			dg = (c32 >> 8) & 255;
+			db = c32 & 255;
+
+			dr += ((r - dr) * a) / 255;
+			dg += ((g - dg) * a) / 255;
+			db += ((b - db) * a) / 255;
+
+			row[px] = (dr << 16) | (dg << 8) | db;
+
+qwfr_next_col:
+		}
+
+qwfr_next_row:
+	}
+}
+
+
+U0 HLWeaponSetAmmoLow()
+{
+	CHLWeaponInfo	*w;
+	I64				 have;
+	I64				 full;
+
+	hl_hud_ammo_low = FALSE;
+
+	if (hl_wpn_active < 0)
+		return;
+
+	w = &hl_wpn_info[hl_wpn_active];
+
+	if (w->ammo == HLAMMO_NONE)
+		return;
+
+	if (w->max_clip == HLWPN_NOCLIP)
+	{
+		have = hl_wpn_ammo[w->ammo];
+		full = hl_wpn_ammo_max[w->ammo];
+	}
+	else
+	{
+		have = hl_wpn_clip[hl_wpn_active];
+		full = w->max_clip;
+	}
+
+	if (full < 1)
+		return;
+
+	hl_hud_ammo_low = ToBool(have * 5 <= full);
+}
+
+I64 HLWeaponAmmoIconOwner(I64 ammo)
+{
+	I64 i;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		if (hl_wpn_info[i].ammo == ammo)
+			return i;
+	}
+
+	return -1;
+}
+
+U0 HLWeaponDrawHistory(CHLCanvas *c)
+{
+	CHLWpnHist		*h;
+	CHLWeaponInfo	*w;
+	I64				 gap;
+	I64				 pick_h;
+	I64				 ypos;
+	I64				 xpos;
+	I64				 shade;
+	I64				 owner;
+	I64				 idx;
+	I64				 sheet;
+	I64				 sx, sy, sw, sh;
+	I64				 r, g, b;
+	I64				 i;
+	U8				 name[48];
+
+	if (!c || !hl_hud_ready)
+		return;
+
+	gap = 20;
+
+	idx = HLHudFind("d_crowbar");
+
+	if (idx >= 0 && hl_hud_entry[idx].h > gap)
+		gap = hl_hud_entry[idx].h;
+
+	pick_h = 32 + gap * 2;
+	gap   += 5;
+
+	for (i = 0; i < HLWPN_HIST_MAX; i++)
+	{
+		h = &hl_wpn_hist[i];
+
+		if (h->type == HLWPN_HIST_EMPTY)
+			goto qwdh_next;
+
+		if (tS >= h->die)
+		{
+			h->type = HLWPN_HIST_EMPTY;
+			goto qwdh_next;
+		}
+
+		shade = ToI64((h->die - tS) * 80.0);
+
+		if (shade > 255)
+			shade = 255;
+		if (shade < 0)
+			shade = 0;
+
+		r = HLHUD_R * shade / 255;
+		g = HLHUD_G * shade / 255;
+		b = HLHUD_B * shade / 255;
+
+		ypos = c->height - (pick_h + gap * i);
+
+		if (h->type == HLWPN_HIST_AMMO)
+		{
+			owner = HLWeaponAmmoIconOwner(h->id);
+
+			if (owner < 0)
+				goto qwdh_next;
+
+			if (!HLWeaponRect(owner, HLWPN_RECT_AMMO, &sheet, &sx, &sy, &sw,
+				&sh))
+				goto qwdh_next;
+
+			xpos = c->width - sw - 4;
+
+			HLSprDrawRect(c, hl_hud_sheet[sheet], 0, xpos, ypos,
+				sx, sy, sw, sh, r, g, b);
+
+			HLHudDrawNumber(c, xpos - 10 - 3 * 20, ypos, h->count, 1, r, g, b);
+			goto qwdh_next;
+		}
+
+		if (h->id < 0 || h->id >= HLWPN_COUNT)
+			goto qwdh_next;
+
+		w = &hl_wpn_info[h->id];
+
+		if (w->ammo != HLAMMO_NONE && hl_wpn_ammo[w->ammo] <= 0 &&
+			hl_wpn_clip[h->id] <= 0)
+		{
+			r = HLHUD_LOW_R * shade / 255;
+			g = HLHUD_LOW_G * shade / 255;
+			b = HLHUD_LOW_B * shade / 255;
+		}
+
+		StrPrint(name, "d_%s", w->hud_name);
+
+		idx = HLHudFind(name);
+
+		if (idx < 0)
+			goto qwdh_next;
+
+		xpos = c->width - hl_hud_entry[idx].w;
+
+		HLHudDrawElement(c, idx, xpos, ypos, r, g, b);
+
+qwdh_next:
+	}
+}
+
+U0 HLWeaponDrawSelection(CHLCanvas *c)
+{//DrawWList, cl_dll/ammo.cpp:1046-1204.
+	U8	name[HLHUD_NAME_MAX];
+	I64	bucket[HLWPN_SLOTS];
+	I64	sel;
+	I64	idx;
+	I64	x0;
+	I64	y0;
+	I64	bw = 20;
+	I64	bh = 20;
+	I64	sel_w = 0;
+	I64	sel_h = 0;
+	I64	open_w;
+	I64	step;
+	I64	gap;
+	I64	slot;
+	I64	pos;
+	I64	id;
+	I64	x;
+	I64	y;
+	I64	row;
+	I64	alpha;
+	I64	r, g, b;
+	Bool hot;
+
+	if (!c || hl_wpn_sel_slot < 0)
+		return;
+
+	for (slot = 0; slot < HLWPN_SLOTS; slot++)
+	{
+		StrPrint(name, "bucket%d", slot + 1);
+		bucket[slot] = HLHudFind(name);
+	}
+
+	if (bucket[0] >= 0)
+	{
+		bw = hl_hud_entry[bucket[0]].w;
+		bh = hl_hud_entry[bucket[0]].h;
+	}
+
+	sel = HLHudFind("selection");
+
+	if (sel >= 0)
+	{
+		sel_w = hl_hud_entry[sel].w;
+		sel_h = hl_hud_entry[sel].h;
+	}
+
+	if (sel_w < bw)
+		sel_w = bw;
+	if (sel_h < bh)
+		sel_h = bh;
+
+	gap = 5;
+	x0  = 10;
+	y0  = 10;
+
+	step = sel_h + gap;
+
+	open_w = bw;
+
+	if (HLWeaponNextInSlot(hl_wpn_sel_slot, -1) >= 0)
+		open_w = sel_w;
+
+
+	x = x0;
+
+	for (slot = 0; slot < HLWPN_SLOTS; slot++)
+	{
+		alpha = 192;
+
+		if (slot == hl_wpn_sel_slot)
+			alpha = 255;
+
+		r = (HLHUD_R * alpha) / 255;
+		g = (HLHUD_G * alpha) / 255;
+		b = (HLHUD_B * alpha) / 255;
+
+		if (bucket[slot] >= 0)
+			HLHudDrawElement(c, bucket[slot], x, y0, r, g, b);
+
+		if (slot == hl_wpn_sel_slot)
+			x += open_w + gap;
+		else
+			x += bw + gap;
+	}
+
+
+	x = x0;
+
+	for (slot = 0; slot < HLWPN_SLOTS; slot++)
+	{
+		if (slot == hl_wpn_sel_slot)
+		{
+			x += open_w + gap;
+			goto qwds_slot;
+		}
+
+		y = bh + y0;
+
+		for (pos = 0; pos < HLWPN_COUNT; pos++)
+		{
+			id = HLWeaponInSlot(slot, pos);
+
+			if (id < 0 || !hl_wpn_have[id])
+				goto qwds_box;
+
+			if (HLWeaponCanFire(id) || HLWeaponPool(id) > 0)
+			{
+				r     = HLHUD_R;
+				g     = HLHUD_G;
+				b     = HLHUD_B;
+				alpha = 128;
+			}
+			else
+			{
+				r     = HLHUD_LOW_R;
+				g     = HLHUD_LOW_G;
+				b     = HLHUD_LOW_B;
+				alpha = 96;
+			}
+
+			HLWeaponFillRect(c, x, y, bw, bh, r, g, b, alpha);
+
+			y += bh + gap;
+
+qwds_box:
+		}
+
+		x += bw + gap;
+
+qwds_slot:
+	}
+
+
+	x   = x0 + hl_wpn_sel_slot * (bw + gap);
+	row = 0;
+
+	for (pos = 0; pos < HLWPN_COUNT; pos++)
+	{
+		id = HLWeaponInSlot(hl_wpn_sel_slot, pos);
+
+		if (id < 0 || !hl_wpn_have[id])
+			goto qwds_next;
+
+		//"y = giBucketHeight + 10", then rcActive's height plus 5 per entry
+		y = bh + y0 + row * step;
+
+		hot = FALSE;
+
+		if (hl_wpn_sel_pos >= 0)
+			hot = ToBool(pos == hl_wpn_sel_pos);
+		else
+			hot = ToBool(id == hl_wpn_active);
+
+		if (hot)
+		{
+			r     = HLHUD_R;
+			g     = HLHUD_G;
+			b     = HLHUD_B;
+			alpha = 255;
+		}
+		else if (HLWeaponCanFire(id) || HLWeaponPool(id) > 0)
+		{
+			//hInactive, ScaleColors(RGB_YELLOWISH, 192)
+			r     = HLHUD_R;
+			g     = HLHUD_G;
+			b     = HLHUD_B;
+			alpha = 192;
+		}
+		else
+		{
+			//ScaleColors(RGB_REDISH, 128)
+			r     = HLHUD_LOW_R;
+			g     = HLHUD_LOW_G;
+			b     = HLHUD_LOW_B;
+			alpha = 128;
+		}
+
+		StrPrint(name, "d_%s", hl_wpn_info[id].hud_name);
+		idx = HLHudFind(name);
+
+		if (idx >= 0)
+			HLHudDrawElement(c, idx,
+				x + (sel_w - hl_hud_entry[idx].w) / 2,
+				y + (sel_h - hl_hud_entry[idx].h) / 2,
+				(r * alpha) / 255, (g * alpha) / 255, (b * alpha) / 255);
+
+		if (hot && sel >= 0)
+			HLHudDrawElement(c, sel, x, y, HLHUD_R, HLHUD_G, HLHUD_B);
+
+		row++;
+
+qwds_next:
+	}
+}
+
+U0 HLWeaponHudHook(CHLCanvas *c)
+{
+	F64 dt;
+
+	if (!c)
+		return;
+
+	if (!hl_map || !hl_entities || hl_num_entities <= 0)
+		return;
+
+	if (!HLMapValid(hl_map, "HLWeaponHudHook"))
+		return;
+
+	if (!hl_wpn_spawned)
+	{
+		HLWeaponPlayerSpawn;
+		hl_wpn_spawned   = TRUE;
+		hl_wpn_last_time = hl_ent_time;
+		return;
+	}
+
+	if (hl_ent_time < hl_wpn_last_time)
+		hl_wpn_last_time = hl_ent_time;
+
+	dt = hl_ent_time - hl_wpn_last_time;
+	hl_wpn_last_time = hl_ent_time;
+
+	HLWeaponFrame(dt, hl_map, c->origin, c->forward, c->right, c->up);
+
+	HLProjDraw(c);
+
+	HLWeaponDrawBeams(c);
+
+	if (!hl_ent_player_dead)
+		HLWeaponDrawViewModel(c);
+
+	HLWeaponDrawCrosshair(c);
+	HLWeaponDrawSelection(c);
+	HLWeaponDrawHistory(c);
+
+	hl_hud_ammo    = HLWeaponAmmo;
+	hl_hud_reserve = HLWeaponReserve;
+
+	HLWeaponPublishIcon;
+	HLWeaponSetAmmoLow;
+}
+
+hl_hud_weapon_hook = &HLWeaponHudHook;
+
+Bool HLWeaponSndOrigin(I64 entnum, F64 *out)
+{
+	CHLProj	*p;
+	I64		 slot;
+
+	if (entnum >= HLWPN_SND_PROJ && entnum < HLWPN_SND_PROJ + HLPROJ_MAX)
+	{
+		slot = entnum - HLWPN_SND_PROJ;
+		p    = &hl_proj[slot];
+
+		if (p->kind == HLPRJ_FREE)
+			return FALSE;
+
+		HLVecCopy(p->org, out);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+hl_snd_local_ent      = HLWPN_SND_ENT;
+hl_snd_entorigin_hook = &HLWeaponSndOrigin;
+
+U0 HLWeaponReport()
+{
+	I64 i;
+
+	"HLWeapon: active %d, %d pickups this level\n", hl_wpn_active,
+		hl_wpn_picked;
+
+	for (i = 0; i < HLWPN_COUNT; i++)
+	{
+		if (!hl_wpn_have[i])
+			goto qwr_next;
+
+		"  %s clip %d\n", hl_wpn_info[i].classname, hl_wpn_clip[i];
+
+qwr_next:
+	}
+
+	"  9mm %d  357 %d  buckshot %d  ARgrenade %d\n",
+		hl_wpn_ammo[HLAMMO_9MM], hl_wpn_ammo[HLAMMO_357],
+		hl_wpn_ammo[HLAMMO_BUCKSHOT], hl_wpn_ammo[HLAMMO_ARGRENADE];
+
+	"  bolts %d  rockets %d  uranium %d  hornets %d\n",
+		hl_wpn_ammo[HLAMMO_BOLT], hl_wpn_ammo[HLAMMO_ROCKET],
+		hl_wpn_ammo[HLAMMO_URANIUM], hl_wpn_ammo[HLAMMO_HORNET];
+
+	"  grenades %d  satchels %d  tripmines %d  snarks %d\n",
+		hl_wpn_ammo[HLAMMO_HANDGRENADE], hl_wpn_ammo[HLAMMO_SATCHEL],
+		hl_wpn_ammo[HLAMMO_TRIPMINE], hl_wpn_ammo[HLAMMO_SNARK];
+
+	"  projectiles live %d of %d, %d dropped to a full pool\n",
+		hl_proj_live, HLPROJ_MAX, hl_proj_dropped;
+}

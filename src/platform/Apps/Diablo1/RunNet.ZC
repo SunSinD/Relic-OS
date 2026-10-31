@@ -1,0 +1,14 @@
+// Diablo1 WITH networking. run this instead of Run.ZC for LAN play.
+//
+// the binding is compile-time: single-pass compiler, so UDPSocket must resolve
+// when D1Net.ZC is read. the driver probe throws 'NODRIVER' with no supported
+// NIC and pulls in TCP, TLS, crypto and HTTP, so single player skips it.
+
+Cd(__DIR__);;
+
+#ifndef UDP_MAX_PORT
+#include "::/Home/Net/Load"
+Cd(__DIR__);;
+#endif
+
+#include "Run"

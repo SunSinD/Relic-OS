@@ -1,0 +1,5166 @@
+/*	the YKD GUI frontend for the Zinc browser engine.
+
+	Zinc's engine (Zinc/HTML CSS JS + WebBrowser.ZC) is UI-agnostic; ZincShow
+	renders DolDoc, ZincGX replaces it with a truecolor display-list renderer
+	drawn in the window's draw_it.
+	Run: ZincGX;  or  ZincGX("http://frogfind.com/");  <ESC> quits.
+	Compiled system-wide by ::/DE/BrowserBoot after WebBrowser.
+
+	No literal dollar signs in this file (DolDoc source rule). */
+
+#define GX_OPS_MAX		9000
+#define GX_RUN_MAX		512
+#define GX_TAB_H		20	//Tab strip row (above the nav row).
+#define GX_TAB_W		110	//One tab's width in the strip.
+#define GX_TABS			6
+#define GX_CHROME_H		50	//GX_TAB_H + 30px nav row; content starts below.
+#define GX_STATUS_H		16
+#define GX_SBAR_W		10
+#define GX_MARGIN		10
+#define GX_LINE_LEAD	5
+
+#define GXO_TEXT		0
+#define GXO_RECT		1
+#define GXO_SCALED		2
+#define GXO_WIDGET		3
+
+#define GXW_TEXT		0
+#define GXW_CHECK		1
+#define GXW_RADIO		2
+#define GXW_SUBMIT		3
+#define GXW_BUTTON		4
+#define GXW_SELECT		5
+#define GXW_AREA		6
+
+#define GXO_IMG			4
+#define GXO_BOX			5
+#define GX_IMG_CACHE	96
+#define GX_IMG_MAXW		480
+#define GX_IMG_MAXH		360
+#define GX_IV_MAXDIM	2000	//Image-view: cap stored full-size decode.
+
+// pull-down menu commands, delivered as MESSAGE_CMD arg1. Command codes, not synthesized keystrokes: the URL bar and page text fields consume characters
+#define ZGXM_BACK		1
+#define ZGXM_FORWARD	2
+#define ZGXM_RELOAD		3
+#define ZGXM_STOP		4
+#define ZGXM_HOME		5
+#define ZGXM_URLBAR		6
+#define ZGXM_NEW_TAB	7
+#define ZGXM_NEXT_TAB	8
+#define ZGXM_CLOSE_TAB	9
+#define ZGXM_EXIT		10
+#define ZGXM_COPY_SEL	11
+#define ZGXM_COPY_URL	12
+#define ZGXM_TOP		13
+#define ZGXM_BOTTOM		14
+#define ZGXM_CONSOLE	15
+#define ZGXM_TTF		16
+#define ZGXM_V3			17
+#define ZGXM_MT			18
+
+//gx.lock_flags. See the field's declaration for the ordering rule.
+#define GXLKf_BUSY		0	//gx.ops is being rewritten
+#define GXLKf_DRAW		1	//GxDrawIt is inside its op walk
+
+// FALSE => 8x8 bitmap fallback. Set once at startup from grf_ui_font.ok
+Bool zinc_ttf = FALSE;
+public Bool zinc_text_blend = TRUE;
+
+// CJK fallback load attempted. Needs its own flag: the desktop start menu loads the sans/mono slots too and would otherwise set grf_ready before the browser asks for CJK
+Bool zinc_cjk_tried = FALSE;
+
+class CGxOp
+{
+	I64				 type, x, y, w, h;
+	CColorROPU32	 fg, bg;
+	U8				*text;		//MAlloc'ed; freed on reset.
+	CDC				*sc;		//Scaled heading run, or cached image (not owned).
+	U8				*href;		//Link target (DOM attr memory).
+	CZNode			*node;
+	I64				 wkind;
+	U8				*img_url;	//GXO_IMG: absolute URL (MAlloc'ed).
+	I64				 radius;	//GXO_WIDGET: border-radius px (-1 = unset).
+	Bool			 bold, ul, has_bg;
+	Bool			 sc_cached;	//GXO_BOX: sc is the image cache's, not this op's.
+	Bool			 cov; // GXO_TEXT: sc is a COVERAGE DC (alpha in the top byte); composite with GxBlotBlend, not GrBlot
+	I16				 bg_px, bg_py, bg_sw, bg_sh;	//GXO_BOX: CSS background-position/size (CSS.ZC encoding).
+	I8				 bg_rep;						//GXO_BOX: background-repeat (-1 unset / 0 repeat / 1 no-repeat / 2 x / 3 y).
+	I16				 grad;							//GXO_BOX: CSS linear-gradient index (-1 = none).
+	I32				 sh_col;						//GXO_BOX: box-shadow color 0xRRGGBB (-1 = none).
+	I16				 sh_dx, sh_dy, sh_blur;			//GXO_BOX: box-shadow offset/blur px.
+	I16				 z;								//z-index paint bucket: 0 flow, >0 late (on top).
+	Bool			 pinned;						//position:fixed - ignores scroll.
+	I16				 lbl_x, lbl_y;					//GXO_WIDGET: label offset inside the box.
+	I16				 lbl_px;						//GXO_WIDGET: label font size px.
+	I8				 dbg_src;
+};
+
+// decoded-image cache keyed by (url, w, h); persists across relayout. CDCs owned here, freed on page change
+class CGxImg
+{
+	U8	*url;
+	CDC	*dc;		//NULL = fetched-and-failed (don't retry); absent = todo.
+	I64	 w, h;		//Render size of dc; 0 = the decoded source itself.
+	I64	 gen;		//gx.img_gen at the last layout that used this entry.
+	Bool fetched;
+};
+
+class CGxTab
+{ // a background tab's parked page: the engine globals swap in/out on switch. Ops are NOT saved, so display ops never point at freed image DCs
+	Bool	 used;
+	U8		*url;
+	U8		 title[48];
+	I64		 scroll;
+	CZNode	*dom;
+	CJsInterp *js; // zinc_js while parked (timers freeze)
+	CHttpUrl base;
+	Bool	 base_ok;
+	U8		*css; // ZCssStateSave blob (rules + custom properties)
+	CDC		*iv_dc;
+	Bool	 iv_one2one;
+	U8		*back[ZINC_HISTORY];
+	I64		 back_count;
+	U8		*fwd[ZINC_HISTORY];
+	I64		 fwd_count;
+};
+
+class CGxGlobals
+{
+	CGxOp	*ops;
+	I64		 op_count;
+	I64		 doc_h;
+	I64		 scroll;
+	I64		 wrap_w, last_w;
+	I64		 x, y, line_h;
+	I64		 link_depth;
+	U8		*cur_href;
+	I64		 indent;		//Left offset from lists + margins/padding (px).
+	I64		 line_start_op;	//First op on the current line (for text-align).
+	I64		 line_align;	//0 left, 1 center, 2 right for the current line.
+	I64		 page_bg, page_fg;	//body/html colors; -1 unset.
+	Bool	 page_has_bg;
+	// containing block for position:absolute children: the content-box origin + width of the nearest positioned ancestor. cb_h: CB height for percent top offsets, 0 = unknown
+	I64		 cb_x, cb_y, cb_w, cb_h;
+	I64		 anc_h;			//nearest ancestor's resolved height (percent-height base)
+	// flex-column stretch: width a stretched flex item should fill; L2FlexCol sets it around each child, GxWidget consumes it. 0 = inactive
+	I64		 flex_stretch_w;
+	// text selection: drag anchor/end in DOC coordinates. On release the run text goes to sys_clip_doc
+	Bool	 sel_drag, sel_on;
+	I64		 sel_x0, sel_y0, sel_x1, sel_y1;
+	// current visual background RGB under the cursor (-1 none): the nearest ancestor box's bg, for text anti-aliasing
+	I64		 cur_bg;
+	CColorROPU32 text_pen;
+	I64		 list_typ[8], list_ctr[8], list_sp;	//0 = ul, 1 = ol.
+	U8		 url[256];
+	I64		 url_len, url_caret;
+	Bool	 url_focus, url_selall, quit, fetch, relayout;
+	// field_op is the GXO_WIDGET being edited; field_buf mirrors its DOM node->value
+	CGxOp	*field_op;
+	U8		 field_buf[512];
+	I64		 field_len, field_caret;
+	Bool	 field_selall;
+	U8		*hover_href;
+	U8		 run[GX_RUN_MAX];
+	I64		 run_len, run_x, run_y, run_scale;
+	CZStyle	 run_style;
+	Bool	 run_link;
+	//gx.ops, gx.op_count and every DC an op borrows are written only between
+	//GxOpsLock and GxOpsUnlock. GxDrawIt claims GXLKf_DRAW before it tests
+	//GXLKf_BUSY and drops it after its last op read. Both sides set with LBts:
+	//the locked op orders the store ahead of the load that follows it, which a
+	//plain store sitting in the store buffer does not.
+	I64		 lock_flags;
+	// right-click context menu, painted as window pixels and not a display-list op. menu_url is this struct's own copy: the op it was read from is freed by the next layout
+	Bool	 menu_on;
+	I64		 menu_kind, menu_n, menu_sel;
+	I64		 menu_x, menu_y, menu_w, menu_h;
+	U8		*menu_url;
+	I64		 last_wheel;
+	U8		*pending_nav;	//StrNew'd target set by click handlers.
+	CTask	*load_task;
+	// bumped when the main loop stops waiting on load_task; a fetch whose seq no longer matches publishes nothing
+	I64		 fetch_seq;
+	U8		 load_url[256];
+	Bool	 loading, cancel;
+	CGxImg	 img[GX_IMG_CACHE];
+	I64		 img_count;
+	I64		 img_gen;		//Bumped per GxLayout; stamps cache entries in use.
+	CTask	*img_task;
+	Bool	 img_dirty;		//An image finished; relayout wanted.
+	Bool	 img_busy;		//Img task is mid fetch/decode; don't free cache.
+	CDC		*iv_dc;			//Full-size decode (sys_task heap; capped).
+	CDC		*iv_sc;			//Owned scaled fit copy (NULL when shown 1:1).
+	Bool	 iv_one2one;
+	// tab[tab_cur].used is always TRUE; the current tab's page lives in the engine globals, background tabs' pages are parked in tab[]
+	CGxTab	 tab[GX_TABS];
+	I64		 tab_cur;
+	I64		 tab_go;		//Click requests: -1 none, else target index.
+	I64		 tab_close;		//-1 none, else index to close.
+	Bool	 tab_new;
+	// async external <script src>: bodies fetched on the sys-task heap, run IN ORDER by the main loop
+	CTask	*js_task;
+	U8		*js_body[ZINC_EXT_JS_MAX];
+	Bool	 js_done[ZINC_EXT_JS_MAX];
+	I64		 js_ran;		//Next queue index to execute.
+} gx;
+
+// gx, the DOM, the JS interpreter, the CSS globals and the history arrays are all file-scope: one engine per system. The launcher hands its URL to the live instance
+CTask *zinc_gx_task  = NULL;
+U8    *zinc_open_req = NULL; // sys-heap URL for the live instance to open
+
+// worker tasks run on a core other than the one laying out and painting. mp_count is 1 on a uniprocessor boot and Spawn THROWS 'MultCore' for a target_cpu outside it
+Bool zinc_mt = TRUE; // globals are not zeroed by the JIT
+I64  zinc_mt_rr = 0; // round robin over cores 1..mp_count-1
+
+CTask *GxWorkerSpawn(U0 (*fp)(U8 *data), U8 *name)
+{
+	I64 core = -1; // -1: spawn on this core
+
+	if (zinc_mt && mp_count > 1)
+	{
+		core = 1 + zinc_mt_rr % (mp_count - 1);
+		zinc_mt_rr++;
+	}
+
+	return Spawn(fp, NULL, name, core);
+}
+
+Bool ZincHandOff(U8 *start_url)
+{
+	if (!TaskValidate(zinc_gx_task) || zinc_gx_task == Fs)
+		return FALSE;
+	if (start_url && !zinc_open_req)
+		zinc_open_req = StrNew(start_url, sys_task);
+	LBts(&zinc_gx_task->display_flags, DISPLAYf_SHOW);
+	WinToTop(zinc_gx_task);
+	WinFocus(zinc_gx_task);
+	WinZBufUpdate;
+
+	return TRUE;
+}
+
+#define ZINC_CFG_DIR	"::/Home/Config"
+#define ZINC_CFG_PATH	"::/Home/Config/Zinc.CFG"
+
+U0 ZincCfgSave()
+{
+	U8 buf[128];
+
+	if (!DriveIsWritable)
+		return;
+	DirMake(ZINC_CFG_DIR);
+	StrPrint(buf, "# Zinc browser settings\nmulticore %d\n", zinc_mt != 0);
+	FileWrite(ZINC_CFG_PATH, buf, StrLen(buf));
+}
+
+U0 ZincCfgLoad()
+{
+	I64  size;
+	U8  *body = FileRead(ZINC_CFG_PATH, &size), *p;
+
+	if (!body)
+		return;
+	p = StrFirstOcc(body, "multicore");
+	if (p)
+		zinc_mt = ToBool(Str2I64(p + 9));
+	Free(body);
+}
+
+// JS console drawer state, NOT inside gx: ZincGX() MemSets that whole struct
+Bool zinc_con_open = FALSE; // globals are not zeroed by the JIT
+I64	 zinc_con_scroll = 0;
+
+CGxImg *GxImgFind(U8 *url, I64 w, I64 h)
+{ // identity is (url, w, h). w/h 0 asks for the decoded source; >0 for the derived DC at that size, so a resize rebuilds the scale from the source
+	I64 i;
+
+	for (i = 0; i < gx.img_count; i++)
+		if (gx.img[i].w == w && gx.img[i].h == h && gx.img[i].url &&
+			!StrCompare(gx.img[i].url, url))
+		{
+			gx.img[i].gen = gx.img_gen;
+			return &gx.img[i];
+		}
+	return NULL;
+}
+
+CGxImg *GxImgGet(U8 *url, I64 w, I64 h)
+{ // append is lock-free against the image task (single writer = the layout task): fully initialize the slot, THEN publish it by bumping img_count
+	CGxImg *e = GxImgFind(url, w, h);
+	I64		i, oldest;
+
+	if (e)
+		return e;
+	if (gx.img_count >= GX_IMG_CACHE)
+	{ // full: take the least recently laid-out DERIVED slot (w > 0); a generation older than the current one means this layout has not re-attached it. Sources (w == 0) hold the network decode and are never recycled. fetched clears last, so the image task cannot see the slot while its url is swapped
+		e = NULL;
+		oldest = gx.img_gen;
+		for (i = 0; i < gx.img_count; i++)
+			if (gx.img[i].w > 0 && gx.img[i].gen < oldest)
+			{
+				oldest = gx.img[i].gen;
+				e = &gx.img[i];
+			}
+		if (!e)
+			return NULL;
+		if (e->dc)
+			DCDel(e->dc);
+		e->dc = NULL;
+		Free(e->url);
+		e->url = StrNew(url);
+		e->w = w;
+		e->h = h;
+		e->gen = gx.img_gen;
+		e->fetched = FALSE;
+		return e;
+	}
+	i = gx.img_count;
+	e = &gx.img[i];
+	e->dc = NULL;
+	e->fetched = FALSE;
+	e->w = w;
+	e->h = h;
+	e->gen = gx.img_gen;
+	e->url = StrNew(url);
+	gx.img_count = i + 1; // publish last
+	return e;
+}
+
+U0 GxImgCacheDropDom()
+{ // the svg: and data: keys are DOM pointers printed as hex, reusable once the page is freed. Slots are emptied in place; GxImgFind skips a NULL url
+	I64 i;
+
+	for (i = 0; i < gx.img_count; i++)
+		if (gx.img[i].url &&
+			(!StrNCompare(gx.img[i].url, "svg:", 4) ||
+			 !StrNCompare(gx.img[i].url, "data:", 5)))
+		{
+			Free(gx.img[i].url);
+			gx.img[i].url = NULL;
+			if (gx.img[i].dc)
+				DCDel(gx.img[i].dc);
+			gx.img[i].dc		= NULL;
+			gx.img[i].fetched	= FALSE;
+			gx.img[i].w			= 0;
+			gx.img[i].h			= 0;
+			gx.img[i].gen		= 0;
+		}
+}
+
+U0 GxImgCacheFree()
+{
+	I64 i;
+
+	for (i = 0; i < gx.img_count; i++)
+	{
+		Free(gx.img[i].url);
+		if (gx.img[i].dc)
+			DCDel(gx.img[i].dc);
+	}
+	gx.img_count = 0;
+}
+
+U0 GxImgViewFree()
+{
+	if (gx.iv_sc)
+		DCDel(gx.iv_sc);
+	gx.iv_sc = NULL;
+	if (gx.iv_dc)
+		DCDel(gx.iv_dc);
+	gx.iv_dc = NULL;
+	gx.iv_one2one = FALSE;
+}
+
+CDC *GxImgViewCap(CDC *dc)
+{
+	CDC *scaled;
+	I64	 sf;
+
+	if (!dc || (dc->width <= GX_IV_MAXDIM && dc->height <= GX_IV_MAXDIM))
+		return dc;
+	sf = MinI64(GX_IV_MAXDIM * 1000 / dc->width,
+				GX_IV_MAXDIM * 1000 / dc->height);
+	scaled = DEDCScaleNew(dc, MaxI64(1, dc->width  * sf / 1000),
+							  MaxI64(1, dc->height * sf / 1000), sys_task);
+	DCDel(dc);
+	return scaled;
+}
+
+Bool GxSniffTGA(U8 *buf, I64 len)
+{ // TGA carries no leading magic and is identified structurally: the v2 footer is definitive, else every header field must be legal. Runs LAST so a format with real magic is never mistaken for one
+	I64 type;
+	I64 bpp;
+
+	if (len < 18)
+		return FALSE;
+
+	if (len >= 26 && !MemCompare(buf + len - 18, "TRUEVISION-XFILE", 16))
+		return TRUE;
+
+	type = buf[2];
+	bpp  = buf[16];
+
+	// 0 none, 1 colormap, 2 rgb, 3 grey, 9/10/11 the rle forms
+	if (type != 1 && type != 2 && type != 3 &&
+		type != 9 && type != 10 && type != 11)
+		return FALSE;
+
+	if (bpp != 8 && bpp != 15 && bpp != 16 && bpp != 24 && bpp != 32)
+		return FALSE;
+
+	if (buf[1] > 1)
+		return FALSE;
+	if (buf[1] == 0 && (type == 1 || type == 9))
+		return FALSE;
+
+	if (!(buf[12] | buf[13]) || !(buf[14] | buf[15]))
+		return FALSE;
+
+	return TRUE;
+}
+
+CDC *GxImgViewDecode(U8 *buf, I64 len)
+{
+	CDC *dc = NULL;
+	U8	*b0 = buf;
+
+	if (!buf || len < 8)
+		return NULL;
+	if (buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G')
+		dc = PNGReadBuf(buf, len, 255, sys_task);
+	else if (buf[0] == 0xFF && buf[1] == 0xD8)
+		dc = JPGReadBuf(buf, len, sys_task);
+	else if (buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F')
+		dc = GIFReadBuf(buf, len, sys_task);
+	else if (len > 12 && !MemCompare(buf, "RIFF", 4) &&
+			 !MemCompare(buf + 8, "WEBP", 4))
+		dc = WEBPReadBuf(buf, len, sys_task);
+	else
+	{
+		while (*b0 == ' ' || *b0 == '\n' || *b0 == '\r' || *b0 == '\t')
+			b0++;
+		if (*b0 == '<' && StrFind("<svg", buf))
+			dc = SVGReadBuf(buf, len, 0, 0, sys_task);
+		else if (GxSniffTGA(buf, len))
+			dc = TGAReadBuf(buf, len, sys_task);
+	}
+	return GxImgViewCap(dc);
+}
+
+CColorROPU32 GxPen(I64 rgb, CColorROPU32 def)
+{ // 0xRRGGBB -> truecolor TEXT pen. With no page background, near-black text is promoted for readability against the dark theme; once the page brings its own background, colors are literal
+	I64 r, g, b;
+
+	if (rgb < 0)
+		return def;
+	r = rgb >> 16 & 0xFF;
+	g = rgb >> 8 & 0xFF;
+	b = rgb & 0xFF;
+	if (!gx.page_has_bg && r + g + b < 180)
+	{
+		if (r + g + b < 40)
+			return de_theme.text;
+		r = MinI64(255, r + 110);
+		g = MinI64(255, g + 110);
+		b = MinI64(255, b + 110);
+	}
+	return ColorRGB(r, g, b);
+}
+
+CColorROPU32 GxPenBg(I64 rgb, CColorROPU32 def)
+{ // 0xRRGGBB -> truecolor FILL pen, always literal
+	if (rgb < 0)
+		return def;
+	return ColorRGB(rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF);
+}
+
+U0 GxOpsLock()
+{ // claim gx.ops against GxDrawIt. The spin is bounded: a drawer that faulted mid-frame leaves GXLKf_DRAW raised
+	I64 spin = 200;
+
+	LBts(&gx.lock_flags, GXLKf_BUSY);
+	while (Bt(&gx.lock_flags, GXLKf_DRAW) && spin > 0)
+	{
+		Sleep(1);
+		spin--;
+	}
+}
+
+U0 GxOpsUnlock()
+{
+	LBtr(&gx.lock_flags, GXLKf_BUSY);
+}
+
+U0 GxOpsReset()
+{
+	I64 i;
+
+	// a focused inline field points into gx.ops: commit its buffer into the DOM node and drop the focus so the pointer cannot dangle
+	if (gx.field_op)
+	{
+		Free(gx.field_op->node->value);
+		gx.field_op->node->value = StrNew(gx.field_buf);
+		gx.field_op = NULL;
+	}
+
+	for (i = 0; i < gx.op_count; i++)
+	{
+		Free(gx.ops[i].text);
+		Free(gx.ops[i].img_url);
+		// GXO_IMG sc, and a GXO_BOX background with a cached derived DC, are borrowed from the image cache
+		if (gx.ops[i].sc && gx.ops[i].type != GXO_IMG && !gx.ops[i].sc_cached)
+			DCDel(gx.ops[i].sc);
+	}
+	gx.op_count = 0;
+	gx.doc_h = 0;
+	gx.hover_href = NULL;
+}
+
+CGxOp *GxOpAdd(I64 type, I64 x, I64 y, I64 w, I64 h)
+{
+	CGxOp *op;
+
+	if (gx.op_count >= GX_OPS_MAX)
+		return NULL;
+	op = &gx.ops[gx.op_count++];
+	MemSet(op, 0, sizeof(CGxOp));
+	op->type = type;
+	op->x = x;	op->y = y;
+	op->w = w;	op->h = h;
+	op->grad = -1; // gradient: none unless the box emit sets it (0 is a valid index)
+	op->sh_col = -1; // box-shadow: none unless the box emit sets it (0 is valid black)
+	return op;
+}
+
+U0 GxDbgBox(I64 src, CZNode *node, CGxOp *op)
+{ // //DBG GXO_BOX emitter ids: 1 V3Sprite, 2 V3Pill, 3 V3TableCell, 4 V3Float,
+//5 V3Block, 6 V3Details, 7 GxNode cell, 8 GxNode block.
+	U8 *dcls;
+
+	if (!op)
+		return;
+	op->dbg_src = src;
+	if (!zinc_dbg || !node)
+		return;
+	dcls = ZNodeAttr(node, "class");
+	if (!dcls)
+		dcls = "-";
+	NetLog("ZINC BOXEMIT op=%d src=%d %s.%s at=%d,%d r=%d bg=%X",
+		   gx.op_count - 1, src, node->tag, dcls, op->x, op->y, op->wkind,
+		   op->fg);
+}
+
+// while measuring intrinsic content width (V3Measure/L2Measure) alignment must NOT shift ops, or maxx comes back ~2x the intrinsic width. See zinc_no_align
+public Bool zinc_no_align = FALSE;
+
+U0 GxLineAlign()
+{
+	I64 i, right = 0, shift;
+
+	if (zinc_no_align)
+	{
+		gx.line_start_op = gx.op_count;
+		gx.line_align = 0;
+		return;
+	}
+	if (gx.line_align > 0 && gx.op_count > gx.line_start_op)
+	{
+		for (i = gx.line_start_op; i < gx.op_count; i++)
+			right = MaxI64(right, gx.ops[i].x + gx.ops[i].w);
+		shift = gx.wrap_w - right;
+		if (gx.line_align == 1)
+			shift /= 2;
+		if (shift > 0 && right)
+			for (i = gx.line_start_op; i < gx.op_count; i++)
+				gx.ops[i].x += shift;
+	}
+	gx.line_start_op = gx.op_count;
+	gx.line_align = 0;
+}
+
+I64 GxFontPx(CZStyle *s)
+{
+	if (s->fsize >= 8)
+		return ClampI64(s->fsize, 8, 120);
+	return 16;
+}
+I64 GxRgbFg(CZStyle *s)
+{
+	return GrColorResolve(GxPen(s->fg, gx.text_pen)) & 0xFFFFFF;
+}
+I64 GxRgbBg(CZStyle *s)
+{ // background is not inherited in CSS, so a run rarely carries its own: use the nearest enclosing box bg (gx.cur_bg), then the page, then the theme
+	if (s->bg >= 0)
+		return s->bg & 0xFFFFFF;
+	if (gx.cur_bg >= 0)
+		return gx.cur_bg & 0xFFFFFF;
+	if (gx.page_has_bg && gx.page_bg >= 0)
+		return gx.page_bg & 0xFFFFFF;
+	return GrColorResolve(de_theme.win_bg) & 0xFFFFFF;
+}
+
+U0 GxRunFlush()
+{
+	CGxOp	*op;
+	CDC		*tmp, *fdc;
+	I64		 w, sf = gx.run_scale, px;
+
+	if (gx.run_len && zinc_ttf)
+	{
+		CGrFont *rf = GrFontPick(gx.run_style.mono == 1);
+		gx.run[gx.run_len] = 0;
+		px	= GxFontPx(&gx.run_style);
+		// coverage, not a baked background: GxRgbBg can name only one flat colour, wrong over a gradient or an image. GxBlotBlend composites against the real destination at paint time
+		if (zinc_text_blend)
+			fdc = GrFontRenderCovDC(rf, px, GxRgbFg(&gx.run_style), gx.run);
+		else
+			fdc = GrFontRenderDC(rf, px, GxRgbFg(&gx.run_style),
+								 GxRgbBg(&gx.run_style), gx.run);
+		if (fdc)
+		{
+			op = GxOpAdd(GXO_TEXT, gx.run_x, gx.run_y, fdc->width,
+						 GrFontLineH(rf, px));
+			if (op)
+			{
+				op->sc	 = fdc; // owned; freed on reset (type != GXO_IMG)
+				op->cov	 = zinc_text_blend; // blend it, or GrBlot the baked one
+				op->text = StrNew(gx.run); // kept for selection/clipboard copy
+				op->fg	 = GxPen(gx.run_style.fg, gx.text_pen);
+				op->ul	 = gx.run_style.underline == 1 ||
+						   (gx.run_link && gx.run_style.underline != 0);
+				if (gx.run_link)
+					op->href = gx.cur_href;
+			}
+			else
+				DCDel(fdc);
+			gx.run_len = 0;
+			return;
+		}
+	}
+
+	if (!gx.run_len)
+		return;
+	gx.run[gx.run_len] = 0;
+	if (sf > 1)
+	{
+		tmp = DCNew(gx.run_len * FONT_WIDTH + 1, FONT_HEIGHT + 1);
+		DCFill(tmp);
+		tmp->color = GxPen(gx.run_style.fg, gx.text_pen);
+		GrPrint(tmp, 0, 0, "%s", gx.run);
+		if (gx.run_style.bold == 1)
+			GrPrint(tmp, 1, 0, "%s", gx.run);
+		op = GxOpAdd(GXO_SCALED, gx.run_x, gx.run_y,
+					 tmp->width * sf, tmp->height * sf);
+		if (op)
+		{
+			op->sc = DEDCScaleNew(tmp, tmp->width * sf, tmp->height * sf);
+			op->sc->flags &= ~DCF_NO_TRANSPARENTS;
+		}
+		DCDel(tmp);
+	}
+	else
+	{
+		w = gx.run_len * FONT_WIDTH;
+		op = GxOpAdd(GXO_TEXT, gx.run_x, gx.run_y, w, FONT_HEIGHT);
+		if (op)
+		{
+			op->text = StrNew(gx.run);
+			op->fg	 = GxPen(gx.run_style.fg, gx.text_pen);
+			op->bold = gx.run_style.bold == 1;
+			op->ul	 = gx.run_style.underline == 1 ||
+					   (gx.run_link && gx.run_style.underline != 0);
+			if (gx.run_style.bg >= 0)
+			{
+				op->has_bg = TRUE;
+				op->bg = GxPenBg(gx.run_style.bg, de_theme.win_bg);
+			}
+		}
+	}
+	if (op && gx.run_link)
+		op->href = gx.cur_href;
+	gx.run_len = 0;
+}
+
+// Active float regions. GxNewline/GxWord narrow the line to
+// [line-left..line-right] using gx_float_lx/rx, recomputed per line from the
+// floats overlapping the current y.
+#define GX_FLOATS	16
+
+class CGxFloatRgn
+{
+	I64	side;		// 0 left, 1 right
+	I64	x0, x1;		// absolute x span
+	I64	top, bot;	// absolute y span
+};
+
+CGxFloatRgn	gx_floats[GX_FLOATS];
+I64			gx_float_n	= 0;
+I64			gx_float_lx	= 0;			// active left-float right edge (0 = none)
+I64			gx_float_rx	= 0x40000000;	// active right-float left edge (huge = none)
+
+U0 GxFloatReset()
+{
+	gx_float_n	= 0;
+	gx_float_lx	= 0;
+	gx_float_rx	= 0x40000000;
+}
+
+U0 GxFloatRecompute(I64 y)
+{
+	I64 i, lx = 0, rx = 0x40000000;
+
+	for (i = 0; i < gx_float_n; i++)
+		if (gx_floats[i].top <= y < gx_floats[i].bot)
+		{
+			if (gx_floats[i].side == 0)
+			{
+				if (gx_floats[i].x1 > lx)
+					lx = gx_floats[i].x1;
+			}
+			else if (gx_floats[i].x0 < rx)
+				rx = gx_floats[i].x0;
+		}
+	gx_float_lx = lx;
+	gx_float_rx = rx;
+}
+
+U0 GxFloatAdd(I64 side, I64 x0, I64 x1, I64 top, I64 bot)
+{
+	if (gx_float_n < GX_FLOATS)
+	{
+		gx_floats[gx_float_n].side = side;
+		gx_floats[gx_float_n].x0	 = x0;
+		gx_floats[gx_float_n].x1	 = x1;
+		gx_floats[gx_float_n].top	 = top;
+		gx_floats[gx_float_n].bot	 = bot;
+		gx_float_n++;
+	}
+}
+
+I64 GxFloatBottom(I64 side)
+{ // lowest bottom among active floats of a side (side < 0 = any), for clear
+	I64 i, b = 0;
+
+	for (i = 0; i < gx_float_n; i++)
+		if (side < 0 || gx_floats[i].side == side)
+			if (gx_floats[i].bot > b)
+				b = gx_floats[i].bot;
+
+	return b;
+}
+
+public Bool zinc_floats  = TRUE; //Floats(FALSE) disables CSS float layout (bisect tool).
+public Bool zinc_shadows = TRUE; //Shadows(FALSE) disables box-shadow rendering.
+
+public U0 Floats(Bool on)
+{
+	zinc_floats = on;
+}
+
+public U0 Shadows(Bool on)
+{
+	zinc_shadows = on;
+}
+
+U0 GxNewline(I64 extra)
+{
+	GxRunFlush;
+	GxLineAlign;
+	gx.y += gx.line_h + extra;
+	gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+	gx.x = GX_MARGIN + gx.indent;
+	if (gx_float_n)
+	{
+		GxFloatRecompute(gx.y);
+		if (gx_float_lx > gx.x)
+			gx.x = gx_float_lx;
+	}
+}
+
+U0 GxWord(U8 *word, I64 len, CZStyle *style, I64 scale)
+{
+	I64 cw, need, px = 0, i, glyph_h, lh, rw, lstart;
+
+	if (len <= 0)
+		return;
+	lstart = GX_MARGIN + gx.indent;
+	rw	   = gx.wrap_w;
+	if (gx_float_n)
+	{
+		if (gx_float_lx > lstart)
+			lstart = gx_float_lx;
+		if (gx_float_rx < rw)
+			rw = gx_float_rx;
+	}
+	if (zinc_ttf)
+	{
+		CGrFont *wf = GrFontPick(style->mono == 1);
+		px	 = GxFontPx(style);
+		need = GrFontRunW(wf, px, word, len); // UTF-8 aware (CJK counts as 1)
+		cw	 = GrFontAdvPx(wf, ' ', px);
+	}
+	else
+	{
+		cw	 = FONT_WIDTH * scale;
+		need = len * cw;
+	}
+	// first content on a fresh line decides that line's text-align; never while measuring intrinsic width (zinc_no_align)
+	if (!zinc_no_align && gx.x <= lstart && style->align > 0)
+		gx.line_align = style->align;
+	if (gx.run_len &&
+		(scale != gx.run_scale || gx.run_link != (gx.link_depth > 0) ||
+		 MemCompare(&gx.run_style, style, sizeof(CZStyle))))
+		GxRunFlush;
+
+	if (gx.x + need > rw && gx.x > lstart)
+	{
+		GxRunFlush;
+		GxNewline(0);
+		if (style->align > 0)
+			gx.line_align = style->align;
+	}
+	if (!gx.run_len)
+	{
+		gx.run_x	 = gx.x;
+		gx.run_y	 = gx.y;
+		gx.run_scale = scale;
+		gx.run_link	 = gx.link_depth > 0;
+		MemCopy(&gx.run_style, style, sizeof(CZStyle));
+	}
+	if (gx.run_len + len + 1 >= GX_RUN_MAX)
+		GxRunFlush;
+	if (!gx.run_len)
+	{
+		gx.run_x = gx.x;
+		gx.run_y = gx.y;
+	}
+	MemCopy(&gx.run[gx.run_len], word, len);
+	if (style->uppercase == 1)
+	{
+		for (i = 0; i < len; i++)
+			if ('a' <= gx.run[gx.run_len + i] <= 'z')
+				gx.run[gx.run_len + i] -= 32;
+	}
+	else if (style->uppercase == 2)
+	{
+		if ('a' <= gx.run[gx.run_len] <= 'z')
+			gx.run[gx.run_len] -= 32;
+	}
+	gx.run_len += len;
+	gx.run[gx.run_len++] = ' ';
+	gx.x += need + cw;
+	// the glyph line box is the floor; author line-height, when set, may raise it
+	if (zinc_ttf)
+		glyph_h = GrFontLineH(GrFontPick(style->mono == 1), px);
+	else
+		glyph_h = FONT_HEIGHT * scale + GX_LINE_LEAD;
+	lh = glyph_h;
+	if (style->line_h > 0)
+		lh = MaxI64(style->line_h, glyph_h);
+	if (lh > gx.line_h)
+		gx.line_h = lh;
+}
+
+U0 GxText(U8 *text, CZStyle *style, I64 scale, Bool pre)
+{
+	U8	*p = text, *start;
+	I64	 len;
+
+	if (!text)
+		return;
+	while (*p)
+	{
+		if (pre)
+		{
+			start = p;
+			while (*p && *p != '\n')
+				p++;
+			len = p - start;
+			if (len)
+				GxWord(start, len, style, scale);
+			if (*p == '\n')
+			{
+				GxRunFlush;
+				GxNewline(0);
+				p++;
+			}
+		}
+		else
+		{
+			while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r')
+				p++;
+			start = p;
+			while (*p && *p != ' ' && *p != '\n' && *p != '\t' && *p != '\r')
+				p++;
+			len = p - start;
+			if (len)
+				GxWord(start, len, style, scale);
+		}
+	}
+}
+
+U0 GxWidgetLabel(CZNode *node, U8 *out, I64 max)
+{
+	U8	*v = node->value, *a;
+	CZNode *child;
+	I64	 len;
+
+	out[0] = 0;
+	if (!StrCompare(node->tag, "select"))
+	{
+		child = node->first_child;
+		while (child)
+		{
+			if (!StrCompare(child->tag, "option") &&
+				(child->checked || !out[0]))
+			{
+				if (child->first_child && child->first_child->type == ZH_TEXT &&
+					child->first_child->text)
+				{
+					a = child->first_child->text;
+					len = StrLen(a);
+					if (len > max - 1)
+						len = max - 1;
+					MemCopy(out, a, len);
+					out[len] = 0;
+				}
+				if (child->checked)
+					return;
+			}
+			child = child->next;
+		}
+		return;
+	}
+	if (!v)
+		v = ZNodeAttr(node, "value");
+	if (!v && !StrCompare(node->tag, "button"))
+	{
+		I64 tl = 0;
+
+		ZNodeTextCollect(node, out, max - 1, &tl);
+		if (tl >= max - 1)
+		{ // cut at a code point boundary: a severed tail renders as .notdef boxes
+			while (tl > 0 && (out[tl - 1] & 0xC0) == 0x80)
+				tl--;
+			if (tl > 0 && out[tl - 1] >= 0xC0)
+				tl--;
+		}
+		while (tl > 0 && out[tl - 1] == ' ')
+			tl--;
+		out[tl] = 0;
+		return;
+	}
+	if (!v)
+		v = "";
+	len = StrLen(v);
+	if (len > max - 1)
+	{ // back off to a lead byte: a severed UTF-8 tail renders as .notdef boxes
+		len = max - 1;
+		while (len > 0 && (v[len] & 0xC0) == 0x80)
+			len--;
+	}
+	MemCopy(out, v, len);
+	out[len] = 0;
+}
+
+U0 GxWidget(CZNode *node, I64 kind, CZStyle *style)
+{ // form widget: intrinsic size is the label plus padding, rasterized through the same font path as body text (GrFontRenderCovDC). op->sc holds that coverage DC, op->lbl_x/lbl_y its offset inside the box; the label is CLIPPED to the box at paint
+	CGxOp	*op;
+	CZStyle	 wa;
+	CGrFont	*wf;
+	CDC		*ldc = NULL;
+	U8		 label[64];
+	U8		*sat;
+	I64		 w, h, px, lw, lh, padx, pady, tcol, avail, chw, nch;
+
+	GxRunFlush;
+	GxWidgetLabel(node, label, 48);
+	ZCssApply(node, &wa);
+
+	px = 16;
+	if (style && style->fsize >= 8)
+		px = ClampI64(style->fsize, 8, 120);
+	wf = GrFontPick(FALSE);
+	if (style && style->mono == 1)
+		wf = GrFontPick(TRUE);
+	lw = StrLen(label) * FONT_WIDTH;
+	lh = FONT_HEIGHT;
+	if (zinc_ttf)
+	{
+		lw = GrFontWidth(wf, px, label);
+		lh = GrFontLineH(wf, px);
+	}
+
+	padx = 8;
+	pady = 3;
+	if (kind == GXW_TEXT || kind == GXW_AREA || kind == GXW_SELECT)
+		padx = 6;
+	if (wa.pl > 0 || wa.pr > 0)
+		padx = MaxI64(wa.pl, wa.pr);
+	if (wa.pt > 0 || wa.pb > 0)
+		pady = MaxI64(wa.pt, wa.pb);
+
+	if (kind == GXW_CHECK || kind == GXW_RADIO)
+	{
+		w = 14;
+		h = 14;
+	}
+	else
+	{
+		w = lw + 2 * padx;
+		h = lh + 2 * pady;
+		if (kind == GXW_TEXT || kind == GXW_AREA || kind == GXW_SELECT)
+			w = MaxI64(w, 120);
+		else
+			w = MaxI64(w, 40);
+		h = MaxI64(h, 20);
+		if (kind == GXW_AREA)
+			h = MaxI64(h, 40);
+		if (kind == GXW_TEXT || kind == GXW_AREA)
+		{
+			chw = FONT_WIDTH;
+			if (zinc_ttf)
+				chw = MaxI64(1, GrFontAdvPx(wf, '0', px));
+			sat = ZNodeAttr(node, "size");
+			if (kind == GXW_AREA)
+				sat = ZNodeAttr(node, "cols");
+			if (sat)
+			{
+				nch = Str2I64(sat);
+				if (1 <= nch <= 300)
+					w = nch * chw + 2 * padx;
+			}
+			sat = ZNodeAttr(node, "rows");
+			if (sat && kind == GXW_AREA)
+			{
+				nch = Str2I64(sat);
+				if (1 <= nch <= 100)
+					h = nch * lh + 2 * pady;
+			}
+		}
+		avail = gx.wrap_w - (GX_MARGIN + gx.indent);
+		if (avail < 40)
+			avail = 40;
+		if (wa.width > 0)
+			w = wa.width;
+		else if (wa.width < 0)
+			w = avail * -wa.width / 100;
+		if (wa.height > 0)
+			h = wa.height; // percent heights encode as -(3000+n): px only here
+		if (gx.flex_stretch_w > w)
+			w = gx.flex_stretch_w; // stretched flex-column item: fill the column
+	}
+	if (gx.x + w > gx.wrap_w)
+		GxNewline(0);
+
+	tcol = 0x202124;
+	if (wa.fg >= 0)
+		tcol = GrColorResolve(GxPenBg(wa.fg, de_theme.text)) & 0xFFFFFF;
+	if (zinc_ttf && label[0] && kind != GXW_CHECK && kind != GXW_RADIO)
+	{
+		ldc = GrFontRenderCovDC(wf, px, tcol, label);
+		if (ldc)
+		{
+			lw = ldc->width;
+			lh = ldc->height;
+		}
+	}
+
+	op = GxOpAdd(GXO_WIDGET, gx.x, gx.y, w, h);
+	if (op)
+	{
+		op->node  = node;
+		op->wkind = kind;
+		op->text  = StrNew(label);
+		op->sc    = ldc; // owned; GxOpsReset frees it (type != GXO_IMG)
+		op->radius = wa.radius;
+		if (kind == GXW_SUBMIT || kind == GXW_BUTTON || kind == GXW_SELECT)
+			op->lbl_x = MaxI64(1, (w - lw) / 2);
+		else
+			op->lbl_x = padx;
+		op->lbl_y = MaxI64(0, (h - lh) / 2);
+		if (kind == GXW_AREA)
+			op->lbl_y = pady; // a textarea's text starts at the top
+		op->lbl_px = px; // label font size, for the field editor's re-render
+		if (wa.bg >= 0)
+		{
+			op->has_bg = TRUE;
+			op->fg = GxPenBg(wa.bg, de_theme.win_bg);
+		}
+		if (wa.border >= 0)
+			op->bg = GxPenBg(wa.border, de_theme.panel_edge);
+		else
+			op->bg = ColorRGB(0xC8, 0xCC, 0xD0);
+		op->sh_col = wa.fg; // widget TEXT color rides in sh_col (-1 = UA default); GXO_WIDGET has no box-shadow, so the slot is free
+	}
+	else if (ldc)
+		DCDel(ldc);
+	if (zinc_dbg && op)
+	{
+		I64 dcw = 0;
+
+		if (ldc)
+			dcw = ldc->width;
+		// label text is NOT logged: a page value containing a dollar sign would be read as a DolDoc command by the log document
+		NetLog("ZINC WIDGET op=%d k=%d px=%d nbytes=%d lw=%d dcw=%d w=%d h=%d "
+			   "pad=%d,%d lblx=%d wa.w=%d wa.h=%d flexsw=%d x=%d wrap=%d ind=%d "
+			   "meas=%d", gx.op_count - 1,
+			   kind, px, StrLen(label), lw, dcw, w, h, padx, pady, op->lbl_x,
+			   wa.width, wa.height, gx.flex_stretch_w, op->x, gx.wrap_w,
+			   gx.indent, zinc_no_align);
+	}
+	gx.x += w + FONT_WIDTH;
+	if (h + GX_LINE_LEAD > gx.line_h)
+		gx.line_h = h + GX_LINE_LEAD;
+}
+
+I64 GxScaleOf(CZStyle *style)
+{
+	if (style->fsize >= 28)
+		return 3;
+	if (style->fsize >= 19)
+		return 2;
+	return 1;
+}
+
+I64 GxDefSpace(U8 *tag)
+{
+	if (!StrCompare(tag, "p") || !StrCompare(tag, "blockquote") ||
+		!StrCompare(tag, "pre") || !StrCompare(tag, "table") ||
+		(tag[0] == 'h' && '1' <= tag[1] <= '6' && !tag[2]))
+		return 6;
+	if (!StrCompare(tag, "dl") || !StrCompare(tag, "figure") ||
+		!StrCompare(tag, "form") || !StrCompare(tag, "fieldset") ||
+		!StrCompare(tag, "section") || !StrCompare(tag, "article"))
+		return 6;
+	if (!StrCompare(tag, "ul") || !StrCompare(tag, "ol"))
+		return 3;
+	return 0;
+}
+
+I64 gx_font_sizes[7] = {10, 13, 16, 19, 24, 32, 40}; //<font size=1..7>
+
+I64 GxCellWant(CZNode *node, I64 depth)
+{
+	CZNode	*c;
+	I64		 w = 0;
+
+	if (!node || depth > 6)
+		return 0;
+	if (node->type == ZH_TEXT)
+	{
+		if (node->text)
+			return StrLen(node->text) * FONT_WIDTH;
+		return 0;
+	}
+	if (!StrCompare(node->tag, "img") || !StrCompare(node->tag, "svg"))
+		return 84;
+	if (!StrCompare(node->tag, "input") || !StrCompare(node->tag, "select") ||
+		!StrCompare(node->tag, "button") || !StrCompare(node->tag, "textarea"))
+		return 120;
+	if (!StrCompare(node->tag, "br"))
+		return 0;
+	c = node->first_child;
+	while (c)
+	{
+		w += GxCellWant(c, depth + 1);
+		c = c->next;
+	}
+
+	return w;
+}
+
+U0 GxNode(CZNode *node, CZStyle *inherited)
+{
+	CZStyle	 style, author, kid;
+	CZNode	*child;
+	CGxOp	*op;
+	U8		*attr, *type;
+	U8		 mark[8];
+	I64		 i, box_op, mt_eff, mb_eff, pt_eff, pb_eff, ml_eff, pl_eff;
+	I64		 save_wrap, save_indent, bw, avail, cells, k, y0, ymax, cw, base, span;
+	I64		 center_add;
+	Bool	 is_block, is_body, boxed, is_list;
+
+	if (!node || gx.op_count >= GX_OPS_MAX - 8)
+		return;
+
+	if (node->type == ZH_TEXT)
+	{
+		GxText(node->text, inherited, GxScaleOf(inherited), inherited->pre == 1);
+		return;
+	}
+	if (ZnTagSkipped(node->tag))
+		return;
+
+	MemCopy(&style, inherited, sizeof(CZStyle));
+	ZnUaStyle(node->tag, &style);
+	ZCssApply(node, &author);
+	if (author.display == ZCSS_DISP_NONE)
+		return;
+	ZStyleMerge(&style, &author);
+	style.display = -1;
+
+	attr = ZNodeAttr(node, "align");
+	if (attr)
+	{
+		if (!StrNICompare(attr, "center", 6))
+			style.align = 1;
+		else if (!StrNICompare(attr, "right", 5))
+			style.align = 2;
+		else if (!StrNICompare(attr, "left", 4))
+			style.align = 0;
+	}
+	if (!StrCompare(node->tag, "font"))
+	{
+		attr = ZNodeAttr(node, "color");
+		if (attr)
+		{
+			i = ZCssColor(attr);
+			if (i >= 0)
+				style.fg = i;
+		}
+		attr = ZNodeAttr(node, "size");
+		if (attr)
+		{
+			i = Str2I64(attr);
+			if (1 <= i <= 7)
+				style.fsize = gx_font_sizes[i - 1];
+		}
+	}
+
+	if (!StrCompare(node->tag, "br"))
+	{
+		GxRunFlush;
+		GxNewline(0);
+		return;
+	}
+	if (!StrCompare(node->tag, "hr"))
+	{
+		GxRunFlush;
+		GxNewline(4);
+		op = GxOpAdd(GXO_RECT, GX_MARGIN, gx.y + 3, gx.wrap_w - GX_MARGIN * 2, 2);
+		if (op)
+			op->fg = de_theme.panel_edge;
+		GxNewline(4);
+		return;
+	}
+	if (!StrCompare(node->tag, "svg") && node->text)
+	{
+		U8		 skey[48];
+		U8		*sat;
+		CGxImg	*ge;
+		F64		 vx = 0.0, vy = 0.0, vw = 0.0, vh = 0.0, ssc;
+		F64		 aw, ah, em, pbw, pbh;
+		I64		 sw = 0, sh = 0, savail, shint;
+		Bool	 awp = FALSE, ahp = FALSE;
+
+		GxRunFlush;
+		if (gx.x <= GX_MARGIN + gx.indent && style.align > 0)
+			gx.line_align = style.align;
+
+		sat = ZNodeAttr(node, "viewBox");
+		if (sat)
+		{ vx = SvgNum(&sat); vy = SvgNum(&sat); vw = SvgNum(&sat); vh = SvgNum(&sat); }
+		if (vw < 0.0) vw = 0.0;
+		if (vh < 0.0) vh = 0.0;
+
+		em = ToF64(style.fsize);
+		if (em < 1.0)
+			em = 16.0;
+		pbw = ToF64(gx.cb_w);
+		if (pbw < 1.0)
+			pbw = ToF64(gx.wrap_w - GX_MARGIN * 2);
+		pbh = ToF64(gx.anc_h);
+		if (pbh < 1.0)
+			pbh = pbw;
+		aw = SvgLenPx(ZNodeAttr(node, "width"), pbw, em, &awp);
+		ah = SvgLenPx(ZNodeAttr(node, "height"), pbh, em, &ahp);
+		// CSS width/height beat the width=/height= presentation attributes (SVG 1.1 appendix C). L2HeightPxCB is in Layout.ZC, included below this file, so a percentage height is not resolved here
+		if (style.width > 0)
+		{ aw = ToF64(style.width); awp = FALSE; }
+		else if (style.width < 0)
+		{ aw = pbw * ToF64(-style.width) / 100.0; awp = TRUE; }
+		if (style.height > 0)
+		{ ah = ToF64(style.height); ahp = FALSE; }
+		if (awp && vw > 0.0)
+			aw = -1.0;
+		if (ahp && vh > 0.0)
+			ah = -1.0;
+		if (aw > 0.0) sw = SvgRound(aw);
+		if (ah > 0.0) sh = SvgRound(ah);
+
+		if (sw <= 0 && sh <= 0)
+		{
+			if (vw > 0.0 && vh > 0.0) { sw = SvgRound(vw); sh = SvgRound(vh); }
+			else { sw = 24; sh = 24; }
+		}
+		else if (sw <= 0)
+		{
+			if (vw > 0.0 && vh > 0.0) sw = SvgRound(ToF64(sh) * vw / vh);
+			else sw = sh;
+		}
+		else if (sh <= 0)
+		{
+			if (vw > 0.0 && vh > 0.0) sh = SvgRound(ToF64(sw) * vh / vw);
+			else sh = sw;
+		}
+		if (vw <= 0.0 || vh <= 0.0)
+		{ vx = 0.0; vy = 0.0; vw = ToF64(sw); vh = ToF64(sh); }
+
+		savail = gx.wrap_w - gx.x - GX_MARGIN;
+		if (savail < 24)
+			savail = gx.wrap_w - GX_MARGIN * 2;
+		if (sw > savail && savail > 0)
+		{
+			ssc = ToF64(savail) / ToF64(sw);
+			sw = savail;
+			sh = ToI64(ToF64(sh) * ssc);
+		}
+		if (sh > 320)
+		{ ssc = 320.0 / ToF64(sh); sw = ToI64(ToF64(sw) * ssc); sh = 320; }
+		if (sw < 1) sw = 1;
+		if (sh < 1) sh = 1;
+
+		StrPrint(skey, "svg:%X", node->text);
+		ge = GxImgFind(skey, sw, sh);
+		if (!ge)
+		{
+			ge = GxImgGet(skey, sw, sh);
+			if (ge)
+			{
+				shint = gx.page_fg;
+				if (shint < 0)
+					shint = 0xE8ECF4;
+				ge->fetched = TRUE;
+				ge->dc = SVGRenderToDC(node->text, vx, vy, vw, vh, sw, sh,
+									   shint, sys_task);
+			}
+		}
+		if (ge && ge->dc)
+		{
+			if (gx.x + sw > gx.wrap_w && gx.x > GX_MARGIN)
+				GxNewline(0);
+			op = GxOpAdd(GXO_IMG, gx.x, gx.y, sw, sh);
+			if (op)
+				op->sc = ge->dc;
+			gx.x += sw + FONT_WIDTH;
+			if (sh + GX_LINE_LEAD > gx.line_h)
+				gx.line_h = sh + GX_LINE_LEAD;
+			return;
+		}
+		attr = ZNodeAttr(node, "aria-label");
+		if (!attr)
+			attr = ZNodeAttr(node, "title");
+		if (attr && *attr)
+			GxText(attr, &style, 1, FALSE);
+		return;
+	}
+	if (!StrCompare(node->tag, "img"))
+	{
+		U8		*src = ZNodeAttr(node, "src"), *abs;
+		CGxImg	*ce;
+		I64		 iw, ih;
+		U8		 dkey[48];
+
+		if (!src || !*src)
+			src = ZNodeAttr(node, "data-src"); // lazy-load pattern: the real URL parked for a JS loader we lack
+		GxRunFlush;
+		if (gx.x <= GX_MARGIN + gx.indent && style.align > 0)
+			gx.line_align = style.align;
+		if (src && !StrNICompare(src, "data:", 5))
+		{ // inline data: URI image; decode once, cache keyed by the src pointer (node attr storage is stable)
+			StrPrint(dkey, "data:%X", src);
+			ce = GxImgFind(dkey, 0, 0);
+			if (!ce)
+			{
+				ce = GxImgGet(dkey, 0, 0);
+				if (ce)
+				{
+					ce->fetched = TRUE;
+					ce->dc = DataURIToDC(src, sys_task);
+				}
+			}
+			if (ce && ce->dc)
+			{
+				iw = ce->dc->width;
+				ih = ce->dc->height;
+				if (iw > gx.wrap_w - gx.x - GX_MARGIN)
+				{
+					ih = ih * (gx.wrap_w - gx.x - GX_MARGIN) / iw;
+					iw = gx.wrap_w - gx.x - GX_MARGIN;
+				}
+				if (iw < 1) iw = 1;
+				if (ih < 1) ih = 1;
+				if (gx.x + iw > gx.wrap_w && gx.x > GX_MARGIN)
+					GxNewline(0);
+				op = GxOpAdd(GXO_IMG, gx.x, gx.y, iw, ih);
+				if (op)
+					op->sc = ce->dc;
+				gx.x += iw + FONT_WIDTH;
+				if (ih + GX_LINE_LEAD > gx.line_h)
+					gx.line_h = ih + GX_LINE_LEAD;
+				return;
+			}
+			attr = ZNodeAttr(node, "alt");
+			if (attr && *attr)
+				GxText(attr, &style, 1, FALSE);
+			return;
+		}
+		if (src && *src)
+		{
+			abs = ZincResolveLink(src); // MAlloc'ed absolute URL
+			ce = GxImgGet(abs, 0, 0);
+			if (ce && ce->dc)
+			{
+				iw = ce->dc->width;
+				ih = ce->dc->height;
+				if (iw > gx.wrap_w - gx.x)
+				{
+					ih = ih * (gx.wrap_w - gx.x) / iw;
+					iw = gx.wrap_w - gx.x;
+				}
+				if (gx.x + iw > gx.wrap_w && gx.x > GX_MARGIN)
+					GxNewline(0);
+				op = GxOpAdd(GXO_IMG, gx.x, gx.y, iw, ih);
+				if (op)
+					op->sc = ce->dc; // borrowed from cache; not freed on reset
+				gx.x += iw + FONT_WIDTH;
+				if (ih + GX_LINE_LEAD > gx.line_h)
+					gx.line_h = ih + GX_LINE_LEAD;
+				Free(abs);
+				return;
+			}
+			// not yet decoded: placeholder box. Honor width=/height= (or CSS width) so the layout does not shift when the real image arrives
+			iw = 0;
+			ih = 0;
+			attr = ZNodeAttr(node, "width");
+			if (attr)
+				iw = ClampI64(Str2I64(attr), 0, 2000);
+			attr = ZNodeAttr(node, "height");
+			if (attr)
+				ih = ClampI64(Str2I64(attr), 0, 2000);
+			if (!iw && style.width > 0)
+				iw = style.width;
+			if (iw && !ih)
+				ih = iw * 3 / 4;
+			if (!iw)
+			{
+				iw = 80;
+				ih = 40;
+			}
+			if (iw > gx.wrap_w - gx.x)
+			{
+				ih = MaxI64(1, ih * MaxI64(1, gx.wrap_w - gx.x) / iw);
+				iw = MaxI64(1, gx.wrap_w - gx.x);
+			}
+			op = GxOpAdd(GXO_IMG, gx.x, gx.y, iw, ih);
+			if (op)
+			{
+				op->img_url = abs; // owned by op; freed on reset
+				op->fg = ColorRGB(0xE8, 0xE8, 0xEA);
+			}
+			else
+				Free(abs);
+			gx.x += iw + FONT_WIDTH;
+			if (ih + GX_LINE_LEAD > gx.line_h)
+				gx.line_h = ih + GX_LINE_LEAD;
+			return;
+		}
+		attr = ZNodeAttr(node, "alt");
+		op = GxOpAdd(GXO_RECT, gx.x, gx.y, 60, 16);
+		if (op)
+			op->fg = ColorRGB(0xE8, 0xE8, 0xEA);
+		if (attr && *attr)
+			GxText(attr, &style, 1, FALSE);
+		else
+			GxText("[img]", &style, 1, FALSE);
+		return;
+	}
+	if (!StrCompare(node->tag, "input"))
+	{
+		type = ZNodeAttr(node, "type");
+		if (!type)
+			type = "text";
+		if (!StrICompare(type, "hidden"))
+			return;
+		if (!StrICompare(type, "checkbox"))
+			GxWidget(node, GXW_CHECK, &style);
+		else if (!StrICompare(type, "radio"))
+			GxWidget(node, GXW_RADIO, &style);
+		else if (!StrICompare(type, "submit") || !StrICompare(type, "image"))
+			GxWidget(node, GXW_SUBMIT, &style);
+		else if (!StrICompare(type, "button"))
+			GxWidget(node, GXW_BUTTON, &style);
+		else
+			GxWidget(node, GXW_TEXT, &style);
+		return;
+	}
+	if (!StrCompare(node->tag, "button"))
+	{
+		type = ZNodeAttr(node, "type");
+		if (type && !StrICompare(type, "button"))
+			GxWidget(node, GXW_BUTTON, &style);
+		else
+			GxWidget(node, GXW_SUBMIT, &style);
+		return;
+	}
+	if (!StrCompare(node->tag, "select"))
+	{
+		GxWidget(node, GXW_SELECT, &style);
+		return;
+	}
+	if (!StrCompare(node->tag, "textarea"))
+	{
+		GxWidget(node, GXW_AREA, &style);
+		return;
+	}
+
+	if (!StrCompare(node->tag, "a"))
+	{
+		attr = ZNodeAttr(node, "href");
+		if (attr && *attr)
+		{
+			if (style.fg < 0)
+				style.fg = 0x4EA3FF;
+			GxRunFlush;
+			gx.link_depth++;
+			gx.cur_href = attr;
+			child = node->first_child;
+			while (child)
+			{
+				GxNode(child, &style);
+				child = child->next;
+			}
+			GxRunFlush;
+			gx.link_depth--;
+			return;
+		}
+	}
+
+	if (!StrCompare(node->tag, "table"))
+	{
+		I64 tw = 0, t_avail, t_save_i = gx.indent, t_save_w = gx.wrap_w;
+
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		t_avail = gx.wrap_w - (GX_MARGIN + gx.indent);
+		if (author.width > 0)
+			tw = MinI64(author.width, t_avail);
+		else if (author.width < 0)
+			tw = t_avail * -author.width / 100;
+		if (tw >= 60 && tw < t_avail)
+		{
+			if (style.align == 1)
+				gx.indent += (t_avail - tw) / 2;
+			else if (style.align == 2)
+				gx.indent += t_avail - tw;
+			gx.wrap_w = GX_MARGIN + gx.indent + tw;
+			gx.x = GX_MARGIN + gx.indent;
+		}
+		MemCopy(&kid, &style, sizeof(CZStyle));
+		ZStyleStripBox(&kid);
+		child = node->first_child;
+		while (child)
+		{
+			GxNode(child, &kid);
+			child = child->next;
+		}
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		gx.indent = t_save_i;
+		gx.wrap_w = t_save_w;
+		gx.x = GX_MARGIN + gx.indent;
+		return;
+	}
+
+	if (!StrCompare(node->tag, "tr"))
+	{ // a colspan=N cell takes N column units
+		I64		 want[18], col_x[18], sum_want, big_i, u, cell_box;
+		I64		 save_cbg = gx.cur_bg;
+		CZStyle	 cellau;
+
+		cells = 0;
+		child = node->first_child;
+		while (child)
+		{
+			if (child->type == ZH_ELEM &&
+				(!StrCompare(child->tag, "td") || !StrCompare(child->tag, "th")))
+			{
+				span = 1;
+				attr = ZNodeAttr(child, "colspan");
+				if (attr)
+					span = ClampI64(Str2I64(attr), 1, 8);
+				cells += span;
+			}
+			child = child->next;
+		}
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		if (!cells)
+		{
+			if (author.height > 0)
+				gx.y += author.height;
+			return;
+		}
+		base = GX_MARGIN + gx.indent;
+		avail = gx.wrap_w - base;
+		if (2 <= cells <= 16 && avail / cells >= 24)
+		{
+			MemCopy(&kid, &style, sizeof(CZStyle));
+			ZStyleStripBox(&kid);
+			kid.align = 0; // cells do NOT inherit <center>; td align= / CSS set their own
+			u = 0;
+			child = node->first_child;
+			while (child)
+			{
+				if (child->type == ZH_ELEM &&
+					(!StrCompare(child->tag, "td") || !StrCompare(child->tag, "th")))
+				{
+					span = 1;
+					attr = ZNodeAttr(child, "colspan");
+					if (attr)
+						span = ClampI64(Str2I64(attr), 1, 8);
+					cw = MinI64(GxCellWant(child, 0) + 14, avail);
+					for (k = 0; k < span && u < 16; k++)
+						want[u++] = cw / span;
+				}
+				child = child->next;
+			}
+			sum_want = 0;
+			for (k = 0; k < u; k++)
+				sum_want += want[k];
+			if (sum_want <= avail)
+			{
+				big_i = 0;
+				for (k = 1; k < u; k++)
+					if (want[k] > want[big_i])
+						big_i = k;
+				want[big_i] += avail - sum_want;
+			}
+			else
+			{
+				for (k = 0; k < u; k++)
+					want[k] = MaxI64(24, avail * want[k] / MaxI64(1, sum_want));
+			}
+			col_x[0] = 0;
+			for (k = 0; k < u; k++)
+				col_x[k + 1] = col_x[k] + want[k];
+			save_indent = gx.indent;
+			save_wrap	= gx.wrap_w;
+			y0	 = gx.y;
+			ymax = y0;
+			k	 = 0;
+			child = node->first_child;
+			while (child)
+			{
+				if (child->type == ZH_ELEM && k < u &&
+					(!StrCompare(child->tag, "td") || !StrCompare(child->tag, "th")))
+				{
+					span = 1;
+					attr = ZNodeAttr(child, "colspan");
+					if (attr)
+						span = ClampI64(Str2I64(attr), 1, 8);
+					gx.y	  = y0;
+					gx.indent = save_indent + col_x[k];
+					gx.wrap_w = base + col_x[MinI64(k + span, u)] - 6;
+					gx.x	  = GX_MARGIN + gx.indent;
+					gx.line_start_op = gx.op_count;
+					ZCssApply(child, &cellau);
+					cell_box = -1;
+					if (cellau.bg >= 0)
+					{
+						op = GxOpAdd(GXO_BOX, gx.x - 2, y0 - 1,
+									 gx.wrap_w - gx.x + 4, 8);
+						if (op)
+						{
+							cell_box = gx.op_count - 1;
+							op->has_bg = TRUE;
+							op->fg = GxPenBg(cellau.bg, de_theme.win_bg);
+							GxDbgBox(7, child, op);
+						}
+						gx.line_start_op = gx.op_count;
+						gx.cur_bg = cellau.bg;
+					}
+					GxNode(child, &kid);
+					GxRunFlush;
+					GxLineAlign;
+					if (cellau.bg >= 0)
+						gx.cur_bg = save_cbg;
+					if (cell_box >= 0)
+						gx.ops[cell_box].h =
+							MaxI64(8, gx.y + gx.line_h + 2 - y0);
+					ymax = MaxI64(ymax, gx.y);
+					k += span;
+				}
+				child = child->next;
+			}
+			gx.indent = save_indent;
+			gx.wrap_w = save_wrap;
+			gx.y	  = ymax;
+			if (author.height > 0 && gx.y < y0 + author.height)
+				gx.y = y0 + author.height;
+			gx.x	  = GX_MARGIN + gx.indent;
+			gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+			return;
+		}
+	}
+
+	if (author.display == ZCSS_DISP_FLEX && author.flex_col != 1)
+	{
+		i = 0;
+		child = node->first_child;
+		while (child)
+		{
+			if (child->type == ZH_ELEM)
+				i++;
+			child = child->next;
+		}
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		base  = GX_MARGIN + gx.indent;
+		avail = gx.wrap_w - base;
+		cells = MaxI64(1, MinI64(i, avail / 140)); // aim for ~140px columns
+		if (i >= 2 && cells >= 2 && avail / cells >= 60)
+		{
+			MemCopy(&kid, &style, sizeof(CZStyle));
+			ZStyleStripBox(&kid);
+			cw = avail / cells;
+			save_indent = gx.indent;
+			save_wrap	= gx.wrap_w;
+			y0	 = gx.y;
+			ymax = gx.y;
+			k	 = 0;
+			child = node->first_child;
+			while (child)
+			{
+				if (child->type == ZH_ELEM)
+				{
+					span = k % cells;
+					if (span == 0 && k > 0)
+						y0 = ymax;
+					gx.y	  = y0;
+					gx.indent = save_indent + span * cw;
+					gx.wrap_w = base + (span + 1) * cw - 6;
+					gx.x	  = GX_MARGIN + gx.indent;
+					gx.line_start_op = gx.op_count;
+					GxNode(child, &kid);
+					GxRunFlush;
+					GxLineAlign;
+					ymax = MaxI64(ymax, gx.y);
+					k++;
+				}
+				child = child->next;
+			}
+			gx.indent = save_indent;
+			gx.wrap_w = save_wrap;
+			gx.y	  = ymax;
+			gx.x	  = GX_MARGIN + gx.indent;
+			gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+			return;
+		}
+	}
+
+	is_body = !StrCompare(node->tag, "body") || !StrCompare(node->tag, "html") ||
+			  !StrCompare(node->tag, "#root");
+	is_list = !StrCompare(node->tag, "ul") || !StrCompare(node->tag, "ol");
+	is_block = ZHtmlTagBlock(node->tag) || !StrCompare(node->tag, "td") ||
+			   !StrCompare(node->tag, "th") || !StrCompare(node->tag, "center") ||
+			   !StrCompare(node->tag, "main") || !StrCompare(node->tag, "aside") ||
+			   !StrCompare(node->tag, "figure") || is_body;
+	if (author.display == ZCSS_DISP_BLOCK || author.display == ZCSS_DISP_FLEX)
+		is_block = TRUE;
+	else if (author.display == ZCSS_DISP_INLINE)
+		is_block = FALSE;
+
+	box_op = -1;
+	mt_eff = 0;	mb_eff = 0;
+	pt_eff = 0;	pb_eff = 0;
+	ml_eff = 0;	pl_eff = 0;
+	boxed = is_block && !is_body && (author.bg >= 0 || author.border >= 0);
+
+	if (is_block)
+	{
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		mt_eff = author.mt;
+		mb_eff = author.mb;
+		if (mt_eff < 0)
+			mt_eff = GxDefSpace(node->tag);
+		if (mb_eff < 0)
+			mb_eff = GxDefSpace(node->tag);
+		ml_eff = MaxI64(0, style.ml);
+		pl_eff = MaxI64(0, style.pl);
+		if (!StrCompare(node->tag, "blockquote") && style.ml < 0)
+			ml_eff = 24;
+		pt_eff = author.pt;
+		pb_eff = author.pb;
+		if (pt_eff < 0)
+		{
+			if (boxed)
+				pt_eff = 4;
+			else
+				pt_eff = 0;
+		}
+		if (pb_eff < 0)
+		{
+			if (boxed)
+				pb_eff = 4;
+			else
+				pb_eff = 0;
+		}
+		gx.y += mt_eff;
+		gx.indent += ml_eff;
+		save_wrap = 0;
+		center_add = 0;
+		if (style.width && !is_body)
+		{
+			avail = gx.wrap_w - (GX_MARGIN + gx.indent);
+			if (style.width > 0)
+				bw = MinI64(style.width, avail);
+			else
+				bw = avail * -style.width / 100;
+			if (bw >= 60 && bw < avail)
+			{
+				if (style.ml_auto == 1)
+					center_add = (avail - bw) / 2;
+				gx.indent += center_add;
+				save_wrap = gx.wrap_w;
+				gx.wrap_w = GX_MARGIN + gx.indent + bw;
+			}
+		}
+		if (boxed)
+		{
+			op = GxOpAdd(GXO_BOX, GX_MARGIN + gx.indent - 3, gx.y - 2,
+						 gx.wrap_w - (GX_MARGIN + gx.indent - 3), 8);
+			if (op)
+			{
+				box_op = gx.op_count - 1;
+				op->has_bg = author.bg >= 0;
+				op->fg = GxPenBg(author.bg, de_theme.win_bg);
+				op->ul = author.border >= 0;
+				op->bg = GxPenBg(author.border, de_theme.panel_edge);
+				if (author.radius > 0)
+					op->wkind = author.radius; // wkind = corner radius for GXO_BOX
+				GxDbgBox(8, node, op);
+			}
+			gx.line_start_op = gx.op_count;
+		}
+		gx.indent += pl_eff;
+		gx.y += pt_eff;
+		gx.x = GX_MARGIN + gx.indent;
+	}
+
+	if (is_list)
+	{
+		if (gx.list_sp < 8)
+		{
+			gx.list_typ[gx.list_sp] = !StrCompare(node->tag, "ol");
+			gx.list_ctr[gx.list_sp] = 0;
+			gx.list_sp++;
+		}
+		gx.indent += 18;
+		gx.x = GX_MARGIN + gx.indent;
+	}
+	if (!StrCompare(node->tag, "li") && style.list_none != 1)
+	{
+		if (gx.list_sp > 0 && gx.list_typ[gx.list_sp - 1])
+		{
+			gx.list_ctr[gx.list_sp - 1]++;
+			StrPrint(mark, "%d.", gx.list_ctr[gx.list_sp - 1] % 1000);
+		}
+		else
+		{
+			mark[0] = '*';
+			mark[1] = 0;
+		}
+		GxText(mark, &style, 1, FALSE);
+	}
+
+	// children inherit text properties, never box properties
+	MemCopy(&kid, &style, sizeof(CZStyle));
+	ZStyleStripBox(&kid);
+	if ((is_block && author.bg >= 0) || is_body)
+		kid.bg = -1; // the box (or the page fill) already painted it
+
+	child = node->first_child;
+	while (child)
+	{
+		GxNode(child, &kid);
+		child = child->next;
+	}
+
+	if (is_list)
+	{
+		gx.indent -= 18;
+		if (gx.list_sp > 0)
+			gx.list_sp--;
+	}
+	if (is_block)
+	{
+		GxRunFlush;
+		if (gx.x > GX_MARGIN + gx.indent)
+			GxNewline(0);
+		gx.y += pb_eff;
+		if (box_op >= 0)
+		{
+			gx.ops[box_op].h = MaxI64(8, gx.y + 2 - gx.ops[box_op].y);
+			gx.line_start_op = gx.op_count;
+		}
+		gx.y += mb_eff;
+		if (save_wrap)
+		{
+			gx.wrap_w = save_wrap;
+			gx.indent -= center_add;
+		}
+		gx.indent -= ml_eff + pl_eff;
+		gx.x = GX_MARGIN + gx.indent;
+	}
+}
+
+CZNode *GxFindTag(CZNode *node, U8 *tag)
+{
+	CZNode *child, *hit;
+
+	if (!node)
+		return NULL;
+	if (node->type == ZH_ELEM && !StrCompare(node->tag, tag))
+		return node;
+	child = node->first_child;
+	while (child)
+	{
+		hit = GxFindTag(child, tag);
+		if (hit)
+			return hit;
+		child = child->next;
+	}
+
+	return NULL;
+}
+
+I64 GxBgProbe(CZNode *node, I64 depth)
+{ // first background color on a top-of-page container (body > center > table); -1 if none
+	CZNode	*c;
+	CZStyle	 a;
+	I64		 r;
+
+	if (!node || depth > 3)
+		return -1;
+	if (node->type == ZH_ELEM &&
+		(!StrCompare(node->tag, "center") || !StrCompare(node->tag, "table") ||
+		 !StrCompare(node->tag, "div") || !StrCompare(node->tag, "main") ||
+		 !StrCompare(node->tag, "section") || !StrCompare(node->tag, "article")))
+	{
+		ZCssApply(node, &a);
+		if (a.bg >= 0)
+			return a.bg;
+	}
+	c = node->first_child;
+	while (c)
+	{
+		r = GxBgProbe(c, depth + 1);
+		if (r >= 0)
+			return r;
+		c = c->next;
+	}
+
+	return -1;
+}
+
+U0 GxPageStyle()
+{
+	CZNode	*el;
+	CZStyle	 a;
+	U8		*attr;
+	I64		 c;
+
+	gx.page_bg = -1;
+	gx.page_fg = -1;
+	el = GxFindTag(zinc_dom, "html");
+	if (el)
+	{
+		ZCssApply(el, &a);
+		if (a.bg >= 0)
+			gx.page_bg = a.bg;
+		if (a.fg >= 0)
+			gx.page_fg = a.fg;
+	}
+	el = GxFindTag(zinc_dom, "body");
+	zcss_body_class[0] = 0; // capture the <body> class for body.page_X-scoped CSS
+	if (el)
+	{
+		attr = ZNodeAttr(el, "class");
+		if (attr)
+		{
+			c = StrLen(attr);
+			if (c > 255)
+				c = 255;
+			MemCopy(zcss_body_class, attr, c);
+			zcss_body_class[c] = 0; // c is reassigned before its next use below
+		}
+		ZCssApply(el, &a);
+		if (a.bg >= 0)
+			gx.page_bg = a.bg;
+		if (a.fg >= 0)
+			gx.page_fg = a.fg;
+		attr = ZNodeAttr(el, "bgcolor");
+		if (attr && gx.page_bg < 0)
+		{
+			c = ZCssColor(attr);
+			if (c >= 0)
+				gx.page_bg = c;
+		}
+		attr = ZNodeAttr(el, "text");
+		if (attr && gx.page_fg < 0)
+		{
+			c = ZCssColor(attr);
+			if (c >= 0)
+				gx.page_fg = c;
+		}
+		if (gx.page_bg < 0)
+			gx.page_bg = GxBgProbe(el, 0);
+	}
+	// UA default: white page, black text. Pages that want dark set their own body bg
+	if (gx.page_bg < 0)
+		gx.page_bg = 0xFFFFFF;
+	gx.page_has_bg = TRUE;
+	if (gx.page_fg >= 0)
+		gx.text_pen = GxPenBg(gx.page_fg, ColorRGB(0, 0, 0));
+	else
+		gx.text_pen = ColorRGB(0, 0, 0);
+}
+
+// Layout v2: box-model engine (L2Node, zinc_layout2/Layout2()) built on the v1 inline flow above
+#include "Layout"
+// Layout v3: unified engine, one dispatch and one box model; selected via zinc_v3 (Layout3())
+#include "LayoutV3"
+
+CDC *GxBgSpriteDC(CDC *src, I64 bw, I64 bh, I64 e_px, I64 e_py, I64 e_sw, I64 e_sh, I64 rep)
+{ // build a bw x bh DC of the CSS-background image positioned/sized/cropped/tiled per the CSS.ZC encodings. Gaps stay TRANSPARENT (no-repeat). Owned by caller (sys_task)
+	CDC *dst;
+	I64  iw, ih, ox = 0, oy = 0, dx, dy, sx, sy, srcx, srcy, rw, rh;
+	I64  sw = src->width, sh = src->height, swi = src->width_internal;
+	U32 *sb = src->body, *db;
+
+	iw = sw;
+	ih = sh;
+	if (e_sw == -200 || e_sh == -200 || e_sw == -201 || e_sh == -201)
+	{
+		rw = bw * 1000 / sw;
+		rh = bh * 1000 / sh;
+		if (e_sw == -200 || e_sh == -200)
+		{
+			if (rh > rw)
+				rw = rh;
+		}
+		else if (rh < rw)
+			rw = rh;
+		iw = sw * rw / 1000;
+		ih = sh * rw / 1000;
+	}
+	else
+	{
+		if (e_sw > 0)
+			iw = e_sw;
+		else if (-100 <= e_sw < 0)
+			iw = bw * -e_sw / 100;
+		if (e_sh > 0)
+			ih = e_sh;
+		else if (-100 <= e_sh < 0)
+			ih = bh * -e_sh / 100;
+		if (e_sw != 0 && e_sh == 0)
+			ih = sh * iw / sw; // one axis set, other auto: keep aspect
+		else if (e_sh != 0 && e_sw == 0)
+			iw = sw * ih / sh;
+	}
+	if (iw < 1)
+		iw = 1;
+	if (ih < 1)
+		ih = 1;
+
+	// position (background-position); percent = (box - image)*pct/100
+	if (e_px != ZCSS_OFF_UNSET)
+	{
+		if (e_px <= -2000)
+			ox = (bw - iw) * (-(e_px) - 2000) / 100;
+		else
+			ox = e_px;
+	}
+	if (e_py != ZCSS_OFF_UNSET)
+	{
+		if (e_py <= -2000)
+			oy = (bh - ih) * (-(e_py) - 2000) / 100;
+		else
+			oy = e_py;
+	}
+
+	dst = DCNew(bw, bh, sys_task);
+	DCFill(dst, TRANSPARENT);
+	for (dy = 0; dy < bh; dy++)
+	{
+		db = dst->body + dy * dst->width_internal;
+		for (dx = 0; dx < bw; dx++)
+		{
+			sx = dx - ox;
+			sy = dy - oy;
+			if (rep == 1)
+			{
+				if (sx < 0 || sx >= iw || sy < 0 || sy >= ih)
+					goto gx_sprite_skip;
+			}
+			else if (rep == 2)
+			{
+				if (sy < 0 || sy >= ih)
+					goto gx_sprite_skip;
+				sx = ((sx % iw) + iw) % iw;
+			}
+			else if (rep == 3)
+			{
+				if (sx < 0 || sx >= iw)
+					goto gx_sprite_skip;
+				sy = ((sy % ih) + ih) % ih;
+			}
+			else
+			{
+				sx = ((sx % iw) + iw) % iw;
+				sy = ((sy % ih) + ih) % ih;
+			}
+			srcx = sx * sw / iw;
+			srcy = sy * sh / ih;
+			if (srcx < 0)
+				srcx = 0;
+			if (srcy < 0)
+				srcy = 0;
+			if (srcx >= sw)
+				srcx = sw - 1;
+			if (srcy >= sh)
+				srcy = sh - 1;
+			db[dx] = sb[srcy * swi + srcx];
+gx_sprite_skip:;
+		}
+	}
+
+	return dst;
+}
+
+public Bool zinc_gradients = TRUE; //Gradients(FALSE) disables CSS gradient rendering (debug/perf).
+
+public U0 TextBlend(Bool on)
+{
+	zinc_text_blend = on;
+}
+
+public U0 Gradients(Bool on)
+{ // runtime toggle for CSS linear-gradient backgrounds; reload the page to re-render
+	zinc_gradients = on;
+}
+
+U0 GxBlotBlend(CDC *dst, I64 x, I64 y, CDC *src, I64 maxw=0)
+{ // //Composite a COVERAGE DC (GrFontRenderCovDC: alpha in the top byte, colour in
+//the low 24 bits) onto dst, blending against what is already there.
+//Coordinates go through the SAME transform GrBlot applies (GrBitMap.ZC): on a
+//screen bitmap the window's scroll offset and its pix_left/pix_top origin both
+//apply, and the right/bottom clip is the window edge, not the DC edge.
+	I64	 j, i, dx, dy, a, ia, sr, sg, sb, dr, dg, dbl, clip_r, clip_b, zi;
+	I64	 srcw;
+	I64	 win_z_num = 0;
+	U16	*zb = NULL;
+	U32	 s, d, *srow, *drow;
+	CTask *wt;
+	Bool cell_ok = TRUE;
+
+	if (!dst || !src)
+		return;
+	srcw = src->width; // maxw > 0 clips the source on the right
+	if (maxw > 0 && maxw < srcw)
+		srcw = maxw;
+	clip_r = dst->width;
+	clip_b = dst->height;
+	if (dst->flags & DCF_SCREEN_BITMAP)
+	{
+		wt = dst->win_task;
+		if (!wt)
+			return;
+		x += wt->scroll_x + wt->pix_left;
+		y += wt->scroll_y + wt->pix_top;
+		if (wt->pix_right + 1 < clip_r)
+			clip_r = wt->pix_right + 1;
+		if (wt->pix_bottom + 1 < clip_b)
+			clip_b = wt->pix_bottom + 1;
+		if (!(dst->flags & DCF_ON_TOP))
+		{ // window z-buffer, per 8x8 screen cell: without this a blot paints over cells another window owns
+			win_z_num = wt->win_z_num;
+			zb = gr.win_z_buf;
+		}
+	}
+	for (j = 0; j < src->height; j++)
+	{
+		dy = y + j;
+		if (dy < 0 || dy >= clip_b)
+			goto gx_bb_row;
+		srow = src->body + j	* src->width_internal;
+		drow = dst->body + dy	* dst->width_internal;
+		for (i = 0; i < srcw; i++)
+		{
+			dx = x + i;
+			if (dx < 0 || dx >= clip_r)
+				goto gx_bb_col;
+			if (zb && (!i || !(dx & 7)))
+			{ // cell ownership re-tested at each 8px boundary, like GrBlot. Parenthesised: the kernel's own version relies on ZealC binding >> tighter than *, the opposite of C. Bounds-checked separately
+				zi = ((dy >> 3) * TEXT_COLS) + (dx >> 3);
+				cell_ok = FALSE;
+				if (0 <= zi < TEXT_ROWS * TEXT_COLS)
+					cell_ok = win_z_num >= zb[zi];
+			}
+			if (!cell_ok)
+				goto gx_bb_col;
+			s = srow[i];
+			a = (s >> 24) & 0xFF;
+			if (!a)
+				goto gx_bb_col;
+			if (a >= 255)
+			{
+				drow[dx] = s & 0x00FFFFFF;
+				goto gx_bb_col;
+			}
+			d	= drow[dx];
+			ia	= 255 - a;
+			sr	= (s >> 16) & 0xFF;
+			sg	= (s >> 8)  & 0xFF;
+			sb	= s		  & 0xFF;
+			dr	= (d >> 16) & 0xFF;
+			dg	= (d >> 8)  & 0xFF;
+			dbl	= d		  & 0xFF;
+			// EVERY shift parenthesised: in ZealC << binds TIGHTER than /, so `x / 255 << 16` means x / (255 << 16)
+			drow[dx] = (((sr * a + dr  * ia) / 255) << 16) |
+					   (((sg * a + dg  * ia) / 255) << 8)  |
+					    ((sb * a + dbl * ia) / 255);
+gx_bb_col:;
+		}
+gx_bb_row:;
+	}
+}
+
+CDC *GxGradientDC(I64 gi, I64 bw, I64 bh)
+{ // render zcss_grad[gi] into a bw x bh DC (owned, sys_task): a linear gradient along the CSS angle, colours interpolated between the stops
+	CDC		*dst;
+	CZGrad	*g = &zcss_grad[gi];
+	F64		 ar, dxf, dyf, proj, pmin, pmax, span, c00, c10, c01, c11;
+	I64		 dx, dy, i, k, ns, tpct, p0, p1, col0, col1, rr, gg, bb, f;
+	I64		 sp[ZCSS_GRAD_STOPS];
+	U32		*db;
+
+	ns = g->nstops;
+	if (ns < 2)
+		return NULL;
+	for (i = 0; i < ns; i++)
+	{ // resolve stop positions; auto-distribute the unset ones across 0..100
+		if (g->pos[i] >= 0)
+			sp[i] = g->pos[i];
+		else
+			sp[i] = i * 100 / (ns - 1);
+	}
+	for (i = 1; i < ns; i++)
+		if (sp[i] < sp[i - 1])
+			sp[i] = sp[i - 1];
+
+	ar	= g->angle * pi / 180.0;
+	dxf	= Sin(ar);
+	dyf	= -Cos(ar);
+	c00	= 0;
+	c10	= bw * dxf;
+	c01	= bh * dyf;
+	c11	= bw * dxf + bh * dyf;
+	pmin = c00;
+	pmax = c00;
+	if (c10 < pmin) pmin = c10;
+	if (c10 > pmax) pmax = c10;
+	if (c01 < pmin) pmin = c01;
+	if (c01 > pmax) pmax = c01;
+	if (c11 < pmin) pmin = c11;
+	if (c11 > pmax) pmax = c11;
+	span = pmax - pmin;
+	if (span < 1.0)
+		span = 1.0;
+
+	dst = DCNew(bw, bh, sys_task);
+	if (!dst)
+		return NULL;
+	dst->flags |= DCF_NO_TRANSPARENTS;
+	for (dy = 0; dy < bh; dy++)
+	{
+		if (!(dy & 63))
+			Yield;
+		db = dst->body + dy * dst->width_internal;
+		for (dx = 0; dx < bw; dx++)
+		{
+			proj = dx * dxf + dy * dyf;
+			tpct = ToI64((proj - pmin) * 100.0 / span);
+			if (tpct < 0)
+				tpct = 0;
+			if (tpct > 100)
+				tpct = 100;
+			k = 0;
+			while (k < ns - 2 && sp[k + 1] < tpct)
+				k++;
+			p0	 = sp[k];
+			p1	 = sp[k + 1];
+			col0 = g->col[k];
+			col1 = g->col[k + 1];
+			if (p1 <= p0)
+				f = 0;
+			else
+				f = (tpct - p0) * 256 / (p1 - p0);
+			if (f < 0)
+				f = 0;
+			if (f > 256)
+				f = 256;
+			rr = ((col0 >> 16 & 0xFF) * (256 - f) + (col1 >> 16 & 0xFF) * f) / 256;
+			gg = ((col0 >> 8  & 0xFF) * (256 - f) + (col1 >> 8  & 0xFF) * f) / 256;
+			bb = ((col0       & 0xFF) * (256 - f) + (col1       & 0xFF) * f) / 256;
+			db[dx] = rr << 16 | gg << 8 | bb;
+		}
+	}
+
+	return dst;
+}
+
+CDC *GxBgDCBuild(CGxOp *op, CDC *src, I64 bw, I64 bh)
+{ // sprite/positioned/sized/repeat-x/y/no-repeat crops a sub-rect; anything else keeps the stretch-to-box default. Caller owns the result (sys_task)
+	if (op->bg_px != ZCSS_OFF_UNSET || op->bg_py != ZCSS_OFF_UNSET ||
+		op->bg_sw != 0 || op->bg_sh != 0 || op->bg_rep >= 1)
+		return GxBgSpriteDC(src, bw, bh, op->bg_px, op->bg_py,
+							op->bg_sw, op->bg_sh, op->bg_rep);
+	return DEDCScaleNew(src, bw, bh, sys_task);
+}
+
+U0 GxBgImgAttach()
+{ // post-layout, box heights are final. The box-sized DC is itself a cache entry keyed on the source decode plus the box size; new URLs queue for GxImgTask
+	I64		 i, bw, bh;
+	CGxOp	*op;
+	CGxImg	*ce, *de;
+	U8		 bkey[80];
+
+	for (i = 0; i < gx.op_count; i++)
+	{
+		op = &gx.ops[i];
+		if (op->type != GXO_BOX || op->sc)
+			goto gx_bg_next;
+		if (op->img_url)
+		{
+			ce = GxImgGet(op->img_url, 0, 0);
+			if (ce && !ce->fetched && !StrNICompare(op->img_url, "data:", 5))
+			{
+				ce->fetched = TRUE;
+				ce->dc = DataURIToDC(op->img_url, sys_task);
+			}
+			if (ce && ce->dc && op->w > 2 && op->h > 2)
+			{ // GrBlot draws the prepared DC 1:1, so this cap TRUNCATES rather than downsamples; track the viewport
+				bw = MinI64(op->w, MaxI64(1024, Fs->pix_width));
+				bh = MinI64(op->h, MaxI64(1024, Fs->pix_height));
+				// the key carries every parameter that changes the pixels; the size is the cache identity's w/h
+				StrPrint(bkey, "bg:%X:%d:%d:%d:%d:%d", ce->dc, op->bg_px,
+						 op->bg_py, op->bg_sw, op->bg_sh, op->bg_rep);
+				de = GxImgFind(bkey, bw, bh);
+				if (!de)
+				{
+					de = GxImgGet(bkey, bw, bh);
+					if (de)
+					{
+						de->fetched = TRUE;
+						de->dc = GxBgDCBuild(op, ce->dc, bw, bh);
+					}
+				}
+				if (de && de->dc)
+				{
+					op->sc = de->dc;
+					op->sc_cached = TRUE;
+				}
+				else if (!de)
+					op->sc = GxBgDCBuild(op, ce->dc, bw, bh);
+			}
+		}
+		else if (zinc_gradients && op->grad >= 0 && op->grad < zcss_grad_count && op->w > 2 && op->h > 2)
+		{
+			bw = MinI64(op->w, MaxI64(1024, Fs->pix_width));
+			bh = MinI64(op->h, MaxI64(1024, Fs->pix_height));
+			op->sc = GxGradientDC(op->grad, bw, bh);
+		}
+gx_bg_next:;
+	}
+}
+
+U0 GxImgViewLayout()
+{ // direct image view: one centered GXO_IMG op, fit-to-window; gx.iv_one2one shows natural size and vertical scroll pans
+	I64	 avail_w = MaxI64(64, Fs->pix_width - GX_SBAR_W - 8);
+	I64	 avail_h = MaxI64(64, Fs->pix_height - GX_CHROME_H - GX_STATUS_H - 16);
+	I64	 iw = gx.iv_dc->width, ih = gx.iv_dc->height, sf, sw, sh, x0;
+	CDC	*show = gx.iv_dc;
+	CGxOp *op;
+
+	if (gx.iv_sc)
+	{
+		DCDel(gx.iv_sc);
+		gx.iv_sc = NULL;
+	}
+	if (!gx.iv_one2one)
+	{
+		sf = MinI64(1000, MinI64(avail_w * 1000 / iw, avail_h * 1000 / ih));
+		if (sf < 1000)
+		{
+			gx.iv_sc = DEDCScaleNew(gx.iv_dc, MaxI64(1, iw * sf / 1000),
+											  MaxI64(1, ih * sf / 1000), sys_task);
+			if (gx.iv_sc)
+				show = gx.iv_sc;
+		}
+	}
+	sw = show->width;
+	sh = show->height;
+	x0 = MaxI64(4, (Fs->pix_width - GX_SBAR_W - sw) / 2);
+	op = GxOpAdd(GXO_IMG, x0, 8, sw, sh);
+	if (op)
+		op->sc = show; // borrowed: GxOpsReset never frees GXO_IMG sc
+	gx.doc_h = sh + 16;
+	if (gx.iv_one2one)
+		StrPrint(zinc_note, "%dx%d - actual size (click: fit)", iw, ih);
+	else
+		StrPrint(zinc_note, "%dx%d - fit (click: actual size)", iw, ih);
+}
+
+U0 GxLayout()
+{
+	CZStyle root;
+
+	gx.img_gen++; // stamps every cache entry this layout touches
+
+	if (gx.iv_dc)
+	{
+		GxOpsLock;
+		GxOpsReset;
+		GxImgViewLayout;
+		gx.last_w = Fs->pix_width;
+		if (gx.scroll > gx.doc_h)
+			gx.scroll = 0;
+		GxOpsUnlock;
+		return;
+	}
+
+	GxOpsLock;
+	GxOpsReset;
+	GxFloatReset;
+	GxPageStyle;
+	// viewport units (vw/vh/vmin/vmax in CSS.ZC) resolve against the real window
+	zcss_view_w = MaxI64(320, Fs->pix_width - GX_SBAR_W);
+	zcss_view_h = MaxI64(240, Fs->pix_height - GX_CHROME_H - GX_STATUS_H);
+	gx.anc_h = zcss_view_h; // html/body height:100% chain resolves to the viewport
+	gx.wrap_w = Fs->pix_width - GX_SBAR_W - GX_MARGIN;
+	gx.last_w = Fs->pix_width;
+	gx.x = GX_MARGIN;
+	gx.y = 8;
+	gx.line_h = FONT_HEIGHT + GX_LINE_LEAD;
+	gx.flex_stretch_w = 0;
+	gx.link_depth = 0;
+	gx.indent = 0;
+	gx.list_sp = 0;
+	gx.run_len = 0;
+	gx.line_start_op = 0;
+	gx.line_align = 0;
+	l2_root_wrap = gx.wrap_w;
+	l2_meas_depth = 0;
+	gx.cb_x = GX_MARGIN; // default containing block = the viewport
+	gx.cb_y = 8;
+	gx.cb_w = gx.wrap_w - GX_MARGIN;
+	gx.cb_h = MaxI64(60, Fs->pix_height - GX_CHROME_H - GX_STATUS_H - 16);
+	gx.cur_bg = gx.page_bg;
+	ZStyleReset(&root);
+	root.fg = gx.page_fg;
+	root.fsize = 16;
+	if (zinc_dom)
+	{
+		if (zinc_v3)
+		{ // depth counters re-zeroed: a caught fault mid-layout leaves them stuck above the caps
+			v3_depth = 0;
+			v3_meas_depth = 0;
+			V3Node(zinc_dom, &root);
+		}
+		else if (zinc_layout2)
+			L2Node(zinc_dom, &root);
+		else
+			GxNode(zinc_dom, &root);
+	}
+	GxRunFlush;
+	GxLineAlign;
+	GxBgImgAttach;
+	if (zinc_dbg)
+	{
+		I64	 di, dscw;
+		U8	*du;
+
+		for (di = 0; di < gx.op_count; di++)
+		{
+			dscw = 0;
+			if (gx.ops[di].sc)
+				dscw = gx.ops[di].sc->width;
+			if (gx.ops[di].type == GXO_WIDGET)
+				NetLog("ZINC OP WIDGET op=%d %d,%d %dx%d k=%d lblx=%d lbly=%d "
+					   "dcw=%d r=%d", di,
+					   gx.ops[di].x, gx.ops[di].y, gx.ops[di].w, gx.ops[di].h,
+					   gx.ops[di].wkind, gx.ops[di].lbl_x, gx.ops[di].lbl_y, dscw,
+					   gx.ops[di].radius);
+			else if (gx.ops[di].type == GXO_BOX && gx.ops[di].wkind > 0)
+				NetLog("ZINC OP ROUNDBOX op=%d src=%d %d,%d %dx%d r=%d hasbg=%d "
+					   "fg=%X ul=%d", di, gx.ops[di].dbg_src,
+					   gx.ops[di].x, gx.ops[di].y, gx.ops[di].w, gx.ops[di].h,
+					   gx.ops[di].wkind, gx.ops[di].has_bg, gx.ops[di].fg,
+					   gx.ops[di].ul);
+			else if (gx.ops[di].type == GXO_IMG)
+			{
+				du = gx.ops[di].img_url;
+				if (!du)
+					du = "-";
+				NetLog("ZINC OP IMG %d,%d %dx%d dc=%d %s", gx.ops[di].x,
+					   gx.ops[di].y, gx.ops[di].w, gx.ops[di].h, dscw, du);
+			}
+		}
+	}
+	gx.doc_h = gx.y + gx.line_h + 16;
+	if (gx.scroll > gx.doc_h)
+		gx.scroll = 0;
+	GxOpsUnlock;
+}
+
+U0 GxDrawChrome(CDC *dc)
+{
+	I64 w = Fs->pix_width, bx = 4;
+	I64 ny = GX_TAB_H;
+	I64 ty = ny + (GX_CHROME_H - GX_TAB_H - FONT_HEIGHT) / 2;
+	I64 i, x0 = 4, tty = (GX_TAB_H - FONT_HEIGHT) / 2, n;
+	U8	buf[264];
+	CGxTab *t;
+
+	dc->color = de_theme.bar_bg;
+	GrRect(dc, 0, 0, w, GX_CHROME_H);
+	dc->color = de_theme.bar_edge;
+	GrRect(dc, 0, GX_CHROME_H - 1, w, 1);
+
+	for (i = 0; i < GX_TABS; i++)
+	{
+		t = &gx.tab[i];
+		if (t->used)
+		{
+			if (i == gx.tab_cur)
+				dc->color = de_theme.bttn_focus;
+			else
+				dc->color = de_theme.panel;
+			GrRect(dc, x0, 1, GX_TAB_W, GX_TAB_H - 2);
+			if (i == gx.tab_cur)
+			{
+				dc->color = de_theme.accent;
+				GrRect(dc, x0, GX_TAB_H - 3, GX_TAB_W, 2);
+			}
+			if (t->title[0])
+				StrPrint(buf, "%s", t->title);
+			else
+				StrCopy(buf, "(new tab)");
+			n = ClampI64((GX_TAB_W - 24) / FONT_WIDTH, 0, 262);
+			buf[n] = 0;
+			dc->color = de_theme.text;
+			GrPrint(dc, x0 + 4, tty, "%s", buf);
+			dc->color = de_theme.text_dim;
+			GrPrint(dc, x0 + GX_TAB_W - 12, tty, "x");
+			x0 += GX_TAB_W + 2;
+		}
+	}
+	dc->color = de_theme.chip;
+	GrRect(dc, x0, 2, 20, GX_TAB_H - 4);
+	dc->color = de_theme.text;
+	GrPrint(dc, x0 + 6, tty, "+");
+
+	dc->color = de_theme.bttn;
+	GrRect(dc, bx, ny + 4, 26, GX_CHROME_H - ny - 8);
+	GrRect(dc, bx + 30, ny + 4, 26, GX_CHROME_H - ny - 8);
+	GrRect(dc, bx + 60, ny + 4, 26, GX_CHROME_H - ny - 8);
+	GrRect(dc, bx + 90, ny + 4, 26, GX_CHROME_H - ny - 8);
+	dc->color = de_theme.text;
+	GrPrint(dc, bx + 9, ty, "<");
+	GrPrint(dc, bx + 39, ty, ">");
+	if (gx.loading)
+		GrPrint(dc, bx + 69, ty, "X");
+	else
+		GrPrint(dc, bx + 69, ty, "R");
+	GrPrint(dc, bx + 99, ty, "H");
+
+	dc->color = de_theme.win_bg;
+	GrRect(dc, bx + 122, ny + 4, w - bx - 122 - 40, GX_CHROME_H - ny - 8);
+	if (gx.url_focus)
+		dc->color = de_theme.accent;
+	else
+		dc->color = de_theme.panel_edge;
+	GrRect(dc, bx + 122, ny + 4, w - bx - 122 - 40, 1);
+	GrRect(dc, bx + 122, GX_CHROME_H - 5, w - bx - 122 - 40, 1);
+	GrRect(dc, bx + 122, ny + 4, 1, GX_CHROME_H - ny - 8);
+	GrRect(dc, w - 44, ny + 4, 1, GX_CHROME_H - ny - 8);
+	StrPrint(buf, "%s", gx.url);
+	buf[ClampI64((w - bx - 130 - 44) / FONT_WIDTH, 0, 262)] = 0;
+	if (gx.url_focus && gx.url_selall)
+	{
+		dc->color = de_theme.bttn_focus;
+		GrRect(dc, bx + 127, ny + 6, StrLen(buf) * FONT_WIDTH + 2,
+			   GX_CHROME_H - ny - 12);
+	}
+	dc->color = de_theme.text;
+	GrPrint(dc, bx + 128, ty, "%s", buf);
+	if (gx.url_focus && !gx.url_selall && Blink)
+	{
+		dc->color = de_theme.accent;
+		GrRect(dc, bx + 128 + MinI64(gx.url_caret, StrLen(buf)) * FONT_WIDTH,
+			   GX_CHROME_H - 7, FONT_WIDTH, 2);
+	}
+
+	dc->color = de_theme.chip;
+	GrRect(dc, w - 36, ny + 4, 32, GX_CHROME_H - ny - 8);
+	dc->color = de_theme.text;
+	GrPrint(dc, w - 32, ty, "Go");
+}
+
+U0 GxRoundFill(CDC *dc, I64 x, I64 y, I64 w, I64 h, I64 r, U32 col)
+{ // fill a rounded rectangle in col; r clamped to half the smaller side
+	I64	 yy, dy, ins, sq;
+	F64	 rr;
+
+	if (w <= 0 || h <= 0)
+		return;
+	dc->color = col;
+	if (r < 1)
+	{ GrRect(dc, x, y, w, h); return; }
+	if (r > h / 2) r = h / 2;
+	if (r > w / 2) r = w / 2;
+	rr = ToF64(r);
+	for (yy = 0; yy < h; yy++)
+	{
+		dy = 0;
+		if (yy < r)
+			dy = r - yy;
+		else if (yy >= h - r)
+			dy = yy - h + 1 + r;
+		if (dy > 0)
+		{
+			sq = ToI64(Sqrt(rr * rr - ToF64(dy * dy)));
+			ins = r - sq;
+		}
+		else
+			ins = 0;
+		if (ins < 0)
+			ins = 0;
+		GrRect(dc, x + ins, y + yy, w - 2 * ins, 1);
+	}
+}
+
+U0 GxRoundRect(CDC *dc, I64 x, I64 y, I64 w, I64 h, I64 r, U32 fill, U32 border)
+{
+	GxRoundFill(dc, x, y, w, h, r, border);
+	if (w > 2 && h > 2)
+		GxRoundFill(dc, x + 1, y + 1, w - 2, h - 2, r - 1, fill);
+}
+
+Bool GxOpSelRange(CGxOp *op, I64 *c0, I64 *c1)
+{ // character-granular selection: returns the selected char span [c0,c1) of this text op. char width = run width / run length, exact for the 8x8 font and approximate for TTF runs
+	I64 x0, y0, x1, y1, t, len, cw;
+
+	*c0 = 0;
+	*c1 = 0;
+	if (!gx.sel_on || op->type != GXO_TEXT || !op->text)
+		return FALSE;
+	len = StrLen(op->text);
+	if (!len)
+		return FALSE;
+	x0 = gx.sel_x0;
+	y0 = gx.sel_y0;
+	x1 = gx.sel_x1;
+	y1 = gx.sel_y1;
+	if (y1 < y0)
+	{
+		t = y0; y0 = y1; y1 = t;
+		t = x0; x0 = x1; x1 = t;
+	}
+	else if (y1 - y0 < FONT_HEIGHT && x1 < x0)
+	{
+		t = x0; x0 = x1; x1 = t;
+	}
+	if (op->y + op->h <= y0 || op->y > y1)
+		return FALSE;
+	cw = MaxI64(1, op->w / len);
+	*c0 = 0;
+	*c1 = len;
+	if (y0 >= op->y && y0 < op->y + op->h)
+		*c0 = ClampI64((x0 - op->x + cw / 2) / cw, 0, len);
+	if (y1 >= op->y && y1 < op->y + op->h)
+		*c1 = ClampI64((x1 - op->x + cw / 2) / cw, 0, len);
+	return *c1 > *c0;
+}
+
+U0 GxSelCopy()
+{ // put the selected text on the OS clipboard (sys_clip_doc), the stock DolDoc clip
+	U8	*buf;
+	I64	 i, n = 0, last_y = I64_MIN, c0, c1, k;
+	U8	*s;
+
+	buf = MAlloc(8192);
+	for (i = 0; i < gx.op_count && n < 8000; i++)
+	{
+		if (!GxOpSelRange(&gx.ops[i], &c0, &c1))
+			goto gx_selcopy_next;
+		if (last_y != I64_MIN && gx.ops[i].y >= last_y + FONT_HEIGHT)
+			buf[n++] = '\n';
+		else if (last_y != I64_MIN)
+			buf[n++] = ' ';
+		s = gx.ops[i].text;
+		for (k = c0; k < c1 && s[k] && n < 7996; k++)
+		{
+			if (s[k] == 0x24)
+				buf[n++] = 0x24; // literal dollars must be DOUBLED for DolDoc
+			buf[n++] = s[k];
+		}
+		last_y = gx.ops[i].y;
+gx_selcopy_next:;
+	}
+	buf[n] = 0;
+	if (n)
+	{
+		ClipDel;
+		DocPrint(sys_clip_doc, "%s", buf);
+		StrCopy(zinc_note, "selection copied to clipboard (Ctrl-V to paste)");
+	}
+	Free(buf);
+}
+
+I64 GxClipTextGet(U8 *out, I64 max)
+{ // plain text from the OS clipboard (sys_clip_doc): text entry tags + newlines
+	CDocEntry *e;
+	U8		  *s;
+	I64		   n = 0;
+	Bool	   unlock = DocLock(sys_clip_doc);
+
+	e = sys_clip_doc->head.next;
+	while (e != sys_clip_doc && n < max - 2)
+	{
+		if (e->type_u8 == DOCT_TEXT && e->tag)
+		{
+			s = e->tag;
+			while (*s && n < max - 2)
+			{
+				if (*s == 0x24 && s[1] == 0x24)
+					s++; // doubled dollar -> one literal
+				out[n++] = *s++;
+			}
+		}
+		else if (e->type_u8 == DOCT_NEW_LINE || e->type_u8 == DOCT_SOFT_NEW_LINE)
+			out[n++] = '\n';
+		e = e->next;
+	}
+	out[n] = 0;
+	if (unlock)
+		DocUnlock(sys_clip_doc);
+	return n;
+}
+
+#define GX_CON_ROWS_MAX	40
+
+I64 GxConsoleH()
+{
+	I64 avail = Fs->pix_height - GX_CHROME_H - GX_STATUS_H;
+
+	if (!zinc_con_open)
+		return 0;
+
+	return MinI64(MaxI64(6 * (FONT_HEIGHT + 2), avail * 2 / 5),
+				  GX_CON_ROWS_MAX * (FONT_HEIGHT + 2));
+}
+
+U0 GxConEsc(U8 *src, U8 *dst, I64 max)
+{ // console text is a page's own output and lands in a DolDoc printer, where a lone dollar would open a command
+	I64 n = 0;
+
+	while (*src && n < max - 3)
+	{
+		if (*src == 0x24)
+		{
+			dst[n] = 0x24;
+			n++;
+		}
+		dst[n] = *src;
+		n++;
+		src++;
+	}
+	dst[n] = 0;
+}
+
+U0 GxDrawConsole(CDC *dc, CTask *task)
+{
+	I64	 h = GxConsoleH(), rows, i, idx, first, y0, y, lh = FONT_HEIGHT + 2;
+	U8	 line[220];
+	U8	*src;
+
+	if (!h)
+		return;
+	y0 = task->pix_height - GX_STATUS_H - h;
+	dc->color = de_theme.panel;
+	GrRect(dc, 0, y0, task->pix_width, h);
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, 0, y0, task->pix_width, 1);
+
+	rows = (h - lh) / lh;
+	if (rows < 1)
+		rows = 1;
+	first = js_con_n - rows - zinc_con_scroll;
+	if (first < 0)
+		first = 0;
+	dc->color = de_theme.text_dim;
+	GrPrint(dc, 4, y0 + 2, "JS console  %d line(s)   [wheel] scroll  [ESC] close",
+			js_con_n);
+	y = y0 + lh;
+	for (i = 0; i < rows; i++)
+	{
+		idx = first + i;
+		if (idx >= js_con_n)
+			break;
+		if (js_con_n >= JS_CON_LINES)
+			src = js_con[(js_con_head + idx) % JS_CON_LINES];
+		else
+			src = js_con[idx];
+		if (!MemCompare(src, "ERR", 3) || !MemCompare(src, "THROW", 5))
+			dc->color = ColorRGB(255, 110, 110);
+		else if (!MemCompare(src, "warn", 4) || !MemCompare(src, "parse", 5))
+			dc->color = de_theme.accent;
+		else
+			dc->color = de_theme.text;
+		GxConEsc(src, line, 216);
+		line[MinI64(216, (task->pix_width - 8) / FONT_WIDTH)] = 0;
+		GrPrint(dc, 4, y, "%s", line);
+		y += lh;
+	}
+}
+
+U0 GxConsoleShow()
+{
+	zinc_con_open = !zinc_con_open;
+	zinc_con_scroll = 0;
+}
+
+#define GXCTX_PAGE		0
+#define GXCTX_LINK		1
+#define GXCTX_IMG		2
+#define GX_CTX_ITEM_H	(FONT_HEIGHT + 8)
+#define GX_CTX_PAD		8
+
+I64 GxCtxCount(I64 kind)
+{
+	if (kind == GXCTX_LINK)
+		return 3;
+	if (kind == GXCTX_IMG)
+		return 2;
+
+	return 6;
+}
+
+U8 *GxCtxItem(I64 kind, I64 i)
+{
+	if (kind == GXCTX_LINK)
+	{
+		if (i == 0)
+			return "Open Link";
+		if (i == 1)
+			return "Download Link";
+		return "Copy Link URL";
+	}
+	if (kind == GXCTX_IMG)
+	{
+		if (i == 0)
+			return "Download Image";
+		return "Copy Image URL";
+	}
+	if (i == 0)
+		return "Back";
+	if (i == 1)
+		return "Forward";
+	if (i == 2)
+		return "Reload";
+	if (i == 3)
+		return "JS Console";
+	if (i == 4)
+		return "Save Page";
+
+	return "Copy Page URL";
+}
+
+U0 GxCtxClose()
+{
+	gx.menu_on	= FALSE;
+	gx.menu_sel = -1;
+	Free(gx.menu_url);
+	gx.menu_url = NULL;
+}
+
+I64 GxCtxHit(I64 x, I64 y)
+{ // item index at window pixel (x, y); -1 outside the panel
+	if (!gx.menu_on)
+		return -1;
+	if (!(gx.menu_x <= x < gx.menu_x + gx.menu_w &&
+		  gx.menu_y <= y < gx.menu_y + gx.menu_h))
+		return -1;
+
+	return ClampI64((y - gx.menu_y - 2) / GX_CTX_ITEM_H, 0, gx.menu_n - 1);
+}
+
+U0 GxCtxHover(I64 x, I64 y)
+{
+	I64 i = GxCtxHit(x, y);
+
+	if (i >= 0)
+		gx.menu_sel = i;
+}
+
+U0 GxCtxDraw(CDC *dc)
+{ // painted last, over the page ops and the chrome. Reads menu state only; the labels are literals, so a frame racing an open/close draws the previous state, not a bad pointer
+	I64 i, y;
+
+	if (!gx.menu_on)
+		return;
+	dc->color = de_theme.panel;
+	GrRect(dc, gx.menu_x, gx.menu_y, gx.menu_w, gx.menu_h);
+	dc->color = de_theme.panel_edge;
+	GrRect(dc, gx.menu_x, gx.menu_y, gx.menu_w, 1);
+	GrRect(dc, gx.menu_x, gx.menu_y + gx.menu_h - 1, gx.menu_w, 1);
+	GrRect(dc, gx.menu_x, gx.menu_y, 1, gx.menu_h);
+	GrRect(dc, gx.menu_x + gx.menu_w - 1, gx.menu_y, 1, gx.menu_h);
+	y = gx.menu_y + 2;
+	for (i = 0; i < gx.menu_n; i++)
+	{
+		if (i == gx.menu_sel)
+		{
+			dc->color = de_theme.bttn_hot;
+			GrRect(dc, gx.menu_x + 1, y, gx.menu_w - 2, GX_CTX_ITEM_H);
+			dc->color = de_theme.accent;
+			GrRect(dc, gx.menu_x + 1, y, 2, GX_CTX_ITEM_H);
+		}
+		dc->color = de_theme.text;
+		GrPrint(dc, gx.menu_x + GX_CTX_PAD,
+				y + (GX_CTX_ITEM_H - FONT_HEIGHT) / 2, "%s",
+				GxCtxItem(gx.menu_kind, i));
+		y += GX_CTX_ITEM_H;
+	}
+}
+
+U0 GxDrawIt(CTask *task, CDC *dc)
+{
+	I64	 i, oy, view_top = GX_CHROME_H, mx, my, wr, zpass;
+	I64	 selc0, selc1, selcw, selx, selw;
+	I64	 view_h = task->pix_height - GX_CHROME_H - GX_STATUS_H, th, ty;
+	CGxOp *op;
+	U8	*hover = NULL;
+	U8	 buf[168];
+
+	mx = mouse.pos.x - task->pix_left - task->scroll_x;
+	my = mouse.pos.y - task->pix_top - task->scroll_y;
+
+	if (gx.page_has_bg && !Bt(&gx.lock_flags, GXLKf_BUSY))
+		dc->color = GxPenBg(gx.page_bg, de_theme.win_bg);
+	else
+		dc->color = de_theme.win_bg;
+	GrRect(dc, 0, 0, task->pix_width, task->pix_height);
+
+	LBts(&gx.lock_flags, GXLKf_DRAW); // claimed before the test below
+	if (Bt(&gx.lock_flags, GXLKf_BUSY))
+	{
+		LBtr(&gx.lock_flags, GXLKf_DRAW);
+		GxDrawChrome(dc);
+		GxCtxDraw(dc);
+		return;
+	}
+
+	for (zpass = 0; zpass < 2; zpass++)
+	for (i = 0; i < gx.op_count; i++)
+	{ // two z buckets: flow content first, then z-index>0 late
+		op = &gx.ops[i];
+		if (zpass == 0 && op->z > 0)
+			goto gx_draw_next;
+		if (zpass == 1 && op->z <= 0)
+			goto gx_draw_next;
+		if (op->pinned)
+			oy = op->y + view_top; // position:fixed - viewport-pinned
+		else
+			oy = op->y - gx.scroll + view_top;
+		if (oy + op->h < view_top || oy > view_top + view_h)
+			goto gx_draw_next;
+		switch (op->type)
+		{
+			case GXO_RECT:
+				dc->color = op->fg;
+				GrRect(dc, op->x, oy, op->w, op->h);
+				break;
+			case GXO_BOX:
+				if (zinc_shadows && op->sh_col >= 0)
+				{ // box-shadow: one offset rect behind the box, drawn per frame, so no per-pixel blur
+					dc->color = ColorRGB(op->sh_col >> 16 & 0xFF,
+										 op->sh_col >> 8 & 0xFF, op->sh_col & 0xFF);
+					GrRect(dc, op->x + op->sh_dx - op->sh_blur,
+						   oy + op->sh_dy - op->sh_blur,
+						   op->w + op->sh_blur * 2, op->h + op->sh_blur * 2);
+				}
+				if (op->wkind > 0)
+				{ // wkind carries the border-radius for GXO_BOX
+					if (gx.page_has_bg)
+						dc->color = GxPenBg(gx.page_bg, de_theme.win_bg);
+					else
+						dc->color = ColorRGB(0xFF, 0xFF, 0xFF);
+					wr = dc->color;
+					if (op->has_bg && op->ul)
+						GxRoundRect(dc, op->x, oy, op->w, op->h, op->wkind,
+									op->fg, op->bg);
+					else if (op->has_bg)
+						GxRoundFill(dc, op->x, oy, op->w, op->h, op->wkind, op->fg);
+					else if (op->ul)
+						GxRoundRect(dc, op->x, oy, op->w, op->h, op->wkind,
+									wr, op->bg);
+					if (op->sc)
+						GrBlot(dc, op->x, oy, op->sc);
+					break;
+				}
+				if (op->has_bg)
+				{
+					dc->color = op->fg;
+					GrRect(dc, op->x, oy, op->w, op->h);
+				}
+				if (op->sc)
+					GrBlot(dc, op->x, oy, op->sc);
+				if (op->ul)
+				{
+					dc->color = op->bg;
+					GrRect(dc, op->x, oy, op->w, 1);
+					GrRect(dc, op->x, oy + op->h - 1, op->w, 1);
+					GrRect(dc, op->x, oy, 1, op->h);
+					GrRect(dc, op->x + op->w - 1, oy, 1, op->h);
+				}
+				break;
+			case GXO_TEXT:
+				if (op->sc)
+				{ // scalable font: pre-rendered run DC. cov = per-pixel coverage blended against the destination, else a legacy opaque stamp through GrBlot
+					if (op->href && op->x <= mx < op->x + op->w &&
+						oy <= my < oy + op->h)
+						hover = op->href;
+					if (op->cov)
+						GxBlotBlend(dc, op->x, oy, op->sc);
+					else
+						GrBlot(dc, op->x, oy, op->sc);
+					if (GxOpSelRange(op, &selc0, &selc1))
+					{ // selection tint over the selected chars on alternate scanlines: the run DC is opaque, so stripes read as translucent
+						selcw = MaxI64(1, op->w / MaxI64(1, StrLen(op->text)));
+						selx = op->x + selc0 * selcw;
+						selw = (selc1 - selc0) * selcw;
+						dc->color = de_theme.accent;
+						for (wr = 0; wr < op->h; wr += 2)
+							GrRect(dc, selx, oy + wr, selw, 1);
+					}
+					if (op->ul)
+					{ // underline sits ~at the baseline, ~4/5 down the line box
+						dc->color = op->fg;
+						GrRect(dc, op->x, oy + op->h * 4 / 5, op->w, 1);
+					}
+					break;
+				}
+				if (op->has_bg)
+				{
+					dc->color = op->bg;
+					GrRect(dc, op->x, oy, op->w, op->h);
+				}
+				if (GxOpSelRange(op, &selc0, &selc1))
+				{
+					dc->color = de_theme.bttn_focus;
+					GrRect(dc, op->x + selc0 * FONT_WIDTH, oy,
+						   (selc1 - selc0) * FONT_WIDTH, op->h);
+				}
+				if (op->href && op->x <= mx < op->x + op->w && oy <= my < oy + FONT_HEIGHT)
+				{
+					hover = op->href;
+					dc->color = de_theme.accent;
+				}
+				else
+					dc->color = op->fg;
+				GrPrint(dc, op->x, oy, "%s", op->text);
+				if (op->bold)
+					GrPrint(dc, op->x + 1, oy, "%s", op->text);
+				if (op->ul)
+					GrRect(dc, op->x, oy + FONT_HEIGHT, op->w, 1);
+				break;
+			case GXO_SCALED:
+				if (op->sc)
+					GrBlot(dc, op->x, oy, op->sc);
+				break;
+			case GXO_IMG:
+				if (op->sc)
+					GrBlot(dc, op->x, oy, op->sc);
+				else
+				{
+					dc->color = de_theme.panel;
+					GrRect(dc, op->x, oy, op->w, op->h);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, op->x, oy, op->w, 1);
+					GrRect(dc, op->x, oy + op->h - 1, op->w, 1);
+					dc->color = de_theme.text_dim;
+					GrPrint(dc, op->x + 4, oy + op->h / 2 - 4, "img");
+				}
+				break;
+			case GXO_WIDGET:
+				// the page's border-radius if it set one, else 2px
+				wr = 2;
+				if (op->radius >= 0)
+					wr = MinI64(op->radius, op->h / 2);
+				if (op->wkind == GXW_SUBMIT || op->wkind == GXW_BUTTON)
+				{
+					if (op->has_bg)
+						GxRoundRect(dc, op->x, oy, op->w, op->h, wr,
+									op->fg, op->bg);
+					else
+						GxRoundRect(dc, op->x, oy, op->w, op->h, wr,
+									ColorRGB(0xF1, 0xF3, 0xF4), op->bg);
+				}
+				else if (op->wkind == GXW_TEXT || op->wkind == GXW_AREA)
+				{
+					if (op->has_bg)
+						GxRoundRect(dc, op->x, oy, op->w, op->h, wr,
+									op->fg, op->bg);
+					else
+						GxRoundRect(dc, op->x, oy, op->w, op->h, wr,
+									ColorRGB(0xFF, 0xFF, 0xFF), op->bg);
+				}
+				else
+				{
+					dc->color = de_theme.win_bg;
+					GrRect(dc, op->x, oy, op->w, op->h);
+					dc->color = de_theme.panel_edge;
+					GrRect(dc, op->x, oy, op->w, 1);
+					GrRect(dc, op->x, oy + op->h - 1, op->w, 1);
+					GrRect(dc, op->x, oy, 1, op->h);
+					GrRect(dc, op->x + op->w - 1, oy, 1, op->h);
+				}
+				if ((op->wkind == GXW_CHECK || op->wkind == GXW_RADIO) && op->node->checked)
+				{
+					dc->color = de_theme.accent;
+					GrRect(dc, op->x + 3, oy + 3, op->w - 6, op->h - 6);
+				}
+				if (op == gx.field_op)
+				{
+					I64 fy = oy + (op->h - FONT_HEIGHT) / 2, vis, fstart, fn, cx2;
+
+					dc->color = de_theme.accent;
+					GrRect(dc, op->x, oy, op->w, 1);
+					GrRect(dc, op->x, oy + op->h - 1, op->w, 1);
+					GrRect(dc, op->x, oy, 1, op->h);
+					GrRect(dc, op->x + op->w - 1, oy, 1, op->h);
+					vis = MaxI64(1, (op->w - 2 * op->lbl_x) / FONT_WIDTH);
+					fstart = 0;
+					if (gx.field_caret > vis) // horizontal scroll to keep the caret shown
+						fstart = gx.field_caret - vis;
+					fn = MinI64(gx.field_len - fstart, vis);
+					if (fn > 167)
+						fn = 167;
+					MemCopy(buf, gx.field_buf + fstart, fn);
+					buf[fn] = 0;
+					if (gx.field_selall && gx.field_len)
+					{
+						dc->color = de_theme.bttn_focus;
+						GrRect(dc, op->x + op->lbl_x - 1, fy - 1, fn * FONT_WIDTH,
+							   FONT_HEIGHT + 2);
+					}
+					dc->color = ColorRGB(0x20, 0x21, 0x24);
+					GrPrint(dc, op->x + op->lbl_x, fy, "%s", buf);
+					if (!gx.field_selall && Blink)
+					{
+						cx2 = op->x + op->lbl_x + (gx.field_caret - fstart) * FONT_WIDTH;
+						dc->color = de_theme.accent;
+						GrRect(dc, cx2, fy, 1, FONT_HEIGHT);
+					}
+				}
+				else if (op->wkind != GXW_CHECK && op->wkind != GXW_RADIO)
+				{
+					if (op->sc)
+						GxBlotBlend(dc, op->x + op->lbl_x, oy + op->lbl_y, op->sc,
+									MaxI64(1, op->w - op->lbl_x - 1));
+					else
+					{
+						if (op->sh_col >= 0)
+							dc->color = GxPenBg(op->sh_col, de_theme.text);
+						else
+							dc->color = ColorRGB(0x20, 0x21, 0x24);
+						GrPrint(dc, op->x + op->lbl_x, oy + op->lbl_y, "%s", op->text);
+					}
+				}
+				break;
+		}
+gx_draw_next:;
+	}
+
+	dc->color = de_theme.bar_bg;
+	GrRect(dc, task->pix_width - GX_SBAR_W, view_top, GX_SBAR_W, view_h);
+	if (gx.doc_h > view_h)
+	{
+		th = MaxI64(16, view_h * view_h / gx.doc_h);
+		ty = view_top + gx.scroll * (view_h - th) / MaxI64(1, gx.doc_h - view_h);
+		dc->color = de_theme.bttn_focus;
+		GrRect(dc, task->pix_width - GX_SBAR_W + 1, ty, GX_SBAR_W - 2, th);
+	}
+
+	dc->color = de_theme.bar_bg;
+	GxDrawConsole(dc, task);
+	dc->color = de_theme.bar_bg;
+	GrRect(dc, 0, task->pix_height - GX_STATUS_H, task->pix_width, GX_STATUS_H);
+	dc->color = de_theme.text_dim;
+	if (hover)
+		StrPrint(buf, "%s", hover);
+	else if (!StrNICompare(gx.url, "https://", 8))
+		StrPrint(buf, "Encrypted; server identity unverified. %s", zinc_note);
+	else
+		StrPrint(buf, "%s", zinc_note);
+	buf[MinI64(166, (task->pix_width - 8) / FONT_WIDTH)] = 0;
+	GrPrint(dc, 4, task->pix_height - GX_STATUS_H + 4, "%s", buf);
+	ty = 0;
+	for (th = 0; th < gx.img_count; th++)
+		if (!gx.img[th].fetched)
+			ty++;
+	if (ty || gx.img_busy)
+	{
+		StrPrint(buf, "img %d/%d", gx.img_count - ty, gx.img_count);
+		GrPrint(dc, task->pix_width - 4 - StrLen(buf) * FONT_WIDTH,
+				task->pix_height - GX_STATUS_H + 4, "%s", buf);
+	}
+
+	gx.hover_href = hover;
+	LBtr(&gx.lock_flags, GXLKf_DRAW); // last read of gx.ops / the image cache
+	// TODO(cursor): per-context pointer shapes need a kernel compositor hook; ZealOS draws one system pointer sprite with no per-task API
+	GxDrawChrome(dc);
+	GxCtxDraw(dc);
+}
+
+U0 GxNavTo(U8 *target_new)
+{ // takes ownership of target_new
+	Free(gx.pending_nav);
+	gx.pending_nav = target_new;
+}
+
+// the body is allocated on the SYS heap so it survives the child fetch task's death; parsing happens in the main task
+U8	*gx_fetch_body;
+I64	 gx_fetch_status;
+I64	 gx_fetch_len; // body byte count: image bodies are binary (NULs inside)
+Bool gx_fetch_html, gx_fetch_ok;
+Bool gx_fetch_img; // response IS an image (content-type / magic): view it
+Bool gx_fetch_trunc;
+I64	 gx_fetch_recv, gx_fetch_expect;
+U8	 gx_fetch_final[512];
+
+U0 GxJsReset()
+{
+	I64 i;
+
+	if (gx.js_task && TaskValidate(gx.js_task))
+		Kill(gx.js_task);
+	gx.js_task = NULL;
+	for (i = 0; i < zinc_js_queue_count; i++)
+	{
+		Free(zinc_js_queue[i]);
+		Free(gx.js_body[i]);
+		gx.js_body[i] = NULL;
+		gx.js_done[i] = FALSE;
+	}
+	zinc_js_queue_count = 0;
+	gx.js_ran = 0;
+}
+
+U0 GxJsFetchWork()
+{
+	I64			   i;
+	CHttpResponse *r;
+	U8			   note[160];
+
+	for (i = 0; i < zinc_js_queue_count; i++)
+	{
+		r = HttpGet(zinc_js_queue[i]);
+		if (r && r->truncated)
+		{
+			if (r->expect_length >= 0)
+				StrPrint(note, "script TRUNCATED (%d of %d bytes), not run:",
+						 r->recv_length, r->expect_length);
+			else
+				StrPrint(note, "script TRUNCATED (%d bytes, length undeclared),"
+						 " not run:", r->recv_length);
+			JsConsoleAdd("err", note);
+			JsConsoleAdd("err", zinc_js_queue[i]);
+			NetErr("ZINC GX: script %d TRUNCATED, not run: %d of %d encoded "
+				   "bytes, %d decoded: %s", i, r->recv_length, r->expect_length,
+				   r->body_length, zinc_js_queue[i]);
+		}
+		else if (r && r->status == 200 && r->body &&
+				 r->body_length < ZINC_EXT_JS_BYTES)
+		{
+			gx.js_body[i] = MAlloc(r->body_length + 1, sys_task);
+			MemCopy(gx.js_body[i], r->body, r->body_length + 1);
+		}
+		else if (r)
+		{
+			StrPrint(note, "script skipped: HTTP %d, %d bytes", r->status,
+					 r->body_length);
+			JsConsoleAdd("warn", note);
+			JsConsoleAdd("warn", zinc_js_queue[i]);
+			NetErr("ZINC GX: script %d skipped: HTTP %d, %d bytes: %s",
+				   i, r->status, r->body_length, zinc_js_queue[i]);
+		}
+		else
+		{
+			JsConsoleAdd("warn", "script fetch failed:");
+			JsConsoleAdd("warn", zinc_js_queue[i]);
+			NetErr("ZINC GX: script %d fetch failed: %s", i, zinc_js_queue[i]);
+		}
+		HttpResponseFree(r);
+		gx.js_done[i] = TRUE;
+	}
+}
+
+U0 GxJsFetchTask()
+{
+	try
+		GxJsFetchWork;
+	catch
+		PutExcept;
+	HttpInflightRelease;
+	gx.js_task = NULL;
+}
+
+U0 GxEndCB()
+{
+	if (http_pool_task == Fs)
+		http_pool_task = NULL;
+	if (zinc_gx_task == Fs)
+		zinc_gx_task = NULL;
+	Exit;
+}
+
+U0 GxFetchWork()
+{
+	CHttpResponse	*r;
+	U8				*ct;
+	I64				 seq = gx.fetch_seq;
+
+	gx_fetch_body = NULL;
+	gx_fetch_status = 0;
+	gx_fetch_len = 0;
+	gx_fetch_html = TRUE;
+	gx_fetch_img = FALSE;
+	gx_fetch_ok = FALSE;
+	gx_fetch_trunc = FALSE;
+	gx_fetch_recv = 0;
+	gx_fetch_expect = 0;
+	gx_fetch_final[0] = 0;
+	r = ZincNavFetch(gx.load_url);
+	if (seq != gx.fetch_seq)
+	{
+		if (r)
+			HttpResponseFree(r);
+		return;
+	}
+	if (r && r->body)
+	{
+		gx_fetch_status = r->status;
+		gx_fetch_trunc	= r->truncated;
+		gx_fetch_recv	= r->recv_length;
+		gx_fetch_expect = r->expect_length;
+		if (r->final_url && StrLen(r->final_url) < 511)
+			StrCopy(gx_fetch_final, r->final_url);
+		gx_fetch_len = r->body_length;
+		gx_fetch_body = MAlloc(r->body_length + 1, sys_task);
+		MemCopy(gx_fetch_body, r->body, r->body_length + 1);
+		ct = HttpHeaderGet(r->headers, "Content-Type");
+		if (ct)
+		{
+			if (!StrIMatch("html", ct) && !StrIMatch("xhtml", ct))
+				gx_fetch_html = FALSE;
+			if (StrIMatch("image/", ct))
+				gx_fetch_img = TRUE;
+			Free(ct);
+		}
+		if (gx_fetch_len > 8)
+		{
+			if (gx_fetch_body[1] == 'P' && gx_fetch_body[2] == 'N' &&
+				gx_fetch_body[3] == 'G')
+				gx_fetch_img = TRUE;
+			else if (gx_fetch_body[0] == 0xFF && gx_fetch_body[1] == 0xD8)
+				gx_fetch_img = TRUE;
+			else if (gx_fetch_body[0] == 'G' && gx_fetch_body[1] == 'I' &&
+					 gx_fetch_body[2] == 'F')
+				gx_fetch_img = TRUE;
+			else if (gx_fetch_len > 12 && !MemCompare(gx_fetch_body, "RIFF", 4) &&
+					 !MemCompare(gx_fetch_body + 8, "WEBP", 4))
+				gx_fetch_img = TRUE;
+		}
+		if (gx_fetch_img)
+			gx_fetch_html = FALSE;
+		else if (!gx_fetch_html && gx_fetch_body[0] == '<')
+			gx_fetch_html = TRUE;
+		gx_fetch_ok = TRUE;
+	}
+	if (r)
+		HttpResponseFree(r);
+}
+
+U0 GxFetchTask()
+{
+	I64 seq = gx.fetch_seq;
+
+	try
+		GxFetchWork;
+	catch
+		PutExcept;
+	HttpInflightRelease;
+	if (seq == gx.fetch_seq)
+	{
+		gx.loading = FALSE;
+		gx.load_task = NULL;
+	}
+}
+
+Bool GxImgCancel()
+{
+	return gx.quit || gx.fetch || gx.loading;
+}
+
+U0 GxImgLoop()
+{
+	I64			 i, iw, ih, sf;
+	CGxImg		*ce;
+	CHttpResponse *r;
+	CDC			*dc, *scaled;
+
+	while (TRUE)
+	{
+		if (gx.quit)
+			break;
+		if (GxImgCancel())
+		{
+			Sleep(30);
+			goto img_loop;
+		}
+		gx.img_busy = TRUE;
+		if (GxImgCancel())
+		{
+			gx.img_busy = FALSE;
+			Sleep(30);
+			goto img_loop;
+		}
+		ce = NULL;
+		for (i = 0; i < gx.img_count; i++)
+			if (!gx.img[i].fetched)
+			{
+				ce = &gx.img[i];
+				break;
+			}
+		if (!ce)
+		{
+			gx.img_busy = FALSE;
+			Sleep(80);
+			goto img_loop;
+		}
+		ce->fetched = TRUE;
+		if (!StrNICompare(ce->url, "http", 4))
+		{
+			r = HttpGet(ce->url);
+			if (!r && !GxImgCancel())
+				r = HttpGet(ce->url);
+			if (r && GxImgCancel())
+			{
+				HttpResponseFree(r);
+				r = NULL;
+			}
+			if (r && r->status == 200 && r->body_length > 8)
+			{
+				dc = NULL;
+				if (r->body[1] == 'P' && r->body[2] == 'N' && r->body[3] == 'G')
+					dc = PNGReadBuf(r->body, r->body_length, 128, sys_task);
+				else if (r->body[0] == 0xFF && r->body[1] == 0xD8)
+					dc = JPGReadBuf(r->body, r->body_length, sys_task);
+				else if (r->body[0] == 'G' && r->body[1] == 'I' && r->body[2] == 'F')
+					dc = GIFReadBuf(r->body, r->body_length, sys_task);
+				else if (r->body_length > 12 && !MemCompare(r->body, "RIFF", 4) &&
+						 !MemCompare(r->body + 8, "WEBP", 4))
+					dc = WEBPReadBuf(r->body, r->body_length, sys_task);
+					else
+					{
+						U8 *b0 = r->body;
+						while (*b0 == ' ' || *b0 == '\n' || *b0 == '\r' || *b0 == '\t')
+							b0++;
+						if (*b0 == '<' && StrFind("<svg", r->body))
+							dc = SVGReadBuf(r->body, r->body_length, 0, 0, sys_task);
+					}
+				if (dc)
+				{
+					iw = dc->width;
+					ih = dc->height;
+					if (zinc_dbg)
+						NetLog("ZINC IMGDEC %dx%d sig=%02X%02X%02X%02X %s",
+							   iw, ih, r->body[0], r->body[1], r->body[2],
+							   r->body[3], ce->url);
+					if (iw > GX_IMG_MAXW || ih > GX_IMG_MAXH)
+					{
+						sf = MinI64(GX_IMG_MAXW * 1000 / iw, GX_IMG_MAXH * 1000 / ih);
+						scaled = DEDCScaleNew(dc, MaxI64(1, iw * sf / 1000),
+											  MaxI64(1, ih * sf / 1000), sys_task);
+						DCDel(dc);
+						dc = scaled;
+					}
+					ce->dc = dc;
+					gx.img_dirty = TRUE;
+				}
+				else
+				{
+					NetLog("IMG: undecodable %02X %02X %02X %02X len=%d %s",
+						   r->body[0], r->body[1], r->body[2], r->body[3],
+						   r->body_length, ce->url);
+					StrPrint(zinc_note, "img undecodable (%02X%02X) len=%d",
+							 r->body[0], r->body[1], r->body_length);
+				}
+			}
+			else if (r)
+			{
+				NetLog("IMG: HTTP %d len=%d %s", r->status, r->body_length, ce->url);
+				StrPrint(zinc_note, "img HTTP %d", r->status);
+			}
+			else if (!GxImgCancel())
+			{
+				NetLog("IMG: no response %s", ce->url);
+				StrCopy(zinc_note, "img: no response");
+			}
+			if (r)
+				HttpResponseFree(r);
+		}
+		gx.img_busy = FALSE;
+img_loop:
+		if (gx.quit)
+			break;
+	}
+}
+
+U0 GxImgTask()
+{
+	try
+		GxImgLoop;
+	catch
+		PutExcept;
+	HttpInflightRelease;
+	gx.img_busy = FALSE;
+}
+
+U8	gx_clip[256];
+I64	gx_clip_len = 0;
+
+U0 GxUrlSet(U8 *url)
+{
+	I64 len = StrLen(url);
+
+	if (len > 254)
+		len = 254;
+	MemCopy(gx.url, url, len);
+	gx.url[len] = 0;
+	gx.url_len = len;
+	gx.url_caret = len;
+	gx.url_selall = FALSE;
+}
+
+U0 GxUrlIns(I64 ch)
+{
+	I64 i;
+
+	if (gx.url_selall)
+	{
+		gx.url_len = 0;
+		gx.url_caret = 0;
+		gx.url_selall = FALSE;
+	}
+	if (gx.url_len >= 254)
+		return;
+	for (i = gx.url_len; i > gx.url_caret; i--)
+		gx.url[i] = gx.url[i - 1];
+	gx.url[gx.url_caret++] = ch;
+	gx.url[++gx.url_len] = 0;
+}
+
+U0 GxUrlDel(I64 at)
+{
+	I64 i;
+
+	if (at < 0 || at >= gx.url_len)
+		return;
+	for (i = at; i < gx.url_len - 1; i++)
+		gx.url[i] = gx.url[i + 1];
+	gx.url[--gx.url_len] = 0;
+}
+
+Bool gx_field_dispatching = FALSE;
+
+U0 GxFieldCommit()
+{
+	CZNode *node;
+
+	if (!gx.field_op)
+		return;
+	node = gx.field_op->node;
+	Free(node->value);
+	node->value = StrNew(gx.field_buf);
+	Free(gx.field_op->text);
+	gx.field_op->text = StrNew(gx.field_buf);
+	if (gx.field_op->sc)
+	{
+		DCDel(gx.field_op->sc);
+		gx.field_op->sc = NULL;
+	}
+	if (zinc_ttf && gx.field_buf[0] && gx.field_op->lbl_px >= 8)
+	{
+		I64 tc = 0x202124;
+
+		if (gx.field_op->sh_col >= 0)
+			tc = gx.field_op->sh_col;
+		gx.field_op->sc = GrFontRenderCovDC(GrFontPick(FALSE), gx.field_op->lbl_px,
+											tc, gx.field_buf);
+		if (gx.field_op->sc)
+			gx.field_op->lbl_y = MaxI64(0, (gx.field_op->h -
+											gx.field_op->sc->height) / 2);
+	}
+
+	if (zinc_js && node && !gx_field_dispatching)
+	{
+		gx_field_dispatching = TRUE;
+		JsDispatchEvent(zinc_js, node, "input");
+		if (JsDispatchEvent(zinc_js, node, "change"))
+			gx.relayout = TRUE;
+		gx_field_dispatching = FALSE;
+	}
+}
+
+U0 GxFieldBlur()
+{
+	if (gx.field_op)
+	{
+		GxFieldCommit;
+		gx.field_op = NULL;
+	}
+}
+
+U0 GxFieldFocus(CGxOp *op)
+{
+	U8 buf[512];
+
+	GxFieldBlur;
+	gx.url_focus = FALSE;
+	GxWidgetLabel(op->node, buf, sizeof(buf));
+	gx.field_len = StrLen(buf);
+	if (gx.field_len > 510)
+		gx.field_len = 510;
+	MemCopy(gx.field_buf, buf, gx.field_len);
+	gx.field_buf[gx.field_len] = 0;
+	gx.field_caret = gx.field_len;
+	gx.field_selall = FALSE;
+	gx.field_op = op;
+}
+
+U0 GxFieldIns(I64 ch)
+{
+	I64 i;
+
+	if (gx.field_selall)
+	{
+		gx.field_len = 0;
+		gx.field_caret = 0;
+		gx.field_selall = FALSE;
+	}
+	if (gx.field_len >= 510)
+		return;
+	for (i = gx.field_len; i > gx.field_caret; i--)
+		gx.field_buf[i] = gx.field_buf[i - 1];
+	gx.field_buf[gx.field_caret++] = ch;
+	gx.field_buf[++gx.field_len] = 0;
+}
+
+U0 GxFieldDel(I64 at)
+{
+	I64 i;
+
+	if (at < 0 || at >= gx.field_len)
+		return;
+	for (i = at; i < gx.field_len - 1; i++)
+		gx.field_buf[i] = gx.field_buf[i + 1];
+	gx.field_buf[--gx.field_len] = 0;
+}
+
+
+U0 GxTabSaveCur(U8 *current)
+{
+	CGxTab *t = &gx.tab[gx.tab_cur];
+	I64		i;
+
+	GxOpsLock;
+	GxOpsReset;
+	gx.hover_href = NULL;
+	t->used = TRUE;
+	Free(t->url);
+	t->url = StrNew(current);
+	t->scroll = gx.scroll;
+	t->dom = zinc_dom;
+	zinc_dom = NULL;
+	t->js = zinc_js;
+	zinc_js = NULL;
+	MemCopy(&t->base, &zinc_base, sizeof(CHttpUrl));
+	t->base_ok = zinc_base_ok;
+	t->css = ZCssStateSave;
+	ZCssReset;
+	t->iv_dc = gx.iv_dc;
+	gx.iv_dc = NULL;
+	t->iv_one2one = gx.iv_one2one;
+	gx.iv_one2one = FALSE;
+	if (gx.iv_sc)
+	{
+		DCDel(gx.iv_sc);
+		gx.iv_sc = NULL;
+	}
+	for (i = 0; i < zinc_back_count; i++)
+		t->back[i] = zinc_back[i];
+	t->back_count = zinc_back_count;
+	zinc_back_count = 0;
+	for (i = 0; i < zinc_fwd_count; i++)
+		t->fwd[i] = zinc_fwd[i];
+	t->fwd_count = zinc_fwd_count;
+	zinc_fwd_count = 0;
+	GxJsReset;
+	GxOpsUnlock;
+}
+
+U8 *GxTabLoadCur()
+{
+	CGxTab *t = &gx.tab[gx.tab_cur];
+	U8	   *cur;
+	I64		i, view_h;
+
+	zinc_dom = t->dom;
+	t->dom = NULL;
+	zinc_js = t->js;
+	t->js = NULL;
+	MemCopy(&zinc_base, &t->base, sizeof(CHttpUrl));
+	zinc_base_ok = t->base_ok;
+	ZCssStateLoad(t->css);
+	t->css = NULL;
+	gx.iv_dc = t->iv_dc;
+	t->iv_dc = NULL;
+	gx.iv_one2one = t->iv_one2one;
+	for (i = 0; i < t->back_count; i++)
+		zinc_back[i] = t->back[i];
+	zinc_back_count = t->back_count;
+	t->back_count = 0;
+	for (i = 0; i < t->fwd_count; i++)
+		zinc_fwd[i] = t->fwd[i];
+	zinc_fwd_count = t->fwd_count;
+	t->fwd_count = 0;
+	cur = t->url;
+	t->url = NULL;
+	if (!cur)
+		cur = StrNew("zinc:welcome");
+	GxUrlSet(cur);
+	zinc_note[0] = 0;
+	if (t->title[0])
+		StrPrint(Fs->task_title, "GX:%s", t->title);
+	else
+		StrCopy(Fs->task_title, "ZincGX");
+	GxLayout;
+	view_h = Fs->pix_height - GX_CHROME_H - GX_STATUS_H;
+	gx.scroll = ClampI64(t->scroll, 0, MaxI64(0, gx.doc_h - view_h));
+
+	return cur;
+}
+
+U0 GxTabFree(CGxTab *t)
+{
+	I64 i;
+
+	Free(t->url);
+	t->url = NULL;
+	if (t->js)
+		JsInterpFree(t->js);
+	t->js = NULL;
+	if (t->dom)
+		ZNodeFree(t->dom);
+	t->dom = NULL;
+	Free(t->css);
+	t->css = NULL;
+	if (t->iv_dc)
+		DCDel(t->iv_dc);
+	t->iv_dc = NULL;
+	for (i = 0; i < t->back_count; i++)
+		Free(t->back[i]);
+	t->back_count = 0;
+	for (i = 0; i < t->fwd_count; i++)
+		Free(t->fwd[i]);
+	t->fwd_count = 0;
+	t->title[0] = 0;
+	t->used = FALSE;
+}
+
+U0 GxTabClick(I64 x)
+{
+	I64 i, x0 = 4;
+
+	for (i = 0; i < GX_TABS; i++)
+	{
+		if (!gx.tab[i].used)
+			goto gx_tab_next;
+		if (x0 <= x < x0 + GX_TAB_W)
+		{
+			if (x >= x0 + GX_TAB_W - 16)
+				gx.tab_close = i;
+			else
+				gx.tab_go = i;
+			return;
+		}
+		x0 += GX_TAB_W + 2;
+gx_tab_next:;
+	}
+	if (x0 <= x < x0 + 22)
+		gx.tab_new = TRUE;
+}
+
+U0 GxClickContent(I64 x, I64 y)
+{
+	I64	 i, cy = y - GX_CHROME_H + gx.scroll;
+	CGxOp *op;
+	U8	*s, *sub;
+
+	if (gx.iv_dc)
+	{
+		gx.iv_one2one = !gx.iv_one2one;
+		gx.scroll = 0;
+		gx.relayout = TRUE;
+		return;
+	}
+	GxFieldBlur;
+	for (i = 0; i < gx.op_count; i++)
+	{
+		op = &gx.ops[i];
+		if (!(op->x <= x < op->x + op->w && op->y <= cy < op->y + op->h))
+			goto gx_click_next;
+		if (op->node && !StrCompare(op->node->tag, "details"))
+		{
+			op->node->checked = !op->node->checked;
+			gx.relayout = TRUE;
+			return;
+		}
+		if ((op->type == GXO_TEXT || op->type == GXO_IMG) && op->node && zinc_js)
+		{
+			if (JsDispatchEvent(zinc_js, op->node, "click"))
+			{
+				gx.relayout = TRUE;
+				if (zinc_js->navigate)
+				{
+					GxNavTo(StrNew(zinc_js->navigate));
+					zinc_js->navigate = NULL;
+					return;
+				}
+				if (zinc_js->evt_prevented)
+					return;
+			}
+		}
+		if ((op->type == GXO_TEXT || op->type == GXO_IMG) && op->href)
+		{
+			s = op->href;
+			while (*s == ' ')
+				s++;
+			if (*s == '#' || !*s)
+			{
+				gx.scroll = 0;
+				gx.relayout = TRUE;
+				return;
+			}
+			GxNavTo(ZincResolveLink(op->href));
+			return;
+		}
+		if (op->type == GXO_WIDGET)
+		{
+			switch (op->wkind)
+			{
+				case GXW_TEXT:
+				case GXW_AREA:
+					GxFieldFocus(op);
+					break;
+				case GXW_CHECK:
+					op->node->checked = !op->node->checked;
+					break;
+				case GXW_RADIO:
+					ZincRadioGroupClear(op->node);
+					op->node->checked = TRUE;
+					break;
+				case GXW_SELECT:
+					ZincSelectCycle(op->node);
+					gx.relayout = TRUE;
+					break;
+				case GXW_SUBMIT:
+					s = ZNodeAttr(op->node, "onclick");
+					if (s && zinc_js)
+					{
+						if (!JsRun(zinc_js, s))
+							ZincJsNote;
+						gx.relayout = TRUE;
+					}
+					if (zinc_js)
+					{
+						if (!JsDispatchEvent(zinc_js, op->node, "click") && !s)
+							JsConsoleAdd("click", "no handler bound to this <button>");
+						gx.relayout = TRUE;
+					}
+					if (zinc_js && zinc_js->navigate)
+					{
+						GxNavTo(StrNew(zinc_js->navigate));
+						zinc_js->navigate = NULL;
+						return;
+					}
+					if (zinc_js && zinc_js->evt_prevented)
+					{
+						JsConsoleAdd("click", "submit prevented by handler");
+						break;
+					}
+					sub = ZincFormSubmitUrl(op->node);
+					if (sub)
+					{
+						JsConsoleAdd("nav", sub);
+						GxNavTo(sub);
+					}
+					break;
+				case GXW_BUTTON:
+					s = ZNodeAttr(op->node, "onclick");
+					if (s && zinc_js)
+					{
+						if (!JsRun(zinc_js, s))
+							ZincJsNote;
+						gx.relayout = TRUE;
+					}
+					if (zinc_js)
+					{
+						if (JsDispatchEvent(zinc_js, op->node, "click"))
+							gx.relayout = TRUE;
+						else if (!s)
+							JsConsoleAdd("click", "no handler bound to this <button>");
+					}
+					if (zinc_js && zinc_js->navigate && !zinc_js->evt_prevented)
+					{
+						GxNavTo(StrNew(zinc_js->navigate));
+						zinc_js->navigate = NULL;
+					}
+					break;
+			}
+			return;
+		}
+gx_click_next:;
+	}
+}
+
+U0 GxClipSet(U8 *s)
+{
+	I64 n;
+
+	if (!s)
+		return;
+	n = StrLen(s);
+	if (n > 255)
+		n = 255;
+	MemCopy(gx_clip, s, n);
+	gx_clip[n] = 0;
+	gx_clip_len = n;
+}
+
+U0 GxDownload(U8 *abs_url)
+{
+	CHttpResponse *r;
+	U8	 name[104], path[160];
+	U8	*tmp, *p;
+	I64  i, n = 0;
+
+	if (!abs_url)
+		return;
+
+	tmp = StrNew(abs_url);
+	p = StrFirstOcc(tmp, "?");
+	if (p)
+		*p = 0;
+	p = StrFirstOcc(tmp, "#");
+	if (p)
+		*p = 0;
+	p = StrLastOcc(tmp, "/");
+	if (p)
+		p++;
+	else
+		p = tmp;
+	for (i = 0; p[i] && n < 100; i++)
+	{
+		if ('A' <= p[i] <= 'Z' || 'a' <= p[i] <= 'z' || '0' <= p[i] <= '9' ||
+			p[i] == '.' || p[i] == '-' || p[i] == '_')
+			name[n++] = p[i];
+		else
+			name[n++] = '_';
+	}
+	name[n] = 0;
+	Free(tmp);
+	if (!name[0])
+		StrCopy(name, "DOWNLOAD.BIN");
+
+	StrPrint(zinc_note, "Downloading %s...", name);
+	r = HttpGet(abs_url);
+	if (r && r->status == 200 && r->body)
+	{
+		DirMake("::/Tmp/Downloads");
+		StrPrint(path, "::/Tmp/Downloads/%s", name);
+		FileWrite(path, r->body, r->body_length);
+		StrPrint(zinc_note, "Saved %s (%d bytes)", path, r->body_length);
+	}
+	else if (r)
+		StrPrint(zinc_note, "Download failed: HTTP %d", r->status);
+	else
+		StrPrint(zinc_note, "Download failed: no response");
+	HttpResponseFree(r);
+}
+
+U0 GxCtxOpen(I64 kind, U8 *url_new, I64 x, I64 y)
+{
+	I64 i, n = GxCtxCount(kind), len, wide = 0;
+	I64 cr = Fs->pix_width - GX_SBAR_W;
+	I64 ct = GX_CHROME_H, cb = Fs->pix_height - GX_STATUS_H;
+
+	GxCtxClose;
+	for (i = 0; i < n; i++)
+	{
+		len = StrLen(GxCtxItem(kind, i));
+		if (len > wide)
+			wide = len;
+	}
+	gx.menu_kind = kind;
+	gx.menu_url  = url_new;
+	gx.menu_n	 = n;
+	gx.menu_sel  = -1;
+	gx.menu_w	 = wide * FONT_WIDTH + 2 * GX_CTX_PAD;
+	gx.menu_h	 = n * GX_CTX_ITEM_H + 4;
+	if (x + gx.menu_w > cr)
+		x -= gx.menu_w;
+	if (y + gx.menu_h > cb)
+		y -= gx.menu_h;
+	gx.menu_x = ClampI64(x, 0, MaxI64(0, cr - gx.menu_w));
+	gx.menu_y = ClampI64(y, ct, MaxI64(ct, cb - gx.menu_h));
+	gx.menu_on = TRUE;
+}
+
+U0 GxCtxAct(I64 i)
+{
+	I64	 kind = gx.menu_kind;
+	U8	*u = gx.menu_url;
+
+	gx.menu_url = NULL;
+	GxCtxClose;
+	if (i < 0 || i >= GxCtxCount(kind))
+	{
+		Free(u);
+		return;
+	}
+	if (kind == GXCTX_LINK)
+	{
+		if (i == 0)
+		{
+			GxNavTo(u);
+			return;
+		}
+		if (i == 1)
+			GxDownload(u);
+		else
+			GxClipSet(u);
+	}
+	else if (kind == GXCTX_IMG)
+	{
+		if (i == 0)
+			GxDownload(u);
+		else
+			GxClipSet(u);
+	}
+	else
+	{
+		if (i == 0)
+			GxNavTo(StrNew("b"));
+		else if (i == 1)
+			GxNavTo(StrNew("f"));
+		else if (i == 2)
+			GxNavTo(StrNew("r"));
+		else if (i == 3)
+		{
+			GxConsoleShow;
+		}
+		else if (i == 4)
+			GxDownload(gx.url);
+		else
+			GxClipSet(gx.url);
+	}
+	Free(u);
+}
+
+Bool GxCtxKey(I64 ch, I64 sc)
+{
+	if (!gx.menu_on)
+		return FALSE;
+	if (ch == CH_ESC || ch == CH_SHIFT_ESC)
+	{
+		GxCtxClose;
+		return TRUE;
+	}
+	if (ch == '\n')
+	{
+		GxCtxAct(gx.menu_sel);
+		return TRUE;
+	}
+	if (!ch)
+	{
+		if (sc.u8[0] == SC_CURSOR_UP)
+			gx.menu_sel = ClampI64(gx.menu_sel - 1, 0, gx.menu_n - 1);
+		else if (sc.u8[0] == SC_CURSOR_DOWN)
+			gx.menu_sel = ClampI64(gx.menu_sel + 1, 0, gx.menu_n - 1);
+		return TRUE;
+	}
+	GxCtxClose;
+
+	return FALSE;
+}
+
+U0 GxRightClick(I64 x, I64 y)
+{
+	I64	 i, cy;
+	CGxOp *op;
+	U8	*link = NULL, *img = NULL;
+
+	if (gx.menu_on)
+	{
+		GxCtxClose;
+		return;
+	}
+	if (y < GX_CHROME_H || y >= Fs->pix_height - GX_STATUS_H)
+		return;
+	cy = y - GX_CHROME_H + gx.scroll;
+	for (i = 0; i < gx.op_count; i++)
+	{
+		op = &gx.ops[i];
+		if (op->x <= x < op->x + op->w && op->y <= cy < op->y + op->h)
+		{
+			if (op->type == GXO_TEXT && op->href && !link)
+				link = op->href;
+			if (op->type == GXO_IMG && op->img_url && !img)
+				img = op->img_url;
+		}
+	}
+	if (link)
+		GxCtxOpen(GXCTX_LINK, ZincResolveLink(link), x, y);
+	else if (img)
+		GxCtxOpen(GXCTX_IMG, StrNew(img), x, y);
+	else
+		GxCtxOpen(GXCTX_PAGE, NULL, x, y);
+}
+
+Bool GxClick(I64 x, I64 y)
+{
+	I64 w = Fs->pix_width, view_h = Fs->pix_height - GX_CHROME_H - GX_STATUS_H;
+	I64 th, tyy, hit;
+
+	if (gx.menu_on)
+	{
+		hit = GxCtxHit(x, y);
+		if (hit >= 0)
+			GxCtxAct(hit);
+		else
+			GxCtxClose;
+		return TRUE;
+	}
+	if (y < GX_TAB_H)
+	{
+		GxFieldBlur;
+		gx.url_focus = FALSE;
+		GxTabClick(x);
+		return FALSE;
+	}
+	if (y < GX_CHROME_H)
+	{
+		GxFieldBlur;
+		gx.url_focus = FALSE;
+		if (4 <= x < 30)
+			GxNavTo(StrNew("b"));
+		else if (34 <= x < 60)
+			GxNavTo(StrNew("f"));
+		else if (64 <= x < 90)
+			GxNavTo(StrNew("r"));
+		else if (94 <= x < 120)
+			GxNavTo(StrNew("zinc:welcome"));
+		else if (w - 36 <= x < w - 4)
+			GxNavTo(ZincResolveInput(gx.url));
+		else if (126 <= x < w - 44)
+		{
+			gx.url_focus = TRUE;
+			gx.url_selall = FALSE;
+			gx.url_caret = ClampI64((x - 132 + FONT_WIDTH / 2) / FONT_WIDTH,
+									0, gx.url_len);
+		}
+		return FALSE;
+	}
+	if (x >= w - GX_SBAR_W && gx.doc_h > view_h)
+	{
+		gx.scroll = ClampI64((y - GX_CHROME_H) * gx.doc_h / view_h - view_h / 2,
+							 0, gx.doc_h - view_h);
+		return FALSE;
+	}
+	gx.url_focus = FALSE;
+	if (y < Fs->pix_height - GX_STATUS_H)
+		GxClickContent(x, y);
+
+	return FALSE;
+}
+
+CZNode *GxMetaRefreshNode(CZNode *node, I64 depth)
+{
+	CZNode	*n, *r;
+	U8		*equiv;
+	I64		 guard = 0;
+
+	if (!node || depth > 64)
+		return NULL;
+	if (!StrICompare(node->tag, "meta"))
+	{
+		equiv = ZNodeAttr(node, "http-equiv");
+		if (equiv && !StrICompare(equiv, "refresh"))
+			return node;
+	}
+	n = node->first_child;
+	while (n && guard++ < 100000)
+	{
+		r = GxMetaRefreshNode(n, depth + 1);
+		if (r)
+			return r;
+		n = n->next;
+	}
+
+	return NULL;
+}
+
+U8 *GxMetaRefresh(U8 *cur_url)
+{
+	CZNode	*m;
+	U8		*content, *p, *url, *resolved;
+	I64		 n;
+
+	m = GxMetaRefreshNode(zinc_dom, 0);
+	if (!m)
+		return NULL;
+	content = ZNodeAttr(m, "content");
+	if (!content)
+		return NULL;
+	p = StrFind("url=", content);
+	if (!p)
+		p = StrFind("URL=", content);
+	if (!p)
+		return NULL;
+	p += 4;
+	while (*p == ' ' || *p == 0x27 || *p == 0x22)
+		p++;
+	url = StrNew(p);
+	n = StrLen(url);
+	while (n > 0 && (url[n - 1] == ' ' || url[n - 1] == 0x27 || url[n - 1] == 0x22 ||
+					 url[n - 1] == '\r' || url[n - 1] == '\n'))
+		url[--n] = 0;
+	resolved = ZincResolveLink(url);
+	Free(url);
+	if (resolved && cur_url && StrCompare(resolved, cur_url))
+		return resolved;
+	if (resolved)
+		Free(resolved);
+
+	return NULL;
+}
+
+U0 GxMenuPush()
+{
+	MenuPush("Go {"
+			 "  Back(MESSAGE_CMD,ZGXM_BACK);"
+			 "  Forward(MESSAGE_CMD,ZGXM_FORWARD);"
+			 "  Reload(MESSAGE_CMD,ZGXM_RELOAD);"
+			 "  Stop(MESSAGE_CMD,ZGXM_STOP);"
+			 "  Home(MESSAGE_CMD,ZGXM_HOME);"
+			 "  Address(MESSAGE_CMD,ZGXM_URLBAR);"
+			 "}"
+			 "Tab {"
+			 "  NewTab(MESSAGE_CMD,ZGXM_NEW_TAB);"
+			 "  NextTab(MESSAGE_CMD,ZGXM_NEXT_TAB);"
+			 "  CloseTab(MESSAGE_CMD,ZGXM_CLOSE_TAB);"
+			 "  Exit(MESSAGE_CMD,ZGXM_EXIT);"
+			 "}"
+			 "Edit {"
+			 "  CopySelection(MESSAGE_CMD,ZGXM_COPY_SEL);"
+			 "  CopyPageURL(MESSAGE_CMD,ZGXM_COPY_URL);"
+			 "}"
+			 "View {"
+			 "  Top(MESSAGE_CMD,ZGXM_TOP);"
+			 "  Bottom(MESSAGE_CMD,ZGXM_BOTTOM);"
+			 "  JSConsole(MESSAGE_CMD,ZGXM_CONSOLE);"
+			 "  ScalableText(MESSAGE_CMD,ZGXM_TTF);"
+			 "  LayoutV3(MESSAGE_CMD,ZGXM_V3);"
+			 "  Multicore(MESSAGE_CMD,ZGXM_MT);"
+			 "}");
+	LBtr(&Fs->win_inhibit, WIf_FOCUS_TASK_MENU);
+}
+
+U0 GxMenuCheck(U8 *path, Bool on)
+{
+	CMenuEntry *e = MenuEntryFind(Fs->cur_menu, path);
+
+	if (e)
+		e->checked = on;
+}
+
+U0 GxMenuSync()
+{
+	GxMenuCheck("View/JSConsole", zinc_con_open);
+	GxMenuCheck("View/ScalableText", zinc_ttf);
+	GxMenuCheck("View/LayoutV3", zinc_v3);
+	GxMenuCheck("View/Multicore", zinc_mt);
+}
+
+U0 GxMenuTabNext()
+{
+	I64 i, n;
+
+	for (n = 1; n < GX_TABS; n++)
+	{
+		i = (gx.tab_cur + n) % GX_TABS;
+		if (gx.tab[i].used)
+		{
+			gx.tab_go = i;
+			return;
+		}
+	}
+}
+
+U0 GxMenuCmd(I64 cmd)
+{
+	I64 view_h = Fs->pix_height - GX_CHROME_H - GX_STATUS_H;
+
+	GxCtxClose;
+
+	switch (cmd)
+	{
+		case ZGXM_BACK:		GxNavTo(StrNew("b"));					break;
+		case ZGXM_FORWARD:	GxNavTo(StrNew("f"));					break;
+		case ZGXM_RELOAD:	GxNavTo(StrNew("r"));					break;
+		case ZGXM_STOP:		gx.cancel = TRUE;						break;
+		case ZGXM_HOME:		GxNavTo(StrNew("zinc:welcome"));		break;
+		case ZGXM_URLBAR:
+			GxFieldBlur;
+			gx.url_focus	= TRUE;
+			gx.url_selall	= TRUE;
+			gx.url_caret	= gx.url_len;
+			break;
+		case ZGXM_NEW_TAB:	gx.tab_new = TRUE;						break;
+		case ZGXM_NEXT_TAB:	GxMenuTabNext;							break;
+		case ZGXM_CLOSE_TAB: gx.tab_close = gx.tab_cur;				break;
+		case ZGXM_EXIT:		gx.quit = TRUE;							break;
+		case ZGXM_COPY_SEL:
+			if (gx.sel_on)
+				GxSelCopy;
+			break;
+		case ZGXM_COPY_URL:	GxClipSet(gx.url);						break;
+		case ZGXM_TOP:		gx.scroll = 0;							break;
+		case ZGXM_BOTTOM:
+			gx.scroll = MaxI64(0, gx.doc_h - view_h);
+			break;
+		case ZGXM_CONSOLE:	GxConsoleShow;							break;
+		case ZGXM_TTF:
+			if (grf_ready)
+			{
+				zinc_ttf = !zinc_ttf;
+				gx.relayout = TRUE;
+			}
+			break;
+		case ZGXM_V3:		Layout3(!zinc_v3);						break;
+		case ZGXM_MT:
+			zinc_mt = !zinc_mt;
+			ZincCfgSave;
+			break;
+	}
+}
+
+public U0 ZincGX(U8 *start_url=NULL)
+{
+	U8	*current, *target, *sub, *meta_url;
+	I64	 msg, a1, a2, view_h, vi, nav_chain = 0, cancel_deadline = 0, ti, tn;
+	I64	 win_cols, win_rows, win_left, win_top;
+	U8	 title[80];
+
+	if (ZincHandOff(start_url))
+		return;
+
+	MemSet(&gx, 0, sizeof(CGxGlobals));
+	zinc_gx_task = Fs;
+	ZincCfgLoad;
+	gx.ops = CAlloc(sizeof(CGxOp) * GX_OPS_MAX);
+	gx.fetch = TRUE;
+	gx.last_wheel = mouse.pos.z;
+	gx.tab_cur = 0;
+	gx.tab[0].used = TRUE;
+	gx.tab_go = -1;
+	gx.tab_close = -1;
+	Fs->task_end_cb = &GxEndCB;
+	http_pool_task = Fs;
+	zinc_defer_ext_js = TRUE;
+	zinc_js_queue_count = 0;
+
+	if (!grf_ready)
+	{
+		I64	 fsz = 0, msz = 0;
+		U8	*fbuf = FileRead("::/System/Gr/UISANS.TTF", &fsz);
+		U8	*mbuf = FileRead("::/System/Gr/UIMONO.TTF", &msz);
+		GrFontInit(fbuf, fsz);
+		GrFontInitInto(&grf_mono_font, 1, mbuf, msz);
+		if (fbuf)
+			Free(fbuf);
+		if (mbuf)
+			Free(mbuf);
+	}
+	if (!zinc_cjk_tried)
+	{
+		I64	 csz = 0;
+		U8	*cbuf = FileRead("::/System/Gr/CJK.TTF", &csz);
+
+		zinc_cjk_tried = TRUE;
+		GrFontInitInto(&grf_cjk, 2, cbuf, csz);
+		if (cbuf)
+			Free(cbuf);
+	}
+	zinc_ttf = grf_ready;
+	zinc_dbg = TRUE;
+
+	AutoComplete(OFF);
+	DocCursor(OFF);
+	DocClear;
+	StrCopy(Fs->task_title, "ZincGX");
+	win_cols = TEXT_COLS * 3 / 4;
+	win_rows = (TEXT_ROWS - 1) * 3 / 4;
+	win_left = (TEXT_COLS - win_cols) / 2;
+	win_top  = (TEXT_ROWS - win_rows) / 2;
+	WinHorz(win_left, win_left + win_cols - 1);
+	WinVert(win_top, win_top + win_rows - 1);
+	Fs->win_inhibit = Fs->win_inhibit | WIF_FOCUS_TASK_MS_L_D;
+	WinFocus;
+	zinc_note[0] = 0;
+	zinc_back_count = 0;
+	zinc_fwd_count	= 0;
+
+	current = StrNew("zinc:welcome");
+	if (start_url)
+		gx.pending_nav = StrNew(start_url);
+
+	Fs->draw_it = &GxDrawIt;
+	GxMenuPush;
+	gx.img_task = GxWorkerSpawn(&GxImgTask, "ZincGX Images");
+
+	while (!gx.quit)
+	{
+		if (zinc_open_req && !gx.fetch && !gx.loading)
+		{
+			Free(gx.pending_nav);
+			gx.pending_nav = StrNew(zinc_open_req);
+			Free(zinc_open_req);
+			zinc_open_req = NULL;
+			gx.tab_new = TRUE;
+		}
+
+		if (gx.img_dirty && !gx.fetch && !gx.loading)
+		{
+			gx.img_dirty = FALSE;
+			GxLayout;
+		}
+
+		if (gx.fetch)
+		{
+			GxCtxClose;
+			GxOpsLock;
+			GxOpsReset;
+			while (gx.img_busy && TaskValidate(gx.img_task))
+				Sleep(5);
+			GxImgCacheFree;
+			GxImgViewFree;
+			GxJsReset;
+			zinc_note[0] = 0;
+			DocClear(Fs->display_doc);
+
+			if (!StrNICompare(current, "zinc:", 5))
+			{
+				if (!StrICompare(current, "zinc:test"))
+					ZincSetPage(current, zinc_testpage);
+				else if (!StrICompare(current, "zinc:hi"))
+					ZincSetPage(current, zinc_hipage);
+				else if (!StrICompare(current, "zinc:css"))
+					ZincSetPage(current, zinc_csspage);
+				else
+					ZincSetPage(current, zinc_welcome);
+				zinc_base_ok = FALSE;
+			}
+			else if (!StrNICompare(current, "data:", 5))
+			{
+				ZincSetPlainPage(current, "");
+				zinc_base_ok = FALSE;
+				gx.iv_dc = GxImgViewCap(DataURIToDC(current, sys_task));
+				if (!gx.iv_dc)
+					StrCopy(zinc_note, "data: URI: not a decodable image.");
+			}
+			else
+			{
+				StrCopy(gx.load_url, current);
+				gx.loading = TRUE;
+				gx.cancel = FALSE;
+				net_abort = FALSE;
+				cancel_deadline = 0;
+				StrCopy(zinc_note, "Loading...");
+				gx.fetch_seq++;
+				gx.load_task = GxWorkerSpawn(&GxFetchTask, "ZincGX Fetch");
+				while (gx.loading)
+				{
+					while (msg = MessageScan(&a1, &a2))
+						if (msg == MESSAGE_MS_L_DOWN)
+						{
+							if (a2 < GX_CHROME_H)
+								gx.cancel = TRUE;
+						}
+						else if (msg == MESSAGE_KEY_DOWN && (a1 == CH_ESC || a1 == CH_SHIFT_ESC))
+							gx.cancel = TRUE;
+						else if (msg == MESSAGE_CMD && a1 == ZGXM_STOP)
+							gx.cancel = TRUE;
+					if (gx.cancel && TaskValidate(gx.load_task))
+					{
+						StrCopy(zinc_note, "Stopping...");
+						net_abort = TRUE;
+						if (!cancel_deadline)
+							cancel_deadline = counts.jiffies + 800 * JIFFY_FREQ / 1000;
+						else if (counts.jiffies > cancel_deadline)
+						{
+							gx.fetch_seq++;
+							gx.load_task = NULL;
+							gx.loading = FALSE;
+							gx_fetch_ok = FALSE;
+						}
+					}
+					else if (!gx.cancel && !TaskValidate(gx.load_task))
+					{
+						gx.loading = FALSE;
+						gx_fetch_ok = FALSE;
+					}
+					Sleep(20);
+				}
+				net_abort = FALSE;
+				if (gx.cancel)
+				{
+					HttpConnsClose;
+					StrCopy(zinc_note, "Cancelled.");
+				}
+				if (gx.cancel)
+					ZincSetPage(current, "<p>Load cancelled.</p>");
+				else if (gx_fetch_ok && gx_fetch_body)
+				{
+					if (gx_fetch_status != 200)
+						StrPrint(zinc_note, "HTTP status %d", gx_fetch_status);
+					if (gx_fetch_final[0] && StrCompare(current, gx_fetch_final))
+					{
+						Free(current);
+						current = StrNew(gx_fetch_final);
+					}
+					zinc_base_ok = (HttpUrlParse(current, &zinc_base) >= 0);
+					if (gx_fetch_img)
+					{
+						ZincSetPlainPage(current, "");
+						gx.iv_dc = GxImgViewDecode(gx_fetch_body, gx_fetch_len);
+						if (!gx.iv_dc)
+							StrCopy(zinc_note,
+								"Image format unsupported ("
+								"WebP not decodable yet).");
+					}
+					else if (gx_fetch_html)
+						ZincSetPage(current, gx_fetch_body);
+					else
+						ZincSetPlainPage(current, gx_fetch_body);
+					if (gx_fetch_trunc)
+					{
+						if (gx_fetch_expect >= 0)
+							StrPrint(zinc_note, "Page TRUNCATED: %d of %d bytes.",
+									 gx_fetch_recv, gx_fetch_expect);
+						else
+							StrPrint(zinc_note, "Page TRUNCATED at %d bytes.",
+									 gx_fetch_recv);
+						JsConsoleAdd("err", zinc_note);
+						NetErr("ZINC GX: page TRUNCATED, %d of %d encoded bytes, "
+							   "%d decoded: %s",
+							   gx_fetch_recv, gx_fetch_expect, gx_fetch_len,
+							   current);
+					}
+				}
+				else
+				{
+					StrCopy(zinc_note, "Fetch failed. See the Network Log.");
+					ZincSetPage(current, "<p>Could not load the page.</p>"
+						"<p>DNS, TCP, TLS or HTTP failed. For https, run "
+						"<b>CryptoSelfTest;</b> once in a terminal.</p>");
+				}
+				Free(gx_fetch_body);
+				gx_fetch_body = NULL;
+			}
+			gx.fetch = FALSE;
+			meta_url = NULL;
+			if (nav_chain < 5)
+				meta_url = GxMetaRefresh(current);
+			if (zinc_js && zinc_js->navigate && nav_chain < 5)
+			{
+				nav_chain++;
+				target = StrNew(zinc_js->navigate);
+				zinc_js->navigate = NULL;
+				if (meta_url)
+					Free(meta_url);
+				Free(current);
+				current = target;
+				gx.fetch = TRUE;
+			}
+			else if (meta_url)
+			{
+				nav_chain++;
+				Free(current);
+				current = meta_url;
+				gx.fetch = TRUE;
+			}
+			else
+			{
+				if (zinc_js)
+					zinc_js->navigate = NULL;
+				nav_chain = 0;
+				GxUrlSet(current);
+				GxLayout;
+				gx.scroll = 0;
+				ZincTitleGet(title, 60);
+				if (title[0])
+					StrPrint(Fs->task_title, "GX:%s", title);
+				else
+					StrCopy(Fs->task_title, "ZincGX");
+				title[44] = 0;
+				StrCopy(gx.tab[gx.tab_cur].title, title);
+				if (zinc_js_queue_count && !gx.js_task)
+					gx.js_task = GxWorkerSpawn(&GxJsFetchTask, "ZincGX JS");
+			}
+			if (gx.fetch)
+				goto gx_next;
+		}
+
+		if (gx.tab_new || gx.tab_go >= 0 || gx.tab_close >= 0)
+		{
+			GxCtxClose;
+			if (gx.tab_new)
+			{
+				ti = -1;
+				for (tn = GX_TABS - 1; tn >= 0 && ti < 0; tn--)
+					if (gx.tab[tn].used && tn + 1 < GX_TABS && !gx.tab[tn + 1].used)
+						ti = tn + 1;
+				if (ti < 0)
+					for (tn = 0; tn < GX_TABS; tn++)
+						if (ti < 0 && !gx.tab[tn].used)
+							ti = tn;
+				if (ti >= 0)
+				{
+					GxTabSaveCur(current);
+					Free(current);
+					gx.tab_cur = ti;
+					gx.tab[ti].used = TRUE;
+					gx.tab[ti].title[0] = 0;
+					current = StrNew("zinc:welcome");
+					gx.fetch = TRUE;
+				}
+			}
+			else if (gx.tab_go >= 0)
+			{
+				if (gx.tab_go != gx.tab_cur && gx.tab_go < GX_TABS &&
+					gx.tab[gx.tab_go].used)
+				{
+					GxTabSaveCur(current);
+					Free(current);
+					gx.tab_cur = gx.tab_go;
+					current = GxTabLoadCur;
+				}
+			}
+			else if (gx.tab_close < GX_TABS && gx.tab[gx.tab_close].used)
+			{
+				tn = 0;
+				for (ti = 0; ti < GX_TABS; ti++)
+					if (gx.tab[ti].used)
+						tn++;
+				if (tn > 1)
+				{
+					if (gx.tab_close == gx.tab_cur)
+					{
+						GxOpsLock;
+						GxOpsReset;
+						while (gx.img_busy && TaskValidate(gx.img_task))
+							Sleep(5);
+						GxImgViewFree;
+						GxImgCacheDropDom;
+						GxJsReset;
+						ZincPageFree;
+						GxOpsUnlock;
+						while (zinc_back_count)
+							Free(zinc_back[--zinc_back_count]);
+						while (zinc_fwd_count)
+							Free(zinc_fwd[--zinc_fwd_count]);
+						Free(current);
+						gx.tab[gx.tab_cur].used = FALSE;
+						gx.tab[gx.tab_cur].title[0] = 0;
+						ti = 0;
+						for (tn = GX_TABS - 1; tn >= 0; tn--)
+							if (gx.tab[tn].used)
+								ti = tn;
+						gx.tab_cur = ti;
+						current = GxTabLoadCur;
+					}
+					else
+						GxTabFree(&gx.tab[gx.tab_close]);
+				}
+			}
+			gx.tab_new = FALSE;
+			gx.tab_go = -1;
+			gx.tab_close = -1;
+			goto gx_next;
+		}
+
+		if (gx.pending_nav)
+		{
+			target = gx.pending_nav;
+			gx.pending_nav = NULL;
+			if (!StrCompare(target, "b"))
+			{
+				Free(target);
+				if (zinc_back_count)
+				{
+					if (zinc_fwd_count < ZINC_HISTORY)
+						zinc_fwd[zinc_fwd_count++] = current;
+					current = zinc_back[--zinc_back_count];
+					gx.fetch = TRUE;
+				}
+			}
+			else if (!StrCompare(target, "f"))
+			{
+				Free(target);
+				if (zinc_fwd_count)
+				{
+					if (zinc_back_count < ZINC_HISTORY)
+						zinc_back[zinc_back_count++] = current;
+					current = zinc_fwd[--zinc_fwd_count];
+					gx.fetch = TRUE;
+				}
+			}
+			else if (!StrCompare(target, "r"))
+			{
+				Free(target);
+				gx.fetch = TRUE;
+			}
+			else
+			{
+				current = ZincNavPush(current, target);
+				gx.fetch = TRUE;
+			}
+			goto gx_next;
+		}
+
+		if (gx.relayout || Fs->pix_width != gx.last_w)
+		{
+			gx.relayout = FALSE;
+			GxLayout;
+		}
+
+		while (gx.js_ran < zinc_js_queue_count && gx.js_done[gx.js_ran])
+		{
+			vi = gx.js_ran++;
+			if (gx.js_body[vi])
+			{
+				if (zinc_js && !JsRun(zinc_js, gx.js_body[vi]))
+					ZincJsNote;
+				Free(gx.js_body[vi]);
+				gx.js_body[vi] = NULL;
+				gx.relayout = TRUE;
+				if (zinc_js && zinc_js->navigate)
+				{
+					GxNavTo(StrNew(zinc_js->navigate));
+					zinc_js->navigate = NULL;
+				}
+			}
+		}
+
+		if (zinc_js && (zinc_js->timers || zinc_js->micro_head))
+		{
+			zinc_js->dom_dirty = FALSE;
+			JsEventLoopPump(zinc_js);
+			if (zinc_js->dom_dirty)
+				gx.relayout = TRUE;
+			if (zinc_js->navigate)
+			{
+				GxNavTo(StrNew(zinc_js->navigate));
+				zinc_js->navigate = NULL;
+			}
+		}
+
+		if (gx.menu_on)
+			GxCtxHover(mouse.pos.x - Fs->pix_left - Fs->scroll_x,
+					   mouse.pos.y - Fs->pix_top - Fs->scroll_y);
+
+		view_h = Fs->pix_height - GX_CHROME_H - GX_STATUS_H;
+		if (mouse.pos.z != gx.last_wheel && zinc_con_open &&
+			mouse.pos.y - Fs->pix_top >= Fs->pix_height - GX_STATUS_H - GxConsoleH())
+		{
+			zinc_con_scroll += (gx.last_wheel - mouse.pos.z) * 3;
+			if (zinc_con_scroll < 0)
+				zinc_con_scroll = 0;
+			if (zinc_con_scroll > js_con_n)
+				zinc_con_scroll = js_con_n;
+			gx.last_wheel = mouse.pos.z;
+		}
+		else if (mouse.pos.z != gx.last_wheel)
+		{
+			if (sys_focus_task == Fs)
+			{
+				gx.scroll += (mouse.pos.z - gx.last_wheel) * 40;
+				gx.scroll = ClampI64(gx.scroll, 0, MaxI64(0, gx.doc_h - view_h));
+			}
+			gx.last_wheel = mouse.pos.z;
+		}
+
+		if (gx.sel_drag)
+		{
+			gx.sel_x1 = mouse.pos.x - Fs->pix_left - Fs->scroll_x;
+			gx.sel_y1 = mouse.pos.y - Fs->pix_top - Fs->scroll_y
+						- GX_CHROME_H + gx.scroll;
+			if (!mouse.lb)
+			{
+				gx.sel_drag = FALSE;
+				if (AbsI64(gx.sel_x1 - gx.sel_x0) +
+					AbsI64(gx.sel_y1 - gx.sel_y0) < 8)
+					gx.sel_on = FALSE;
+			}
+		}
+
+		while (msg = MessageScan(&a1, &a2))
+		{
+			switch (msg)
+			{
+				case MESSAGE_MS_L_DOWN:
+					if (GxClick(a1, a2))
+						break;
+					gx.sel_x0 = mouse.pos.x - Fs->pix_left - Fs->scroll_x;
+					gx.sel_y0 = mouse.pos.y - Fs->pix_top - Fs->scroll_y
+								- GX_CHROME_H + gx.scroll;
+					if (gx.sel_y0 > 0)
+					{
+						gx.sel_x1  = gx.sel_x0;
+						gx.sel_y1  = gx.sel_y0;
+						gx.sel_drag = TRUE;
+						gx.sel_on	= TRUE;
+					}
+					else
+						gx.sel_on = FALSE;
+					break;
+				case MESSAGE_MS_R_DOWN:
+					GxRightClick(a1, a2);
+					break;
+				case MESSAGE_CMD:
+					GxMenuCmd(a1);
+					break;
+				case MESSAGE_KEY_DOWN:
+					if (GxCtxKey(a1, a2))
+						break;
+					if (gx.field_op)
+					{
+						if (a1 == '\n')
+						{
+							GxFieldCommit;
+							sub = ZincFormSubmitUrl(gx.field_op->node);
+							gx.field_op = NULL;
+							if (sub)
+								GxNavTo(sub);
+						}
+						else if (a1 == CH_ESC)
+							GxFieldBlur;
+						else if (a1 == CH_BACKSPACE)
+						{
+							if (gx.field_selall)
+							{
+								gx.field_len = 0;
+								gx.field_caret = 0;
+								gx.field_buf[0] = 0;
+								gx.field_selall = FALSE;
+							}
+							else if (gx.field_caret > 0)
+								GxFieldDel(--gx.field_caret);
+						}
+						else if (a1 == 1)
+							gx.field_selall = TRUE;
+						else if (a1 == 3)
+						{
+							MemCopy(gx_clip, gx.field_buf, gx.field_len + 1);
+							gx_clip_len = gx.field_len;
+						}
+						else if (a1 == 24)
+						{
+							MemCopy(gx_clip, gx.field_buf, gx.field_len + 1);
+							gx_clip_len = gx.field_len;
+							gx.field_len = 0;
+							gx.field_caret = 0;
+							gx.field_buf[0] = 0;
+							gx.field_selall = FALSE;
+						}
+						else if (a1 == 22)
+						{
+							if (gx.field_selall)
+							{
+								gx.field_len = 0;
+								gx.field_caret = 0;
+								gx.field_buf[0] = 0;
+								gx.field_selall = FALSE;
+							}
+							for (vi = 0; vi < gx_clip_len; vi++)
+								if (' ' <= gx_clip[vi] < 0x7F)
+									GxFieldIns(gx_clip[vi]);
+						}
+						else if (' ' <= a1 < 0x7F)
+							GxFieldIns(a1);
+						else if (!a1)
+							switch (a2.u8[0])
+							{
+								case SC_CURSOR_LEFT:
+									gx.field_selall = FALSE;
+									gx.field_caret = MaxI64(0, gx.field_caret - 1);
+									break;
+								case SC_CURSOR_RIGHT:
+									gx.field_selall = FALSE;
+									gx.field_caret = MinI64(gx.field_len, gx.field_caret + 1);
+									break;
+								case SC_HOME:
+									gx.field_caret = 0;
+									break;
+								case SC_END:
+									gx.field_caret = gx.field_len;
+									break;
+								case SC_DELETE:
+									if (gx.field_selall)
+									{
+										gx.field_len = 0;
+										gx.field_caret = 0;
+										gx.field_buf[0] = 0;
+										gx.field_selall = FALSE;
+									}
+									else
+										GxFieldDel(gx.field_caret);
+									break;
+							}
+					}
+					else if (gx.url_focus)
+					{
+						if (a1 == '\n')
+						{
+							gx.url_focus = FALSE;
+							GxNavTo(ZincResolveInput(gx.url));
+						}
+						else if (a1 == CH_BACKSPACE)
+						{
+							if (gx.url_selall)
+							{
+								gx.url_len = 0;
+								gx.url_caret = 0;
+								gx.url[0] = 0;
+								gx.url_selall = FALSE;
+							}
+							else if (gx.url_caret > 0)
+								GxUrlDel(--gx.url_caret);
+						}
+						else if (a1 == CH_ESC)
+							gx.url_focus = FALSE;
+						else if (a1 == 1)
+							gx.url_selall = TRUE;
+						else if (a1 == 3)
+						{
+							MemCopy(gx_clip, gx.url, gx.url_len + 1);
+							gx_clip_len = gx.url_len;
+							ClipDel;
+							DocPrint(sys_clip_doc, "%s", gx.url);
+						}
+						else if (a1 == 22)
+						{
+							if (gx.url_selall)
+							{
+								gx.url_len = 0;
+								gx.url_caret = 0;
+								gx.url[0] = 0;
+								gx.url_selall = FALSE;
+							}
+							gx_clip_len = GxClipTextGet(gx_clip, 250);
+							for (vi = 0; vi < gx_clip_len; vi++)
+								if (' ' <= gx_clip[vi] < 0x7F)
+									GxUrlIns(gx_clip[vi]);
+						}
+						else if (' ' <= a1 < 0x7F)
+							GxUrlIns(a1);
+						else if (!a1)
+							switch (a2.u8[0])
+							{
+								case SC_CURSOR_LEFT:
+									gx.url_selall = FALSE;
+									gx.url_caret = MaxI64(0, gx.url_caret - 1);
+									break;
+								case SC_CURSOR_RIGHT:
+									gx.url_selall = FALSE;
+									gx.url_caret = MinI64(gx.url_len, gx.url_caret + 1);
+									break;
+								case SC_HOME:
+									gx.url_caret = 0;
+									break;
+								case SC_END:
+									gx.url_caret = gx.url_len;
+									break;
+								case SC_DELETE:
+									if (gx.url_selall)
+									{
+										gx.url_len = 0;
+										gx.url_caret = 0;
+										gx.url[0] = 0;
+										gx.url_selall = FALSE;
+									}
+									else
+										GxUrlDel(gx.url_caret);
+									break;
+							}
+					}
+					else switch (a1)
+					{
+						case CH_ESC:
+						case CH_SHIFT_ESC:
+							if (zinc_con_open)
+							{
+								zinc_con_open = FALSE;
+								zinc_con_scroll = 0;
+								break;
+							}
+							gx.quit = TRUE;
+							break;
+						case '`':
+							GxConsoleShow;
+							break;
+						case 3:
+							if (gx.sel_on)
+								GxSelCopy;
+							break;
+						case 12:
+							gx.url_focus = TRUE;
+							gx.url_selall = TRUE;
+							gx.url_caret = gx.url_len;
+							break;
+						case 'b':
+							GxNavTo(StrNew("b"));
+							break;
+						case 'f':
+							GxNavTo(StrNew("f"));
+							break;
+						case 'r':
+							GxNavTo(StrNew("r"));
+							break;
+						case 'h':
+							GxNavTo(StrNew("zinc:welcome"));
+							break;
+						case 0:
+							switch (a2.u8[0])
+							{
+								case SC_CURSOR_UP:
+									gx.scroll = MaxI64(0, gx.scroll - 40);
+									break;
+								case SC_CURSOR_DOWN:
+									gx.scroll = ClampI64(gx.scroll + 40, 0, MaxI64(0, gx.doc_h - view_h));
+									break;
+								case SC_PAGE_UP:
+									gx.scroll = MaxI64(0, gx.scroll - view_h + 20);
+									break;
+								case SC_PAGE_DOWN:
+									gx.scroll = ClampI64(gx.scroll + view_h - 20, 0, MaxI64(0, gx.doc_h - view_h));
+									break;
+								case SC_HOME:
+									gx.scroll = 0;
+									break;
+								case SC_END:
+									gx.scroll = MaxI64(0, gx.doc_h - view_h);
+									break;
+							}
+							break;
+					}
+					break;
+			}
+		}
+gx_next:
+		GxMenuSync;
+		Sleep(20);
+	}
+
+	zinc_gx_task = NULL;
+	if (zinc_open_req)
+	{
+		Free(zinc_open_req);
+		zinc_open_req = NULL;
+	}
+	Fs->draw_it = NULL;
+	MenuPop;
+	http_pool_task = NULL;
+	while (gx.img_busy && TaskValidate(gx.img_task))
+		Sleep(5);
+	if (TaskValidate(gx.img_task))
+		Kill(gx.img_task);
+	if (TaskValidate(gx.load_task))
+		Kill(gx.load_task);
+	GxJsReset;
+	zinc_defer_ext_js = FALSE;
+	GxOpsLock;
+	GxOpsReset;
+	GxImgCacheFree;
+	GxImgViewFree;
+	for (ti = 0; ti < GX_TABS; ti++)
+		if (ti != gx.tab_cur)
+			GxTabFree(&gx.tab[ti]);
+	Free(gx.ops);
+	ZincPageFree;
+	Free(current);
+	while (zinc_back_count)
+		Free(zinc_back[--zinc_back_count]);
+	while (zinc_fwd_count)
+		Free(zinc_fwd[--zinc_fwd_count]);
+	DocCursor(ON);
+	DocClear;
+	"ZincGX closed.\n";
+}
+
+public U0 ZincV3(U8 *start_url=NULL)
+{
+	if (ZincHandOff(start_url))
+		return;
+	zinc_v3 = TRUE;
+	ZincGX(start_url);
+	zinc_v3 = FALSE;
+}

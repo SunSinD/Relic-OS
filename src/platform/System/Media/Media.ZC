@@ -1,0 +1,859 @@
+//Container-level helpers over the demuxers.
+
+public CMediaCtx *MediaOpen(U8 *filename)
+{//Reads the whole file. Caller frees with MediaClose.
+	CMediaCtx	*m = CAlloc(sizeof(CMediaCtx));
+	U8			*buf;
+	I64			 size = 0;
+
+	buf = FileRead(filename, &size);
+	if (!buf)
+	{
+		Free(m);
+		return NULL;
+	}
+	if (!MkvOpen(m, buf, size) && !MP4Open(m, buf, size))
+	{
+		Free(buf);
+		Free(m);
+		return NULL;
+	}
+
+	return m;
+}
+
+public Bool MediaNext(CMediaCtx *m, CMediaPacket *pkt)
+{//Next packet in stream order, whichever container this is.
+	if (m->container == MEDIA_CONT_MP4)
+		return MP4Next(m, pkt);
+
+	return MkvNext(m, pkt);
+}
+
+public U0 MediaVideoDrop(CMediaCtx *m)
+{//Discard a decoded frame that was never presented.
+	if (!m)
+		return;
+	if (m->pend_dc)
+		DCDel(m->pend_dc);
+	m->pend_dc    = NULL;
+	m->pend_codec = MEDIA_CODEC_NONE;
+}
+
+public U0 MediaRewind(CMediaCtx *m)
+{
+	MediaVideoDrop(m);
+	H264PlayReset(m->h264ctx);
+	Av1PlayReset(m->av1ctx);
+	if (m->container == MEDIA_CONT_MP4)
+		MP4Rewind(m);
+	else
+		MkvRewind(m);
+}
+
+public U0 MediaClose(CMediaCtx *m)
+{
+	if (!m)
+		return;
+	MediaVideoDrop(m);
+	if (m->vctx)
+		Vp8CtxClose(m->vctx);
+	if (m->v9ctx)
+		Vp9CtxClose(m->v9ctx);
+	if (m->h264ctx)
+		H264PlayClose(m->h264ctx);
+	if (m->av1ctx)
+		Av1PlayClose(m->av1ctx);
+	if (m->container == MEDIA_CONT_MP4)
+		MP4Free(m);
+	Free(m->buf);
+	Free(m);
+}
+
+public U0 MediaRep(U8 *filename)
+{//Track table, then a full demux pass counting packets per kind.
+	CMediaCtx	*m = MediaOpen(filename);
+	CMediaPacket p;
+	I64			 i, n = 0, vid = 0, aud = 0, keys = 0;
+
+	if (!m)
+	{
+		"MediaRep: cannot open \"%s\".\n", filename;
+		return;
+	}
+
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	if (m->container == MEDIA_CONT_MP4)
+	{
+		"ISOBMFF, %d track(s), %.2fs\n", m->track_count, m->duration;
+		for (i = 0; i < m->track_count; i++)
+			"  track %d %s %dx%d %dHz ch%d  %d sample(s)\n", m->track[i].num,
+				m->track[i].codec_name, m->track[i].width, m->track[i].height,
+				m->track[i].rate, m->track[i].channels,
+				m->track[i].sample_count;
+	}
+	else
+		MkvRep(m);
+
+	while (MediaNext(m, &p))
+	{
+		n++;
+		if (p.key)
+			keys++;
+		i = MediaTrackByNum(m, p.track);
+		if (i >= 0)
+		{
+			if (m->track[i].type == MEDIA_TRACK_VIDEO)
+				vid++;
+			else if (m->track[i].type == MEDIA_TRACK_AUDIO)
+				aud++;
+		}
+	}
+
+	"packets %d  video %d  audio %d  key %d  last %.2fs\n",
+		n, vid, aud, keys, p.time;
+	if (m->laced_skipped)
+		"%d laced block(s) skipped; Vorbis needs lacing support\n",
+			m->laced_skipped;
+
+	MediaClose(m);
+}
+
+public Bool MediaSeekKey(CMediaCtx *m, I64 track_num, F64 t)
+{
+	CMediaTrack	*tr, *other;
+	I64			 ti, i, best = -1;
+	F64			 key_time;
+
+	if (!m || m->container != MEDIA_CONT_MP4)
+		return FALSE;
+	ti = MediaTrackByNum(m, track_num);
+	if (ti < 0)
+		return FALSE;
+	tr = &m->track[ti];
+	if (!tr->samples || tr->sample_count < 1)
+		return FALSE;
+	for (i = 0; i < tr->sample_count; i++)
+		if (tr->samples[i].key && tr->samples[i].time <= t)
+			best = i;
+	if (best < 0)
+		best = 0;
+	key_time = tr->samples[best].time;
+
+	MediaVideoDrop(m);
+	H264PlayReset(m->h264ctx);
+	Av1PlayReset(m->av1ctx);
+	for (i = 0; i < m->track_count; i++)
+	{
+		other = &m->track[i];
+		if (!other->valid || !other->samples)
+			goto next_track;
+		if (i == ti)
+			other->sample_pos = best;
+		else
+		{
+			other->sample_pos = 0;
+			while (other->sample_pos < other->sample_count &&
+				   other->samples[other->sample_pos].time < key_time)
+				other->sample_pos++;
+		}
+next_track:;
+	}
+
+	return TRUE;
+}
+
+public U8 *MediaAv1Why(CMediaCtx *m, I64 track_num)
+{//What stops an AV1 track from playing, or NULL. The whole track's frame
+//headers are walked, since a file whose first frame is a key frame and whose
+//rest are not would otherwise open, show one picture and stop. Block level
+//refusals still only surface at decode. The demux cursor is left at the start.
+	CMediaPacket p;
+	CAv1Play	*a;
+	U8			*why;
+	I64			 ti, r;
+
+	if (!m)
+		return NULL;
+	ti = MediaTrackByNum(m, track_num);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_AV1)
+		return NULL;
+	if (m->track[ti].codec_priv_len > 0)
+	{
+		why = Av1ConfigWhy(m->track[ti].codec_priv,
+						   m->track[ti].codec_priv_len);
+		if (why)
+			return why;
+	}
+	a = Av1PlayOpen;
+	if (!a)
+		return "more memory than there is";
+	Av1PlayConfig(a, m->track[ti].codec_priv, m->track[ti].codec_priv_len);
+	why = NULL;
+	MediaRewind(m);
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != track_num)
+			goto next_scan;
+		r = Av1PlayScan(a, p.data, p.size);
+		if (r)
+		{
+			why = Av1Why(r);
+			break;
+		}
+next_scan:;
+	}
+	Av1PlayClose(a);
+	MediaRewind(m);
+
+	return why;
+}
+
+U32 *MediaDecodeAacTrack(CMediaCtx *m, CMediaTrack *t, I64 *_count, I64 *_rate)
+{//Whole AAC-LC track as interleaved 16-bit stereo frames. Caller frees.
+	CAacDec		*d = AacOpen;
+	CMediaPacket p;
+	U32			*frames;
+	I64			 cap, got = 0, i, l, r, skip, src, n;
+
+	*_count = 0;
+	*_rate  = 0;
+	if (!d)
+		return NULL;
+	if (!AacConfig(d, t->codec_priv, t->codec_priv_len))
+	{
+		AacClose(d);
+		return NULL;
+	}
+	//edts says how much of the encoder's priming to drop. It is 1024 samples
+	//on a file ffmpeg muxed and 0 on one that carries no edit list, so the
+	//delay is read from the container rather than assumed.
+	skip   = ToI64(t->time_shift * d->rate);
+	cap    = d->rate * 8;
+	frames = MAlloc(cap * sizeof(U32));
+	if (!frames)
+	{
+		AacClose(d);
+		return NULL;
+	}
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != t->num)
+			goto next_pkt;
+		if (AacDecodeFrame(d, p.data, p.size) < 0)
+			goto next_pkt;
+		AacRender(d);
+		n   = AAC_FRAME_LEN;
+		src = 0;
+		if (skip > 0)
+		{
+			if (skip >= n)
+			{
+				skip -= n;
+				goto next_pkt;
+			}
+			src  = skip;
+			n   -= skip;
+			skip = 0;
+		}
+		if (got + n > cap)
+		{
+			cap    = (got + n) * 2;
+			frames = ReAlloc(frames, cap * sizeof(U32));
+			if (!frames)
+				break;
+		}
+		for (i = 0; i < n; i++)
+		{
+			l = ToI64(d->ch[0].out[src + i] * 32767.0);
+			if (d->channels > 1)
+				r = ToI64(d->ch[1].out[src + i] * 32767.0);
+			else
+				r = l;
+			if (l >  32767) l =  32767;
+			if (l < -32768) l = -32768;
+			if (r >  32767) r =  32767;
+			if (r < -32768) r = -32768;
+			frames[got + i] = (l & 0xFFFF) | (r << 16);
+		}
+		got += n;
+next_pkt:;
+	}
+	*_rate = d->rate;
+	AacClose(d);
+	if (!frames)
+		return NULL;
+	*_count = got;
+	if (!got)
+	{
+		Free(frames);
+		return NULL;
+	}
+
+	return frames;
+}
+
+public U32 *MediaDecodeAudio(U8 *filename, I64 *_count, I64 *_rate)
+{//Whole audio track as interleaved 16-bit stereo frames. Caller frees.
+	CMediaCtx	*m = MediaOpen(filename);
+	CMediaPacket p;
+	CMediaTrack	*t;
+	F64			*pl, *pr;
+	U32			*frames;
+	I64			 ti, n, i, cap, count, got = 0;
+	I64			 l, r;
+
+	*_count = 0;
+	*_rate  = 0;
+	if (!m)
+		return NULL;
+
+	ti = MediaTrackFind(m, MEDIA_TRACK_AUDIO);
+	if (ti < 0)
+	{
+		MediaClose(m);
+		return NULL;
+	}
+	t = &m->track[ti];
+	if (t->codec == MEDIA_CODEC_AAC)
+	{
+		frames = MediaDecodeAacTrack(m, t, _count, _rate);
+		MediaClose(m);
+		return frames;
+	}
+	if (t->codec != MEDIA_CODEC_VORBIS)
+	{
+		MediaClose(m);
+		return NULL;
+	}
+
+	if (!MediaVorbisInit(t))
+	{
+		MediaClose(m);
+		return NULL;
+	}
+
+	//blocksize1 is the largest window a packet can produce
+	n      = ogg_blocksize1;
+	pl     = MAlloc(n * sizeof(F64));
+	pr     = MAlloc(n * sizeof(F64));
+	cap    = ogg_rate * 8;
+	frames = MAlloc(cap * sizeof(U32));
+
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != t->num)
+			goto next_pkt;
+		if (!MediaVorbisDecode(&p, pl, pr, &count))
+			goto next_pkt;
+		if (got + count > cap)
+		{//grow rather than truncate: a long track is still one allocation
+			cap    = (got + count) * 2;
+			frames = ReAlloc(frames, cap * sizeof(U32));
+			if (!frames)
+				break;
+		}
+		for (i = 0; i < count; i++)
+		{
+			l = ToI64(pl[i] * 32767.0);
+			if (t->channels > 1)
+				r = ToI64(pr[i] * 32767.0);
+			else
+				r = l;
+			if (l >  32767)	l =  32767;
+			if (l < -32768)	l = -32768;
+			if (r >  32767)	r =  32767;
+			if (r < -32768)	r = -32768;
+			frames[got + i] = (l & 0xFFFF) | (r << 16);
+		}
+		got += count;
+next_pkt:;
+	}
+
+	*_count = got;
+	*_rate  = ogg_rate;
+	Free(pl);
+	Free(pr);
+	MediaClose(m);
+	if (!got)
+	{
+		Free(frames);
+		return NULL;
+	}
+
+	return frames;
+}
+
+public I64 MediaPlayAudio(U8 *filename)
+{//Returns the voice handle, or -1. The PCM stays live: AudioSFXPlayRef does
+//not copy.
+	U32	*frames;
+	I64	 count = 0, rate = 0;
+
+	frames = MediaDecodeAudio(filename, &count, &rate);
+	if (!frames)
+	{
+		"MediaPlayAudio: no decodable audio in \"%s\".\n", filename;
+		return -1;
+	}
+	"MediaPlayAudio: %d frames at %dHz\n", count, rate;
+
+	return AudioSFXPlayRef(frames, count, rate);
+}
+
+public Bool MediaVideoDecode(CMediaCtx *m, I64 track_num, F64 *_time)
+{//Next displayable video frame into the codec's planes, without converting it
+//to pixels. MediaVideoPresent turns it into a DC. A player that is behind
+//decodes through the frames it drops without paying for the conversion.
+//
+//MJPEG frames are whole JPEGs and all intra, so they are decoded here and the
+//DC is held. A VP8 or VP9 frame that decodes but is not shown updates
+//references only and is skipped.
+	CMediaPacket p;
+	CDC			*dc;
+	I64			 ti, codec = MEDIA_CODEC_NONE;
+
+	*_time = 0.0;
+	MediaVideoDrop(m);
+	ti = MediaTrackByNum(m, track_num);
+	if (ti >= 0)
+		codec = m->track[ti].codec;
+	MemSet(&p, 0, sizeof(CMediaPacket));
+
+	while (MediaNext(m, &p))
+	{
+		if (p.track != track_num)
+			goto next_frame;
+
+		if (codec == MEDIA_CODEC_MJPEG)
+		{
+			dc = JPGReadBuf(p.data, p.size, NULL);
+			if (!dc)
+				goto next_frame;
+			m->pend_dc = dc;
+		}
+		else if (codec == MEDIA_CODEC_H264)
+		{
+			if (!m->h264ctx)
+			{
+				m->h264ctx = H264PlayOpen;
+				H264PlayConfig(m->h264ctx, m->track[ti].codec_priv,
+							   m->track[ti].codec_priv_len);
+				H264PlaySetReorder(m->h264ctx, m->track[ti].reorder);
+			}
+			//B pictures arrive out of display order. A picture that decodes
+			//but is still held is not a failure and not the end of the
+			//stream: take the next packet.
+			if (!H264PlayDecodeRaw(m->h264ctx, p.data, p.size, p.time))
+				goto next_frame;
+			m->pend_codec = codec;
+			*_time        = H264PlayOutTime(m->h264ctx);
+
+			return TRUE;
+		}
+		//Every AV1 frame this decoder accepts is intra, so nothing carries
+		//between them but the sequence header.
+		else if (codec == MEDIA_CODEC_AV1)
+		{
+			if (!m->av1ctx)
+			{
+				m->av1ctx = Av1PlayOpen;
+				Av1PlayConfig(m->av1ctx, m->track[ti].codec_priv,
+							  m->track[ti].codec_priv_len);
+			}
+			if (!Av1PlayDecodeRaw(m->av1ctx, p.data, p.size) ||
+				!Av1PlayShown(m->av1ctx))
+				goto next_frame;
+		}
+		//Persistent context: reference planes and entropy state survive between
+		//frames.
+		else if (codec == MEDIA_CODEC_VP9)
+		{
+			if (!m->v9ctx)
+				m->v9ctx = Vp9CtxOpen;
+			if (!Vp9CtxDecodeRaw(m->v9ctx, p.data, p.size) ||
+				!Vp9CtxShown(m->v9ctx))
+				goto next_frame;
+		}
+		else
+		{
+			if (!m->vctx)
+				m->vctx = Vp8CtxOpen;
+			if (!Vp8CtxDecodeRaw(m->vctx, p.data, p.size) ||
+				!Vp8CtxShown(m->vctx))
+				goto next_frame;
+		}
+		m->pend_codec = codec;
+		*_time        = p.time;
+
+		return TRUE;
+next_frame:;
+	}
+
+	//Out of packets, but the reorder queue still holds the last pictures. Only
+	//for the track being decoded: another track's request must not drain them.
+	if (codec == MEDIA_CODEC_H264 && m->h264ctx && H264PlayFlush(m->h264ctx))
+	{
+		m->pend_codec = MEDIA_CODEC_H264;
+		*_time        = H264PlayOutTime(m->h264ctx);
+
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+public Bool MediaVideoPresentInto(CMediaCtx *m, CDC **_dc)
+{
+	U32	*argb;
+	CDC	*dc;
+	I64	 w = 0, h = 0, codec;
+
+	if (!m || !_dc)
+		return FALSE;
+	codec         = m->pend_codec;
+	m->pend_codec = MEDIA_CODEC_NONE;
+	if (codec == MEDIA_CODEC_MJPEG)
+	{//A JPEG decodes into a DC of its own, so the buffer is replaced.
+		if (!m->pend_dc)
+			return FALSE;
+		DCDel(*_dc);
+		*_dc       = m->pend_dc;
+		m->pend_dc = NULL;
+
+		return TRUE;
+	}
+	if (codec == MEDIA_CODEC_H264)
+		argb = H264PlayArgb(m->h264ctx, &w, &h);
+	else if (codec == MEDIA_CODEC_AV1)
+		argb = Av1PlayArgb(m->av1ctx, &w, &h);
+	else if (codec == MEDIA_CODEC_VP9)
+		argb = Vp9CtxArgb(m->v9ctx, &w, &h);
+	else if (codec == MEDIA_CODEC_VP8)
+		argb = Vp8CtxArgb(m->vctx, &w, &h);
+	else
+		return FALSE;
+	if (!argb || w < 1 || h < 1)
+		return FALSE;
+	dc = *_dc;
+	if (!dc || dc->width != w || dc->height != h)
+	{
+		DCDel(dc);
+		dc   = DCNew(w, h);
+		*_dc = dc;
+		if (!dc)
+			return FALSE;
+	}
+	WEBPArgbIntoDC(dc, argb, w, h, FALSE);
+
+	return TRUE;
+}
+
+public CDC *MediaVideoPresent(CMediaCtx *m)
+{//The frame MediaVideoDecode last accepted, as a DC the caller owns and
+//DCDels. NULL when nothing is pending.
+	CDC *dc = NULL;
+
+	if (!MediaVideoPresentInto(m, &dc))
+		return NULL;
+
+	return dc;
+}
+
+public CDC *MediaVideoNext(CMediaCtx *m, I64 track_num, F64 *_time)
+{//Next decodable video frame, as a DC the caller owns and DCDels.
+	CDC *dc;
+
+	while (MediaVideoDecode(m, track_num, _time))
+	{
+		dc = MediaVideoPresent(m);
+		if (dc)
+			return dc;
+	}
+	*_time = 0.0;
+
+	return NULL;
+}
+
+public U0 MediaH264Sum(U8 *filename, I64 frames=8)
+{
+	CMediaCtx	*m = MediaOpen(filename);
+	CH264Play	*p;
+	CMediaPacket pk;
+	U32			*argb;
+	I64			 ti, w = 0, h = 0, n = 0, x, y, sy, su, sv;
+
+	if (!m)
+	{
+		"MediaH264Sum: cannot open \"%s\".\n", filename;
+		return;
+	}
+	ti = MediaTrackFind(m, MEDIA_TRACK_VIDEO);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_H264)
+	{
+		"MediaH264Sum: no H.264 track.\n";
+		MediaClose(m);
+		return;
+	}
+	p = H264PlayOpen();
+	H264PlayConfig(p, m->track[ti].codec_priv, m->track[ti].codec_priv_len);
+	MemSet(&pk, 0, sizeof(CMediaPacket));
+	while (n < frames && MediaNext(m, &pk))
+	{
+		if (pk.track != m->track[ti].num)
+			goto next_sum;
+		argb = H264PlayDecode(p, pk.data, pk.size, &w, &h);
+		if (!argb)
+			goto next_sum;
+		sy = 0;
+		su = 0;
+		sv = 0;
+		for (y = 0; y < h; y++)
+			for (x = 0; x < w; x++)
+				sy += p->dec->pic[0][y * p->dec->stride[0] + x];
+		for (y = 0; y < h / 2; y++)
+			for (x = 0; x < w / 2; x++)
+			{
+				su += p->dec->pic[1][y * p->dec->stride[1] + x];
+				sv += p->dec->pic[2][y * p->dec->stride[2] + x];
+			}
+		"%d %dx%d Y %d U %d V %d mbs %d\n", n, w, h, sy, su, sv, p->dec->mbs;
+		n++;
+next_sum:;
+	}
+	H264PlayClose(p);
+	MediaClose(m);
+}
+
+public U0 MediaH264Rep(U8 *filename)
+{//Parameter sets and the first slice headers of an H.264 track. Cross-checked
+//against ffmpeg's trace_headers by utils/h264host/check.sh.
+	CMediaCtx	*m = MediaOpen(filename);
+	CH264Ctx	*h;
+	CH264SPS	*s;
+	CH264Slice	 sl;
+	CMediaPacket p;
+	I64			 ti, i, off, nlen, nal, rl, n = 0;
+	U8			*d, kind;
+
+	if (!m)
+	{
+		"MediaH264Rep: cannot open \"%s\".\n", filename;
+		return;
+	}
+	ti = MediaTrackFind(m, MEDIA_TRACK_VIDEO);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_H264)
+	{
+		"MediaH264Rep: no H.264 track.\n";
+		MediaClose(m);
+		return;
+	}
+
+	h = H264Open;
+	H264ParseAvcC(h, m->track[ti].codec_priv, m->track[ti].codec_priv_len);
+	s = H264ActiveSPS(h);
+	if (!s)
+	{
+		"MediaH264Rep: no sequence parameter set.\n";
+		H264Close(h);
+		MediaClose(m);
+		return;
+	}
+	"profile %d level %d  %dx%d (%d x %d mb)  refs %d  poc type %d\n",
+		s->profile, s->level, s->width, s->height, s->mb_width, s->mb_height,
+		s->max_ref_frames, s->poc_type;
+	"cabac %d  8x8 transform %d  deblock ctrl %d\n", h->pps[0].cabac,
+		h->pps[0].transform_8x8, h->pps[0].deblock_control;
+
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != m->track[ti].num)
+			goto next_264;
+		off = 0;
+		while (off + h->nal_len_size <= p.size)
+		{
+			nlen = 0;
+			for (i = 0; i < h->nal_len_size; i++)
+				nlen = nlen << 8 | p.data[off + i];
+			off += h->nal_len_size;
+			if (nlen < 1 || off + nlen > p.size)
+				break;
+			d   = p.data + off;
+			nal = d[0] & 0x1F;
+			if (nal == H264_NAL_SLICE || nal == H264_NAL_IDR)
+			{
+				rl = H264Rbsp(h, d, nlen);
+				if (H264ParseSliceHeader(h, h->rbsp, rl, &sl) && n < 8)
+				{
+					kind = 'I';
+					if (sl.type == H264_SLICE_P)
+						kind = 'P';
+					else if (sl.type == H264_SLICE_B)
+						kind = 'B';
+					"  slice %2d %c  frame_num %d  poc %d  qp %d\n", n,
+						kind, sl.frame_num, sl.poc_lsb, sl.qp;
+				}
+				n++;
+			}
+			off += nlen;
+		}
+next_264:;
+	}
+
+	"%d slice header(s)\n", n;
+	H264Close(h);
+	MediaClose(m);
+}
+
+public U0 MediaVp9Rep(U8 *filename)
+{//Per-frame VP9 header fields for the video track. Cross-checked against
+//ffmpeg's trace_headers bitstream filter.
+	CMediaCtx	*m = MediaOpen(filename);
+	CMediaPacket p;
+	CVp9Dec		*d;
+	I64			 ti, n = 0, bad = 0;
+	U8			 kind;
+
+	if (!m)
+	{
+		"MediaVp9Rep: cannot open \"%s\".\n", filename;
+		return;
+	}
+	ti = MediaTrackFind(m, MEDIA_TRACK_VIDEO);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_VP9)
+	{
+		"MediaVp9Rep: no VP9 track.\n";
+		MediaClose(m);
+		return;
+	}
+
+	d = CAlloc(sizeof(CVp9Dec));
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != m->track[ti].num)
+			goto next_9;
+		if (!Vp9FrameHeader(d, p.data, p.size))
+		{
+			bad++;
+			if (bad <= 4)
+				"%3d rejected, stage %d\n", n, d->fail;
+		}
+		else if (n < 8)
+		{
+			kind = 'i';
+			if (d->keyframe)
+				kind = 'K';
+			"%3d %c %dx%d q %d lf %d/%d tiles %d/%d tx %d hdr %d/%d\n", n,
+				kind, d->w, d->h, d->yac_qi, d->filt_level, d->filt_sharp,
+				d->log2_tile_cols, d->log2_tile_rows, d->txfmmode,
+				d->uncompressed_size, d->header_size;
+		}
+		n++;
+next_9:;
+	}
+
+	"frames %d  rejected %d\n", n, bad;
+	Free(d);
+	MediaClose(m);
+}
+
+public U0 MediaVp8Hash(U8 *filename)
+{//Per-frame plane hash for the video track. Compare against
+//utils/vp8hash.py, which hashes ffmpeg's yuv420p output the same way.
+	CMediaCtx	*m = MediaOpen(filename);
+	CMediaPacket p;
+	CVp8Ctx		*c;
+	I64			 ti, n = 0;
+	U8			 shown;
+
+	if (!m)
+	{
+		"MediaVp8Hash: cannot open \"%s\".\n", filename;
+		return;
+	}
+	ti = MediaTrackFind(m, MEDIA_TRACK_VIDEO);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_VP8)
+	{
+		"MediaVp8Hash: no VP8 track.\n";
+		MediaClose(m);
+		return;
+	}
+
+	c = Vp8CtxOpen;
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != m->track[ti].num)
+			goto next_h;
+		if (!Vp8CtxDecodeRaw(c, p.data, p.size))
+			"%3d FAIL stage %d row %d\n", n, Vp8CtxFail(c), Vp8CtxFailRow(c);
+		else
+		{
+			shown = '-';
+			if (Vp8CtxShown(c))
+				shown = 'S';
+			"%3d %c %016X\n", n, shown, Vp8CtxHash(c);
+		}
+		n++;
+next_h:;
+	}
+	Vp8CtxClose(c);
+	MediaClose(m);
+}
+
+public U0 MediaVp8Rep(U8 *filename)
+{//Per-frame VP8 header fields for the video track. Frame types here must match
+//the container's keyframe flags; a mismatch means the header walk is wrong.
+	CMediaCtx	*m = MediaOpen(filename);
+	CMediaPacket p;
+	CVp8Info	 fi;
+	I64			 ti, n = 0, bad = 0, disagree = 0;
+
+	if (!m)
+	{
+		"MediaVp8Rep: cannot open \"%s\".\n", filename;
+		return;
+	}
+	ti = MediaTrackFind(m, MEDIA_TRACK_VIDEO);
+	if (ti < 0 || m->track[ti].codec != MEDIA_CODEC_VP8)
+	{
+		"MediaVp8Rep: no VP8 track.\n";
+		MediaClose(m);
+		return;
+	}
+
+	MemSet(&p, 0, sizeof(CMediaPacket));
+	while (MediaNext(m, &p))
+	{
+		if (p.track != m->track[ti].num)
+			goto next_v;
+		n++;
+		if (!Vp8FrameScan(p.data, p.size, &fi))
+		{
+			bad++;
+			goto next_v;
+		}
+		if (fi.key != p.key)
+			disagree++;
+		if (n <= 8)
+		{
+			if (fi.key)
+				"  %2d key   %dx%d q %d lf %d parts %d\n",
+					n, fi.w, fi.h, fi.base_q, fi.filt_level, fi.num_parts;
+			else
+				"  %2d inter q %d lf %d parts %d  refresh l%d g%d a%d  "
+				"copy g%d a%d\n", n, fi.base_q, fi.filt_level, fi.num_parts,
+					fi.refresh_last, fi.refresh_golden, fi.refresh_alt,
+					fi.copy_golden, fi.copy_alt;
+		}
+next_v:;
+	}
+
+	"frames %d  unparsed %d  type mismatch %d\n", n, bad, disagree;
+	MediaClose(m);
+}

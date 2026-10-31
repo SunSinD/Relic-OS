@@ -1,0 +1,48 @@
+//wallpaper hook stays installed for the session; Decolorize before recompiling.
+
+U0 (*colorize_prev_wp)(CTask *task) = NULL;
+
+U0 ColorizeWallPaper(CTask *task)
+{
+	I64 x, y, idx, r, g, b, fx, fy;
+
+	for (y = 0; y < TEXT_ROWS; y++)
+	{
+		fy = 255 * y / TEXT_ROWS;
+		for (x = 0; x < TEXT_COLS; x++)
+		{
+			fx = 255 * x / TEXT_COLS;
+			r = 5  + ((fx * 10) >> 8);					//5..15
+			g = 9  + ((fy * 18) >> 8);					//9..27
+			b = 20 + ((fy * 26) >> 8) + ((fx * 14) >> 8); //20..60
+			idx = y * TEXT_COLS + x;
+			gr.text_base[idx] = gr.text_base[idx] & 0xFF | ATTRF_TRUE_COLOR;
+			gr.text_fg[idx] = 0x1A2438;
+			gr.text_bg[idx] = r << 16 | g << 8 | b;
+		}
+	}
+
+	if (colorize_prev_wp)
+		(*colorize_prev_wp)(task);
+}
+
+U0 Colorize()
+{
+	GuiThemeMidnight;
+	if (gr.fp_wall_paper != &ColorizeWallPaper)
+		colorize_prev_wp = gr.fp_wall_paper;
+	gr.fp_wall_paper = &ColorizeWallPaper;
+	"Colorized. Gradient desktop + Midnight chrome. Run Decolorize; to revert.\n";
+}
+
+U0 Decolorize()
+{
+	if (colorize_prev_wp)
+		gr.fp_wall_paper = colorize_prev_wp;
+	GuiChromePalette;
+	GuiSyntaxPalette;
+	PaletteSetSlate;
+	"Restored.\n";
+}
+
+Colorize;

@@ -8,14 +8,14 @@
       RelicOS.vmx            VNC on 127.0.0.1:5901 so tools\vnc.py can drive it
       RelicOS-HD.vmdk        installed RelicOS        (IDE 1:1, boots from here)
       transfer.vmdk + -flat  FAT32 copy of src\relic  (IDE 0:0, written by prepare)
-      CD                     build\RelicOS-v0.4.0.iso (IDE 1:0)
+      CD                     build\RelicOS-v0.5.0.iso (IDE 1:0)
 
   dev      stop VM -> write src\relic to the transfer disk -> boot.  The guest
            HomeSys.HC sees RelicDev.TXT on that disk and copies the sources
            onto the installed system before the desktop starts.
   iso      same, but the marker says "build": RelicBoot.HC runs Build.HC
            before the desktop, the host waits for the ISO chunks, powers
-           off and assembles build\RelicOS-v0.4.0.iso (a few minutes).
+           off and assembles build\RelicOS-v0.5.0.iso (a few minutes).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File tools\relic.ps1 dev
@@ -29,8 +29,10 @@ param(
     [string]$Command = 'dev',
 
     [string]$Iso,
-    [string]$Version = '0.4.0',
+    [string]$Version = '0.5.0',
     [int]$TransferMB = 512,
+    [switch]$Network,
+    [switch]$LegacyBoot,
     [int]$VncPort = 5901
 )
 
@@ -118,14 +120,16 @@ ide1:0.fileName = "$isoLine"
 ide1:0.deviceType = "cdrom-image"
 ide1:0.startConnected = "$(if ($isoLine) { 'TRUE' } else { 'FALSE' })"
 floppy0.present = "FALSE"
-ethernet0.present = "FALSE"
+ethernet0.present = "$(if ($Network) { 'TRUE' } else { 'FALSE' })"
+ethernet0.virtualDev = "vlance"
+ethernet0.connectionType = "nat"
 usb.present = "FALSE"
 sound.present = "TRUE"
 sound.autodetect = "TRUE"
 sound.fileName = "-1"
 svga.autodetect = "TRUE"
 mks.enable3d = "FALSE"
-mks.gamingMouse.policy = "gaming"
+mks.gamingMouse.policy = "auto"
 tools.syncTime = "FALSE"
 uuid.action = "create"
 msg.autoAnswer = "TRUE"
@@ -149,6 +153,11 @@ function Prepare([string]$Mode = 'dev') {
     $vmText = $vmText -replace 'ide0:0.present = "FALSE"', 'ide0:0.present = "TRUE"'
     $vmText = $vmText -replace 'bios.bootOrder = "cdrom,hdd"', 'bios.bootOrder = "hdd,cdrom"'
     $vmText = $vmText -replace 'ide1:0.startConnected = "TRUE"', 'ide1:0.startConnected = "FALSE"'
+    if ($Network) {
+        $vmText = $vmText -replace 'ethernet0.present = "FALSE"', 'ethernet0.present = "TRUE"'
+        if ($vmText -notmatch 'ethernet0.virtualDev') { $vmText += "`nethernet0.virtualDev = `"vlance`"`n" }
+        if ($vmText -notmatch 'ethernet0.connectionType') { $vmText += "`nethernet0.connectionType = `"nat`"`n" }
+    }
     [IO.File]::WriteAllText($Vmx, $vmText)
 }
 
@@ -162,9 +171,10 @@ function Start-Vm {
     }
     & $Vmrun -T ws start $Vmx gui | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'vmrun start failed.' }
-    # TempleOS' multi-boot loader waits for a key: pick "1. Drive C".
-    Start-Sleep -Seconds 3
-    Vnc @('key', '1')
+    if ($LegacyBoot) {
+        Start-Sleep -Seconds 3
+        Vnc @('key', '1')
+    }
     Ok 'VM is booting (about 20 s until the desktop shows).'
 }
 

@@ -1,0 +1,68 @@
+[
+  {
+    "full_name": "y4my4my4m/HL1ZealOS",
+    "html_url": "https://github.com/y4my4my4m/HL1ZealOS",
+    "description": "Half-Life 1 GoldSrc port for ZealOS / TempleOS",
+    "default_branch": "master",
+    "license": null,
+    "size": 902,
+    "pushed_at": "2026-08-03T10:20:32Z"
+  },
+  {
+    "full_name": "y4my4my4m/QuakeZealOS",
+    "html_url": "https://github.com/y4my4my4m/QuakeZealOS",
+    "description": "Quake port for ZealOS / TempleOS",
+    "default_branch": "master",
+    "license": null,
+    "size": 321,
+    "pushed_at": "2026-07-29T14:09:46Z"
+  },
+  {
+    "full_name": "y4my4my4m/QuakePlus",
+    "html_url": "https://github.com/y4my4my4m/QuakePlus",
+    "description": "TempleOS / ZealOS port of Quake (inspired by Ironwail)",
+    "default_branch": "master",
+    "license": null,
+    "size": 487,
+    "pushed_at": "2026-08-15T15:56:32Z"
+  },
+  {
+    "full_name": "y4my4my4m/Diablo1ZealOS",
+    "html_url": "https://github.com/y4my4my4m/Diablo1ZealOS",
+    "description": "Devilution | DevilutionX port for TempleOS / ZealOS",
+    "default_branch": "master",
+    "license": null,
+    "size": 301,
+    "pushed_at": "2026-08-03T10:22:04Z"
+  },
+  {
+    "full_name": "y4my4my4m/bahamut-zeal",
+    "html_url": "https://github.com/y4my4my4m/bahamut-zeal",
+    "description": "SNES Emulator for ZealOS (port)",
+    "default_branch": "master",
+    "license": {
+      "key": "mit",
+      "name": "MIT License",
+      "spdx_id": "MIT",
+      "url": "https://api.github.com/licenses/mit",
+      "node_id": "MDc6TGljZW5zZTEz"
+    },
+    "size": 47,
+    "pushed_at": "2023-04-25T17:48:12Z"
+  },
+  {
+    "full_name": "y4my4my4m/ZealAmp",
+    "html_url": "https://github.com/y4my4my4m/ZealAmp",
+    "description": "ZealOS port of TOSamp - MP3 player for TempleOS/ZealOS",
+    "default_branch": "zealamp",
+    "license": {
+      "key": "unlicense",
+      "name": "The Unlicense",
+      "spdx_id": "Unlicense",
+      "url": "https://api.github.com/licenses/unlicense",
+      "node_id": "MDc6TGljZW5zZTE1"
+    },
+    "size": 303,
+    "pushed_at": "2023-08-24T13:11:47Z"
+  }
+]

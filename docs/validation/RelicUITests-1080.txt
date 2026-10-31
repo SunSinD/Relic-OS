@@ -1,0 +1,7 @@
+PASS wallpaper center crop preserves aspect
+PASS wallpaper crop covers destination height
+PASS original wave wallpaper decodes at 1080p
+PASS calculator 12 + 30 = 42
+PASS division by zero clears pending operation
+PASS calculator recovers after error
+RESULT 6 passed, 0 failed

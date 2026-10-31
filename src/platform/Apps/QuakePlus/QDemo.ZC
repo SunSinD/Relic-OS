@@ -1,0 +1,158 @@
+// .dem playback, CL_ReadDemoMessage fed from a file.
+
+#define QDEMO_MAX_NAME	64
+
+
+U8	*q_demo_data	= NULL;		//whole file, owned here
+I64	 q_demo_size	= 0;
+I64	 q_demo_pos		= 0;
+Bool q_demo_playing	= FALSE;
+Bool q_demo_loop	= FALSE;
+I64	 q_demo_track	= 0;
+F64	 q_demo_angles[3];
+
+F64	 q_demo_clock	= 0.0;
+F64	 q_demo_last_t	= 0.0;
+Bool q_demo_timed	= FALSE;
+U8	 q_demo_name[QDEMO_MAX_NAME];
+
+U8 *q_demo_loop_names[3];
+I64 q_demo_loop_index = 0;
+
+#define QClientMode	(q_demo_playing || (q_udp_ready && !q_udp_server))
+
+U0 QDemoInit()
+{//globals aren't zeroed
+	q_demo_data       = NULL;
+	q_demo_size       = 0;
+	q_demo_pos        = 0;
+	q_demo_playing    = FALSE;
+	q_demo_loop       = FALSE;
+	q_demo_track      = 0;
+	q_demo_name[0]    = 0;
+	q_demo_loop_index = 0;
+	q_demo_clock      = 0.0;
+	q_demo_last_t     = 0.0;
+	q_demo_timed      = FALSE;
+
+	QVecSet(q_demo_angles, 0.0, 0.0, 0.0);
+
+	q_demo_loop_names[0] = "demo1.dem";
+	q_demo_loop_names[1] = "demo2.dem";
+	q_demo_loop_names[2] = "demo3.dem";
+}
+
+U0 QDemoStop()
+{//CL_StopPlayback
+	if (q_demo_data)
+		Free(q_demo_data);
+
+	q_demo_data    = NULL;
+	q_demo_size    = 0;
+	q_demo_pos     = 0;
+	q_demo_playing = FALSE;
+}
+
+Bool QDemoStart(U8 *name, Bool loop = FALSE)
+{//CL_PlayDemo_f, name may or may not carry .dem
+	U8	 path[QDEMO_MAX_NAME + 16];
+	I64	 size = 0;
+	I64	 n;
+
+	QDemoStop;
+
+	if (!name || !name[0])
+		return FALSE;
+
+	QStrCopy(path, name, QDEMO_MAX_NAME);
+	n = StrLen(path);
+	if (n < 4 || StrICompare(path + n - 4, ".dem"))
+		StrPrint(path, "%s.dem", name);
+
+	q_demo_data = QPakLoad(path, &size);
+	if (!q_demo_data || size < 2)
+	{
+		QDemoStop;
+		return FALSE;
+	}
+
+	q_demo_size = size;
+	q_demo_pos  = 0;
+
+	q_demo_track = 0;
+	while (q_demo_pos < q_demo_size && q_demo_data[q_demo_pos] != '\n')
+	{
+		if ('0' <= q_demo_data[q_demo_pos] <= '9')
+			q_demo_track = q_demo_track * 10 +
+				(q_demo_data[q_demo_pos] - '0');
+		q_demo_pos++;
+	}
+	q_demo_pos++;
+
+	QStrCopy(q_demo_name, path, QDEMO_MAX_NAME);
+	q_demo_playing = TRUE;
+	q_demo_loop    = loop;
+	q_demo_clock   = 0.0;
+	q_demo_last_t  = 0.0;
+	q_demo_timed   = FALSE;
+
+	QVecSet(q_demo_angles, 0.0, 0.0, 0.0);
+
+	return TRUE;
+}
+
+Bool QDemoNextInLoop()
+{//FALSE when none load
+	I64 tries;
+
+	//CL_NextDemo plays demos[cls.demonum] and then advances.
+	for (tries = 0; tries < 3; tries++)
+	{
+		if (q_demo_loop_index < 0 || q_demo_loop_index > 2)
+			q_demo_loop_index = 0;
+
+		if (QDemoStart(q_demo_loop_names[q_demo_loop_index], TRUE))
+		{
+			q_demo_loop_index++;
+			return TRUE;
+		}
+
+		q_demo_loop_index++;
+	}
+
+	return FALSE;
+}
+
+Bool QDemoReadMessage(CQMsg *m)
+{//CL_ReadDemoMessage file half
+	I64 len;
+	I64 j;
+
+	if (!q_demo_playing || !q_demo_data)
+		return FALSE;
+
+	if (q_demo_pos + 16 > q_demo_size)
+		return FALSE;
+
+	len = QRdI32(q_demo_data + q_demo_pos);
+	q_demo_pos += 4;
+
+	for (j = 0; j < 3; j++)
+	{
+		q_demo_angles[j] = QRdF32(q_demo_data + q_demo_pos);
+		q_demo_pos += 4;
+	}
+
+	if (len < 0 || len > QNET_MAX_MSG)
+		return FALSE;
+	if (q_demo_pos + len > q_demo_size)
+		return FALSE;
+
+	QMsgClear(m);
+	MemCopy(m->data, q_demo_data + q_demo_pos, len);
+	m->len = len;
+
+	q_demo_pos += len;
+
+	return TRUE;
+}

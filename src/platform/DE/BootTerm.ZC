@@ -1,0 +1,67 @@
+
+//Sized as a fraction of the screen. TEXT_COLS/TEXT_ROWS are GR_WIDTH/GR_HEIGHT
+//in 8x8 cells and are compile-time constants, so these fold to literals.
+#define BOOT_TERM_PCT_W	60
+#define BOOT_TERM_PCT_H	58
+#define BOOT_TERM_COLS	(TEXT_COLS * BOOT_TERM_PCT_W / 100)
+#define BOOT_TERM_ROWS	(TEXT_ROWS * BOOT_TERM_PCT_H / 100)
+#define BOOT_TERM_SEED	2		//rows it opens at
+#define BOOT_TERM_STEPS	14
+
+
+CTask *boot_term_task = NULL;
+
+I64 DEBootTermLeft()
+{
+	I64 l = (TEXT_COLS - BOOT_TERM_COLS) / 2;
+
+	if (l < 1)
+		l = 1;
+
+	return l;
+}
+
+I64 DEBootTermTop()
+{
+	I64 t = (TEXT_ROWS - BOOT_TERM_ROWS) / 2;
+
+	if (t < 1)
+		t = 1;
+
+	return t;
+}
+
+U0 DEBootTermOpenTask()
+{
+	CTask	*t = boot_term_task;
+	I64		 top, bot;
+	F64		 t0 = tS;
+
+	top = DEBootTermTop();
+	bot = top + BOOT_TERM_ROWS - 1;
+
+	while (!yde_boot_done && tS - t0 < 60.0)
+		Sleep(50);
+	if (!TaskValidate(t)) return;
+	WinVert(top, bot, t);
+	DEMinimize(t); //Home opens on the desktop; terminal stays in the taskbar.
+}
+
+U0 DEBootTerm(CTask *user)
+{//Called from HomeSys.ZC through boot_term_fp with the terminal it spawned.
+	I64 l = DEBootTermLeft(), mid = DEBootTermTop() + BOOT_TERM_ROWS / 2;
+
+	boot_term_task = user;
+	LBtr(&user->display_flags, DISPLAYf_SHOW);
+	WinHorz(l, l + BOOT_TERM_COLS - 1, user);
+	WinVert(mid - BOOT_TERM_SEED / 2, mid + BOOT_TERM_SEED / 2, user);
+	WinToTop(user);
+	Spawn(&DEBootTermOpenTask, NULL, "Term Open");
+}
+
+U0 DEBootTermInstall()
+{//File-scope assignments do not run in ZealC; a bare call statement does.
+	boot_term_fp = &DEBootTerm;
+}
+
+DEBootTermInstall;

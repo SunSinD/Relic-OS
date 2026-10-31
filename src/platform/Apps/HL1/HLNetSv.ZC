@@ -1,0 +1,5496 @@
+// server datagram out, client parse in.
+//
+// SV_SendClientDatagram, SV_WriteClientdataToMessage, SV_WriteEntitiesToClient,
+// SV_CreateBaseline, CL_ParseServerMessage.
+//
+// the world source is native throughout: hl_net_pl[] for bodies,
+// hl_sv_clients[] for identity, input and score, hl_entities[0] for worldspawn.
+// no edict field is read.
+//
+// two readers and a router:
+//   HLNetClientParse48   protocol 48, reads a GoldSrc stream
+//   HLNetClientParse15   protocol 15, reads the loopback
+//   HLNetClientParse     dispatches on hl_net_protocol
+//
+// HLNetWriteServerInfo, HLNetWriteClientdata and HLNetWriteEntityUpdate are
+// protocol 15; the 48 signon writers are driven by Accept48 and
+// HLSvSendClientSignon. HLNetServerFrame routes a slot whose netchan negotiated
+// 48 to HLSv48SendFrame once signon reaches 4. HLNetParseFromClient selects the
+// clc_ table from HLNetSlotIs48; same-engine peers keep the protocol-15
+// clc_move payload layout on the 48 opcodes.
+//
+// HLNetParse48Unverified refuses svc_sound, svc_event and svc_temp_entity.
+//
+// protocol 48 opcodes use the plain HLSVC_/HLCLC_ names from HLNet.ZC. the four
+// whose number was reused in 48, plus the wholesale-renumbered clc_ table, are
+// spelled HLSVC15_/HLCLC15_ here.
+#define HLSVC15_UPDATESTAT		3
+#define HLSVC15_UPDATENAME		13
+#define HLSVC15_UPDATEFRAGS		14
+#define HLSVC15_UPDATECOLORS	17
+#define HLSVC15_SELLSCREEN		33
+
+//Protocol 15 clc_.
+#define HLCLC15_BAD			0
+#define HLCLC15_NOP			1
+#define HLCLC15_DISCONNECT	2
+#define HLCLC15_MOVE		3
+#define HLCLC15_STRINGCMD	4
+
+I64	hl_net_protocol = 15;
+
+Bool	hl_net_want48 = FALSE;
+
+hl_net_want48 = FALSE;
+
+
+Bool HLNetSlotIs48(I64 slot)
+{
+	CHLNet48Chan *c;
+
+	c = HLNet48ChanFor(slot);
+	if (!c)
+		return FALSE;
+
+	return c->active;
+}
+
+Bool HLNetSendReliable(I64 slot, CHLMsg *m)
+{
+	if (!m || m->len < 1 || m->overflowed)
+		return FALSE;
+
+	if (HLNetSlotIs48(slot))
+		return HLNet48Transmit(slot, m->data, m->len, TRUE);
+
+	return HLNetDgrmSendReliable(slot, m);
+}
+
+Bool HLNetSendUnreliable(I64 slot, CHLMsg *m)
+{
+	if (!m || m->len < 1 || m->overflowed)
+		return FALSE;
+
+	if (HLNetSlotIs48(slot))
+		return HLNet48Transmit(slot, m->data, m->len, FALSE);
+
+	return HLNetDgrmSendUnreliable(slot, m);
+}
+
+#define HLSU_VIEWHEIGHT		1
+#define HLSU_IDEALPITCH		2
+#define HLSU_PUNCH1			4
+#define HLSU_PUNCH2			8
+#define HLSU_PUNCH3			16
+#define HLSU_VELOCITY1		32
+#define HLSU_VELOCITY2		64
+#define HLSU_VELOCITY3		128
+#define HLSU_ITEMS			512
+#define HLSU_ONGROUND		1024
+#define HLSU_INWATER			2048
+#define HLSU_WEAPONFRAME		4096
+#define HLSU_ARMOR			8192
+#define HLSU_WEAPON			16384
+
+#define HLDEFAULT_VIEWHEIGHT	28.0	//HL eye height; Quake used 22
+
+class CHLClientState
+{
+	F64	 view_height;
+	F64	 punchangle[3];
+	F64	 velocity[3];
+	I64	 items;
+	Bool on_ground;
+	Bool in_water;
+	I64	 weaponframe;
+	I64	 armorvalue;
+	I64	 weaponmodel;
+	I64	 health;
+	I64	 currentammo;
+	I64	 ammo_shells;
+	I64	 ammo_nails;
+	I64	 ammo_rockets;
+	I64	 ammo_cells;
+	I64	 weapon;
+
+	F64	 view_angles[3];
+	Bool angles_forced;
+	F64	 time;
+
+	I64	 stats_received;
+};
+
+CHLClientState	hl_cl;
+CHLMsg			hl_net_datagram;
+CHLMsg			hl_net_recv;
+CHLMsg			hl_net_recv_c2s;
+U8				hl_net_cmd_line[128];
+
+Bool	hl_net_join_pending = FALSE;
+U8		hl_net_join_map[64];
+
+#define HLCL_MAX_PRECACHE	192
+#define HLCL_PRECACHE_NAME	64
+U8	hl_cl_model_names[HLCL_MAX_PRECACHE * HLCL_PRECACHE_NAME];
+U8	hl_cl_sound_names[HLCL_MAX_PRECACHE * HLCL_PRECACHE_NAME];
+I64	hl_cl_model_count = 0;
+I64	hl_cl_sound_count = 0;
+U8		hl_net_level_name[64];
+I64		hl_cl_signon = 0;		//0..4, mirrors cls.signon
+Bool	hl_net_need_prespawn = FALSE;	//signon 1: send after map load
+Bool	hl_net_need_spawn = FALSE;	//signon 2: send "spawn"
+Bool	hl_net_need_begin = FALSE;	//signon 3: send "begin"
+CHLMsg			hl_net_udp_in;
+
+U8		hl_cl_name[24];
+I64		hl_cl_cdtrack	= 0;	//track requested by server, 0 = none
+I64		hl_cl_top	= 0;
+I64		hl_cl_bottom	= 0;
+I64		hl_cl_viewent	= 0;
+
+I64		hl_net_moves_sent = 0;
+I64		hl_net_moves_read = 0;
+F64		hl_net_move_angles[3];
+F64		hl_net_move_cmd[3];
+Bool	hl_net_move_attack	= FALSE;
+Bool	hl_net_move_jump		= FALSE;
+I64		hl_net_move_impulse	= 0;
+F64		hl_net_move_ping		= 0.0;
+
+Bool	hl_net_damage_pending = FALSE;
+I64		hl_net_damage_save	 = 0;
+I64		hl_net_damage_take	 = 0;
+F64		hl_net_damage_from[3];
+I64				hl_net_dropped = 0;
+I64				hl_net_parsed  = 0;
+
+#define HLSV_TIMEOUT			10.0
+#define HLSV_CONNECT_GRACE	90.0
+
+I64		hl_cl_gametype	= 0;	//cl.gametype: 0 coop or single player, 1 deathmatch
+I64		hl_cl_maxclients = HLSV_MAX_CLIENTS;
+
+
+Bool	hl_scoreboard_show = FALSE;
+
+class CHLSvClient
+{
+	I64		edict;
+	U32		ip;			//0 for the local client
+	Bool	active;
+	Bool	local;
+	Bool	seen_move;
+	I64		signon;		//0..4; entity datagrams only at 4 (remote)
+	Bool	spawned;
+	Bool	drop_asap;
+
+	I64		old_frags;
+	I64		old_colors;
+	U8		old_name[32];
+	Bool	sent_ident;
+
+	//Shirt/trousers, 0-13, packed into .colormap for the wire.
+	I64		top;
+	I64		bottom;
+	U8		name[32];
+
+	I64		frags;
+
+	I64		team;
+
+	F64		angles[3];
+	F64		cmd[3];
+	Bool	attack;
+	Bool	jump;
+	I64		impulse;
+	F64		last_msg;
+
+	F64		origin[3];
+	F64		velocity[3];
+	Bool	on_ground;
+};
+
+CHLSvClient	hl_sv_clients[HLSV_MAX_CLIENTS];
+
+Bool	hl_sv_edict_warned = FALSE;
+U8		hl_sv_edict_line[96];
+I64			hl_sv_client_count = 0;
+
+
+class CHLNetPlayer
+{
+	Bool	active;
+	F64		origin[3];
+	F64		angles[3];		//view angles; body pitch is angles[0]/-3 on the wire
+	F64		velocity[3];
+	Bool	on_ground;
+	I64		frame;
+	I64		colormap;		//(top << 4) | bottom, as HLNetDrawEntities decodes it
+	F64		health;
+
+	I64		sequence;
+	I64		gaitsequence;
+	I64		body;
+	I64		controller[4];
+	I64		blending[2];
+	I64		rendermode;
+	F64		renderamt;
+	I64		renderfx;
+	F64		rendercolor[3];
+	F64		scale;
+	I64		aiment;
+	F64		basevelocity[3];
+	F64		friction;
+	I64		usehull;		//0 stand, 1 duck
+	F64		view_ofs_z;
+	I64		waterlevel;
+	Bool	in_duck;
+	F64		duck_msec;
+	F64		waterjump_msec;
+	F64		punchangle[3];	//shell-owned; left 0 unless a caller fills it
+};
+
+CHLNetPlayer	hl_net_pl[HLSV_MAX_CLIENTS];
+
+CHLClData48	hl_sv_cd48_prev[HLSV_MAX_CLIENTS];
+Bool		hl_sv_cd48_sent[HLSV_MAX_CLIENTS];
+
+I64			hl_sv_um_health[HLSV_MAX_CLIENTS];
+I64			hl_sv_um_battery[HLSV_MAX_CLIENTS];
+Bool		hl_sv_um_decl[HLSV_MAX_CLIENTS];
+
+I64		hl_net_pl_modelindex = 0;
+
+CHLStudio	*hl_net_pl_studio = NULL;
+I64			 hl_net_pl_seq    = 0;		//"walk", or 0 when the model has none
+
+I64		hl_sv_local_slot = -1;
+
+U0 HLNetPlayerClearExtras(CHLNetPlayer *pl)
+{
+	I64 j;
+
+	if (!pl)
+		return;
+
+	pl->sequence     = 0;
+	pl->gaitsequence = 0;
+	pl->body         = 0;
+	pl->rendermode   = 0;
+	pl->renderamt    = 0.0;
+	pl->renderfx     = 0;
+	pl->scale        = 1.0;
+	pl->aiment       = 0;
+	pl->friction     = 1.0;
+	pl->usehull      = 0;
+	pl->view_ofs_z   = HLDEFAULT_VIEWHEIGHT;
+	pl->waterlevel   = 0;
+	pl->in_duck      = FALSE;
+	pl->duck_msec    = 0.0;
+	pl->waterjump_msec = 0.0;
+
+	for (j = 0; j < 4; j++)
+		pl->controller[j] = 0;
+	for (j = 0; j < 2; j++)
+		pl->blending[j] = 0;
+	for (j = 0; j < 3; j++)
+	{
+		pl->rendercolor[j]  = 0.0;
+		pl->basevelocity[j] = 0.0;
+		pl->punchangle[j]   = 0.0;
+	}
+}
+
+U0 HLNetPlayerSnapMove(I64 slot, I64 water_level)
+{
+	CHLNetPlayer *pl;
+	I64			 j;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	pl = &hl_net_pl[slot];
+	if (!pl->active)
+		return;
+
+	if (hl_net_pl_seq > 0)
+	{
+		pl->sequence     = hl_net_pl_seq;
+		pl->gaitsequence = hl_net_pl_seq;
+	}
+
+	for (j = 0; j < 3; j++)
+		pl->basevelocity[j] = hl_base_velocity[j];
+
+	pl->friction = hl_surface_friction;
+	if (pl->friction <= 0.0)
+		pl->friction = 1.0;
+
+	if (hl_ducking)
+		pl->usehull = 1;
+	else
+		pl->usehull = 0;
+
+	pl->view_ofs_z = hl_view_ofs_z;
+	pl->waterlevel = water_level;
+	if (pl->waterlevel < 0)
+		pl->waterlevel = hl_pm_waterlevel;
+
+	pl->in_duck = hl_duck_pending;
+	pl->duck_msec = hl_duck_time * 1000.0;
+	if (pl->duck_msec < 0.0)
+		pl->duck_msec = 0.0;
+
+	pl->waterjump_msec = hl_waterjump_time * 1000.0;
+	if (pl->waterjump_msec < 0.0)
+		pl->waterjump_msec = 0.0;
+}
+
+U0 HLNetPlayersInit()
+{
+	I64 i;
+	I64 j;
+
+	hl_net_pl_modelindex = 0;
+	hl_net_pl_studio     = NULL;
+	hl_net_pl_seq        = 0;
+	hl_sv_local_slot     = -1;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		hl_net_pl[i].active    = FALSE;
+		hl_net_pl[i].on_ground = FALSE;
+		hl_net_pl[i].frame     = 0;
+		hl_net_pl[i].colormap  = 0;
+		hl_net_pl[i].health    = 0.0;
+		HLNetPlayerClearExtras(&hl_net_pl[i]);
+		HLClData48Clear(&hl_sv_cd48_prev[i]);
+		hl_sv_cd48_sent[i] = FALSE;
+		hl_sv_um_health[i]  = -1;
+		hl_sv_um_battery[i] = -1;
+		hl_sv_um_decl[i]    = FALSE;
+
+		for (j = 0; j < 3; j++)
+		{
+			hl_net_pl[i].origin[j]   = 0.0;
+			hl_net_pl[i].angles[j]   = 0.0;
+			hl_net_pl[i].velocity[j] = 0.0;
+		}
+	}
+}
+
+I64 HLNetPlayerModelIndex()
+{//Precache index of the player body. HL precaches models/player.mdl, a studio
+ //model;
+	I64 i;
+
+	if (hl_net_pl_modelindex > 0 &&
+		hl_net_pl_modelindex < hl_precache_model_count)
+		return hl_net_pl_modelindex;
+
+	for (i = 1; i < hl_precache_model_count; i++)
+	{
+		if (hl_precache_model[i] && hl_precache_model[i][0])
+		{
+			if (!StrICompare(hl_precache_model[i], "models/player.mdl") ||
+				!StrICompare(hl_precache_model[i], "progs/player.mdl"))
+			{
+				hl_net_pl_modelindex = i;
+				return i;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+U0 HLNetCaptureState48(I64 ent, CHLEntState48 *st, Bool is_player)
+{
+	CHLNetPlayer	*pl;
+	I64			 slot;
+	I64			 j;
+
+	if (!st)
+		return;
+
+	slot = ent - 1;
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	pl = &hl_net_pl[slot];
+
+	for (j = 0; j < 3; j++)
+	{
+		st->v[HLES_ORIGIN + j] = pl->origin[j];
+		st->v[HLES_MINS + j]   = -16.0;
+		st->v[HLES_MAXS + j]   = 16.0;
+		st->v[HLES_BASEVELOCITY + j] = pl->basevelocity[j];
+		st->v[HLES_RENDERCOLOR + j]  = pl->rendercolor[j];
+	}
+
+	if (pl->usehull == 1)
+	{
+		st->v[HLES_MINS + 2] = HLPHYS_DUCK_MINS_Z;
+		st->v[HLES_MAXS + 2] = HLPHYS_DUCK_MAXS_Z;
+	}
+	else
+	{
+		st->v[HLES_MINS + 2] = HLPHYS_MINS_Z;
+		st->v[HLES_MAXS + 2] = HLPHYS_MAXS_Z;
+	}
+
+	st->v[HLES_ANGLES]     = -pl->angles[0] / 3.0;
+	st->v[HLES_ANGLES + 1] = pl->angles[1];
+	st->v[HLES_ANGLES + 2] = 0.0;
+
+	st->v[HLES_MODELINDEX] = ToF64(HLNetPlayerModelIndex());
+	st->v[HLES_FRAME]      = ToF64(pl->frame);
+	st->v[HLES_SKIN]       = 0.0;
+	st->v[HLES_EFFECTS]    = 0.0;
+	st->v[HLES_MOVETYPE]   = ToF64(HLMOVETYPE_WALK);
+	st->v[HLES_SOLID]      = ToF64(HLSOLID_SLIDEBOX_);
+	st->v[HLES_OWNER]      = 0.0;
+
+	st->v[HLES_COLORMAP] = ToF64(slot + 1);
+
+	st->v[HLES_GRAVITY] = 1.0;
+	st->v[HLES_TEAM]    = ToF64(hl_sv_clients[slot].team);
+
+	st->v[HLES_SEQUENCE]     = ToF64(pl->sequence);
+	st->v[HLES_GAITSEQUENCE] = ToF64(pl->gaitsequence);
+	st->v[HLES_BODY]         = ToF64(pl->body);
+	st->v[HLES_CONTROLLER + 0] = ToF64(pl->controller[0]);
+	st->v[HLES_CONTROLLER + 1] = ToF64(pl->controller[1]);
+	st->v[HLES_CONTROLLER + 2] = ToF64(pl->controller[2]);
+	st->v[HLES_CONTROLLER + 3] = ToF64(pl->controller[3]);
+	st->v[HLES_BLENDING + 0]   = ToF64(pl->blending[0]);
+	st->v[HLES_BLENDING + 1]   = ToF64(pl->blending[1]);
+	st->v[HLES_RENDERMODE]     = ToF64(pl->rendermode);
+	st->v[HLES_RENDERAMT]      = pl->renderamt;
+	st->v[HLES_RENDERFX]       = ToF64(pl->renderfx);
+	st->v[HLES_SCALE]          = pl->scale;
+	st->v[HLES_AIMENT]         = ToF64(pl->aiment);
+	st->v[HLES_FRICTION]       = pl->friction;
+	st->v[HLES_USEHULL]        = ToF64(pl->usehull);
+
+	st->player = is_player;
+	st->active = TRUE;
+}
+
+//FL_* bits from const.h, for clientdata_t.flags
+#define HLFL_INWATER	16
+#define HLFL_ONGROUND	512
+#define HLFL_DUCKING	16384
+
+U0 HLNetCaptureClientData48(I64 ent, CHLClData48 *cd)
+{
+	CHLNetPlayer	*pl;
+	I64			 slot;
+	I64			 j;
+	I64			 flags;
+
+	if (!cd)
+		return;
+
+	slot = ent - 1;
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	pl = &hl_net_pl[slot];
+
+	for (j = 0; j < 3; j++)
+	{
+		cd->v[HLCD_ORIGIN + j]     = pl->origin[j];
+		cd->v[HLCD_VELOCITY + j]   = pl->velocity[j];
+		cd->v[HLCD_PUNCHANGLE + j] = pl->punchangle[j];
+	}
+
+	cd->v[HLCD_VIEW_OFS + 2] = pl->view_ofs_z;
+	cd->v[HLCD_HEALTH]       = pl->health;
+	cd->v[HLCD_WATERLEVEL]   = ToF64(pl->waterlevel);
+	cd->v[HLCD_MAXSPEED]     = HLPHYS_MAXSPEED;
+	cd->v[HLCD_INDUCK]       = ToF64(pl->in_duck);
+	cd->v[HLCD_DUCKTIME]     = pl->duck_msec;
+	cd->v[HLCD_WATERJUMPTIME] = pl->waterjump_msec;
+
+	if (hl_ent_player_dead && slot == hl_sv_local_slot)
+		cd->v[HLCD_DEADFLAG] = 1.0;
+	else
+		cd->v[HLCD_DEADFLAG] = 0.0;
+
+	flags = 0;
+	if (pl->on_ground)
+		flags = flags | HLFL_ONGROUND;
+	if (pl->usehull == 1)
+		flags = flags | HLFL_DUCKING;
+	if (pl->waterlevel > 0)
+		flags = flags | HLFL_INWATER;
+	cd->v[HLCD_FLAGS] = ToF64(flags);
+
+	cd->physinfo[0] = 0;
+}
+
+Bool HLNetWriteClientdata48(CHLMsg *m, I64 slot, F64 timebase)
+{
+	CHLClData48	cd;
+	F64			*from;
+	U8			 from_phys[256];
+	I64			 i;
+
+	if (!m || slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return FALSE;
+	if (!hl_net_pl[slot].active)
+		return FALSE;
+
+	HLClData48Clear(&cd);
+	HLNetCaptureClientData48(slot + 1, &cd);
+
+	if (hl_sv_cd48_sent[slot])
+	{
+		from = hl_sv_cd48_prev[slot].v;
+		HLStrCopy(from_phys, hl_sv_cd48_prev[slot].physinfo, 256);
+	}
+	else
+	{
+		from = hl_pe_zero.v;
+		from_phys[0] = 0;
+	}
+
+	HLMsgWriteByte(m, HLSVC_CLIENTDATA);
+	HLBitWriteStart(m);
+
+	HLBitWriteBits(m, 0, 1);
+
+	HLDeltaWrite(m, &hl_delta_clientdata, from, cd.v, from_phys, cd.physinfo,
+		timebase);
+
+	HLBitWriteBits(m, 0, 1);
+	HLBitWriteEnd(m);
+
+	if (m->overflowed)
+		return FALSE;
+
+	for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+		hl_sv_cd48_prev[slot].v[i] = cd.v[i];
+	HLStrCopy(hl_sv_cd48_prev[slot].physinfo, cd.physinfo, 256);
+	hl_sv_cd48_sent[slot] = TRUE;
+
+	return TRUE;
+}
+
+
+CHLEntState48	hl_sv48_ent;
+
+I64	hl_sv48_frames = 0;
+I64	hl_sv48_full   = 0;
+
+U0 HLSv48CaptureFrame(CHLFrame48 *f, F64 time)
+{
+	I64 i;
+	I64 num;
+
+	if (!f)
+		return;
+
+	HLPEFrameClear(f);
+	f->msgtime = time;
+
+	hl_net48_players = hl_sv_maxclients;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_net_pl[i].active)
+			goto qc48_next;
+
+		num = i + 1;
+		if (num >= HLNET_MAX_ENTS)
+			goto qc48_next;
+
+		HLState48Clear(&hl_sv48_ent);
+		HLNetCaptureState48(num, &hl_sv48_ent, TRUE);
+		hl_sv48_ent.msgtime = time;
+		HLPEFrameAppend(f, num, &hl_sv48_ent);
+
+qc48_next:
+	}
+}
+
+U0 HLNetWriteUserMsgDecl(CHLMsg *m, I64 num, I64 size, U8 *name)
+{
+	I64 i;
+	I64 n;
+
+	HLMsgWriteByte(m, HLSVC_NEWUSERMSG);
+	HLMsgWriteByte(m, num);
+
+	//-1, variable length, goes on the wire as 0xFF.
+	if (size < 0)
+		HLMsgWriteByte(m, 255);
+	else
+		HLMsgWriteByte(m, size);
+
+	n = 0;
+	if (name)
+		n = StrLen(name);
+	if (n > 16)
+		n = 16;
+
+	for (i = 0; i < 16; i++)
+	{
+		if (i < n)
+			HLMsgWriteByte(m, name[i]);
+		else
+			HLMsgWriteByte(m, 0);
+	}
+
+	HLUserMsgRegister(num, size, name);
+}
+
+U0 HLSv48EnsureUserMsgDecls(I64 slot)
+{
+	CHLMsg *m;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+	if (hl_sv_um_decl[slot])
+		return;
+
+	m = &hl_net_send;
+	HLMsgClear(m);
+	HLNetWriteUserMsgDecl(m, HLUM_HEALTH, 1, "Health");
+	HLNetWriteUserMsgDecl(m, HLUM_BATTERY, 2, "Battery");
+	HLNetWriteUserMsgDecl(m, HLUM_DAMAGE, 12, "Damage");
+	HLNetWriteUserMsgDecl(m, HLUM_SAYTEXT, -1, "SayText");
+
+	if (m->overflowed)
+		return;
+
+	if (!HLNetSendReliable(slot, m))
+		return;
+
+	hl_sv_um_decl[slot] = TRUE;
+}
+
+
+#define HLNET_PROTOCOL48	48
+
+#define HLRES_MODEL			0
+#define HLRES_SOUND			1
+#define HLRES_DECAL			2
+#define HLRES_SKIN			3
+#define HLRES_GENERIC		4
+#define HLRES_EVENTSCRIPT	5
+#define HLRES_WORLD			6
+
+#define HLRES_FATALIFMISSING	1
+#define HLRES_WASMISSING		2
+#define HLRES_CUSTOM			4
+
+#define HLRES_MAX			512
+#define HLRES_NAME			64
+
+U0 HLNetWriteResourceList(CHLMsg *m)
+{
+	I64	i;
+	I64	total;
+
+	HLMsgWriteByte(m, HLSVC_RESOURCELIST);
+
+	total = 0;
+	for (i = 1; i < hl_precache_model_count; i++)
+	{
+		if (hl_precache_model[i] && hl_precache_model[i][0])
+			total++;
+	}
+	for (i = 0; i < hl_precache_sound_count; i++)
+	{
+		if (hl_precache_sound[i] && hl_precache_sound[i][0])
+			total++;
+	}
+
+	HLBitWriteStart(m);
+	HLBitWriteBits(m, total, 12);
+
+	for (i = 1; i < hl_precache_model_count; i++)
+	{
+		if (!hl_precache_model[i] || !hl_precache_model[i][0])
+			goto qwr_mdl;
+
+		if (i == 1)
+			HLBitWriteBits(m, HLRES_WORLD, 4);
+		else
+			HLBitWriteBits(m, HLRES_MODEL, 4);
+
+		HLBitWriteBitString(m, hl_precache_model[i]);
+		HLBitWriteBits(m, i, 12);
+		HLBitWriteBits(m, 0, 24);
+		HLBitWriteBits(m, 0, 3);
+
+qwr_mdl:
+	}
+
+	for (i = 0; i < hl_precache_sound_count; i++)
+	{
+		if (!hl_precache_sound[i] || !hl_precache_sound[i][0])
+			goto qwr_snd;
+
+		HLBitWriteBits(m, HLRES_SOUND, 4);
+		HLBitWriteBitString(m, hl_precache_sound[i]);
+		HLBitWriteBits(m, i + 1, 12);
+		HLBitWriteBits(m, 0, 24);
+		HLBitWriteBits(m, 0, 3);
+
+qwr_snd:
+	}
+
+	HLBitWriteBits(m, 0, 1);
+	HLBitWriteEnd(m);
+}
+
+U0 HLNetWriteServerInfo48(CHLMsg *m, I64 slot)
+{
+	U8	*mapname;
+	I64	 i;
+
+	HLMsgWriteByte(m, HLSVC_SERVERINFO);
+	HLMsgWriteLong(m, HLNET_PROTOCOL48);
+
+	HLMsgWriteLong(m, 1);
+	HLMsgWriteLong(m, 0);
+
+	for (i = 0; i < 16; i++)
+		HLMsgWriteByte(m, 0);
+
+	HLMsgWriteByte(m, hl_sv_maxclients);
+
+	if (slot >= 0)
+		HLMsgWriteByte(m, slot);
+	else
+		HLMsgWriteByte(m, 0);
+
+	HLGameApplyModeCvars;
+	if (!hl_coop_active && HLCvarGet("deathmatch") != 0.0)
+		HLMsgWriteByte(m, 1);
+	else
+		HLMsgWriteByte(m, 0);
+
+	HLMsgWriteString(m, "valve");
+	HLMsgWriteString(m, hl_host_name);
+
+	mapname = hl_map_name;
+	if (!mapname || !mapname[0])
+		mapname = "";
+	HLMsgWriteString(m, mapname);
+
+	HLMsgWriteString(m, "");
+	HLMsgWriteByte(m, 0);
+}
+
+U0 HLNetWriteUserInfo48(CHLMsg *m, I64 slot, U8 *name, I64 top, I64 bottom)
+{
+	U8	info[192];
+	I64	i;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	HLMsgWriteByte(m, HLSVC_UPDATEUSERINFO);
+	HLMsgWriteByte(m, slot);
+
+	HLMsgWriteLong(m, slot + 1);
+
+	if (!name || !name[0])
+		name = "player";
+
+	StrPrint(info, "\\name\\%s\\topcolor\\%d\\bottomcolor\\%d",
+		name, top & 15, bottom & 15);
+	HLMsgWriteString(m, info);
+
+	for (i = 0; i < 16; i++)
+		HLMsgWriteByte(m, 0);
+
+	HLStrCopy(hl_scores[slot].name, name, 16);
+	hl_scores[slot].colors = ((top & 15) << 4) | (bottom & 15);
+	hl_scores[slot].active = TRUE;
+}
+
+U0 HLSv48WriteHudUserMsgs(CHLMsg *m, I64 slot)
+{
+	I64 health;
+	I64 battery;
+	I64 dmg;
+	I64 armor_byte;
+	F64 src[3];
+
+	if (!m || slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+	if (!hl_net_pl[slot].active)
+		return;
+
+	health = ToI64(hl_net_pl[slot].health);
+	if (health < 0)
+		health = 0;
+	if (health > 255)
+		health = 255;
+
+	if (health != hl_sv_um_health[slot])
+	{
+		HLMsgWriteByte(m, HLUM_HEALTH);
+		HLMsgWriteByte(m, health);
+		hl_sv_um_health[slot] = health;
+	}
+
+	if (slot == hl_sv_local_slot)
+		battery = ToI64(hl_ent_player_armor);
+	else
+		battery = 0;
+	if (battery < 0)
+		battery = 0;
+	if (battery > 65535)
+		battery = 65535;
+
+	if (battery != hl_sv_um_battery[slot])
+	{
+		HLMsgWriteByte(m, HLUM_BATTERY);
+		HLMsgWriteShort(m, battery);
+		hl_sv_um_battery[slot] = battery;
+	}
+
+	if (slot == hl_sv_local_slot && hl_ent_dmg_usermsg)
+	{
+		dmg = ToI64(hl_ent_last_dmg);
+		if (dmg < 0)
+			dmg = 0;
+		if (dmg > 255)
+			dmg = 255;
+
+		armor_byte = 0;
+		if (hl_hud_pain_have)
+			HLVecCopy(hl_hud_pain_src, src);
+		else
+			HLVecSet(src, 0.0, 0.0, 0.0);
+
+		HLMsgWriteByte(m, HLUM_DAMAGE);
+		HLMsgWriteByte(m, armor_byte);
+		HLMsgWriteByte(m, dmg);
+		HLMsgWriteLong(m, hl_ent_last_dmg_type);
+		HLMsgWriteCoord(m, src[0]);
+		HLMsgWriteCoord(m, src[1]);
+		HLMsgWriteCoord(m, src[2]);
+
+		hl_ent_dmg_usermsg = FALSE;
+	}
+}
+
+Bool HLSv48SendFrame(I64 slot, F64 time)
+{
+	CHLNet48Chan	*c;
+	CHLFrame48		*from;
+	I64				 from_seq;
+	I64				 seq;
+
+	c = HLNet48ChanFor(slot);
+	if (!c || !c->active)
+		return FALSE;
+
+	HLSv48EnsureUserMsgDecls(slot);
+
+	HLSv48CaptureFrame(&hl_pe_sv_stage, time);
+
+	from     = NULL;
+	from_seq = 0;
+	if (c->incoming_sequence >= 0)
+		from = HLPEFrameBySeq(hl_pe_sv, c->incoming_acknowledged);
+	if (from)
+		from_seq = from->seq;
+
+	HLMsgClear(&hl_net_datagram);
+
+	HLMsgWriteByte(&hl_net_datagram, HLSVC_TIME);
+	HLMsgWriteFloat(&hl_net_datagram, time);
+
+	if (!HLNetWriteClientdata48(&hl_net_datagram, slot, time))
+	{
+		hl_net_dropped++;
+		return FALSE;
+	}
+
+	HLSv48WriteHudUserMsgs(&hl_net_datagram, slot);
+
+	if (!HLNetWritePacketEntities(&hl_net_datagram, from, &hl_pe_sv_stage,
+		from_seq, time))
+	{
+		hl_net_dropped++;
+		return FALSE;
+	}
+
+	if (hl_net_datagram.overflowed)
+	{
+		hl_net_dropped++;
+		return FALSE;
+	}
+
+	if (!HLNetSendUnreliable(slot, &hl_net_datagram))
+	{
+		hl_net_dropped++;
+		return FALSE;
+	}
+
+	seq = c->outgoing_sequence - 1;
+	HLPEFrameStore(hl_pe_sv, &hl_pe_sv_stage, seq, time);
+
+	hl_sv48_frames++;
+	if (!from)
+		hl_sv48_full++;
+
+	return TRUE;
+}
+
+CHLStudio *HLNetPlayerStudio()
+{
+	I64 seq;
+
+	if (hl_net_pl_studio)
+		return hl_net_pl_studio;
+
+	if (hl_net_pl_seq < 0)
+		return NULL;
+
+	hl_net_pl_studio = HLStudioCacheGet("models/player.mdl");
+	if (!hl_net_pl_studio)
+	{
+		hl_net_pl_seq = -1;
+		return NULL;
+	}
+
+	seq = HLStudioSeqByName(hl_net_pl_studio, "walk");
+	if (seq < 0)
+		seq = 0;
+	hl_net_pl_seq = seq;
+
+	return hl_net_pl_studio;
+}
+
+U0 HLNetPlayerActivate(I64 slot, F64 *origin, F64 *angles, I64 top, I64 bottom)
+{
+	I64 num;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	hl_net_pl[slot].active    = TRUE;
+	hl_net_pl[slot].on_ground = FALSE;
+	hl_net_pl[slot].frame     = 0;
+	hl_net_pl[slot].colormap  = ((top & 15) << 4) | (bottom & 15);
+	hl_net_pl[slot].health    = 100.0;
+	HLNetPlayerClearExtras(&hl_net_pl[slot]);
+	HLClData48Clear(&hl_sv_cd48_prev[slot]);
+	hl_sv_cd48_sent[slot] = FALSE;
+	hl_sv_um_health[slot]  = -1;
+	hl_sv_um_battery[slot] = -1;
+	hl_sv_um_decl[slot]    = FALSE;
+
+	HLVecCopy(origin, hl_net_pl[slot].origin);
+	HLVecCopy(angles, hl_net_pl[slot].angles);
+	HLVecSet(hl_net_pl[slot].velocity, 0.0, 0.0, 0.0);
+
+	num = slot + 1;
+	if (num < HLNET_MAX_ENTS)
+	{
+		HLNetStateClear(&hl_net_baseline[num]);
+		HLNetStateClear(&hl_net_sent[num]);
+	}
+}
+
+U0 HLNetPlayerDeactivate(I64 slot)
+{
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	hl_net_pl[slot].active = FALSE;
+	hl_sv_cd48_sent[slot]  = FALSE;
+	hl_sv_um_decl[slot]    = FALSE;
+}
+
+U0 HLNetPublishPlayer(I64 slot, F64 *origin, F64 *angles, F64 *velocity,
+	Bool on_ground, F64 health)
+{
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	hl_net_pl[slot].active    = TRUE;
+	hl_net_pl[slot].on_ground = on_ground;
+	hl_net_pl[slot].health    = health;
+
+	if (origin)
+		HLVecCopy(origin, hl_net_pl[slot].origin);
+	if (angles)
+		HLVecCopy(angles, hl_net_pl[slot].angles);
+	if (velocity)
+		HLVecCopy(velocity, hl_net_pl[slot].velocity);
+
+	HLNetPlayerSnapMove(slot, hl_pm_waterlevel);
+}
+
+U0 HLNetCapturePlayerState(I64 slot, CHLEntState *st)
+{
+	CHLNetPlayer *pl;
+
+	HLNetStateClear(st);
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	pl = &hl_net_pl[slot];
+
+	HLVecCopy(pl->origin, st->origin);
+
+	st->angles[0] = -pl->angles[0] / 3.0;
+	st->angles[1] = pl->angles[1];
+	st->angles[2] = 0.0;
+
+	st->modelindex = HLNetPlayerModelIndex();
+	st->frame      = pl->frame;
+	st->colormap   = pl->colormap;
+	st->skin       = 0;
+	st->effects    = 0;
+	st->step       = FALSE;
+	st->active     = TRUE;
+}
+
+
+#define HLPRED_BACKUP		64
+#define HLPRED_MASK		63
+#define HLPRED_INFLIGHT		2	// protocol 15 coarse keep-alive cmds
+#define HLPRED_HZ		72.0
+#define HLPRED_STEP		(1.0 / HLPRED_HZ)
+#define HLPRED_ERR_TAU		0.1
+
+class CHLPredCmd
+{
+	I64		seq;
+	I64		packet_seq;		// netchan seq at send, -1 unknown
+	F64		angles[3];
+	F64		forward;
+	F64		side;
+	F64		up;
+	Bool	jump;
+	Bool	duck;
+	F64		msec;
+	Bool	valid;
+};
+
+CHLPredCmd	hl_pred_cmds[HLPRED_BACKUP];
+I64		hl_pred_seq		= 0;
+I64		hl_pred_ack		= 0;
+F64		hl_pred_org[3];
+F64		hl_pred_vel[3];
+F64		hl_pred_basevel[3];
+F64		hl_pred_punch[3];
+F64		hl_pred_err[3];			// predicted - server, decayed toward 0
+F64		hl_pred_err_time	= 0.0;
+F64		hl_pred_shown[3];
+Bool	hl_pred_shown_ok	= FALSE;
+Bool	hl_pred_onground	= TRUE;
+Bool	hl_pred_have		= FALSE;
+F64		hl_pred_msgtime		= -1.0;
+
+U0 HLPredClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLPRED_BACKUP; i++)
+	{
+		hl_pred_cmds[i].seq        = 0;
+		hl_pred_cmds[i].packet_seq = -1;
+		hl_pred_cmds[i].forward    = 0.0;
+		hl_pred_cmds[i].side       = 0.0;
+		hl_pred_cmds[i].up         = 0.0;
+		hl_pred_cmds[i].jump       = FALSE;
+		hl_pred_cmds[i].duck       = FALSE;
+		hl_pred_cmds[i].msec       = HLPRED_STEP;
+		hl_pred_cmds[i].valid      = FALSE;
+		HLVecSet(hl_pred_cmds[i].angles, 0.0, 0.0, 0.0);
+	}
+
+	hl_pred_seq      = 0;
+	hl_pred_ack      = 0;
+	hl_pred_have     = FALSE;
+	hl_pred_msgtime  = -1.0;
+	hl_pred_onground = TRUE;
+	hl_pred_err_time = 0.0;
+	HLVecSet(hl_pred_org, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pred_vel, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pred_basevel, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pred_punch, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pred_err, 0.0, 0.0, 0.0);
+	HLVecSet(hl_pred_shown, 0.0, 0.0, 0.0);
+	hl_pred_shown_ok = FALSE;
+}
+
+HLPredClear;
+
+U0 HLPredCmdPush(F64 *view_angles, F64 forward, F64 side, F64 up,
+	Bool jump, Bool duck, F64 msec, I64 packet_seq)
+{
+	CHLPredCmd	*c;
+	I64			 slot;
+	I64			 i;
+
+	hl_pred_seq++;
+	slot = hl_pred_seq & HLPRED_MASK;
+	c    = &hl_pred_cmds[slot];
+
+	c->seq        = hl_pred_seq;
+	c->packet_seq = packet_seq;
+	c->forward    = forward;
+	c->side       = side;
+	c->up         = up;
+	c->jump       = jump;
+	c->duck       = duck;
+	c->valid      = TRUE;
+
+	if (msec > 0.0)
+		c->msec = msec;
+	else
+		c->msec = HLPRED_STEP;
+
+	for (i = 0; i < 3; i++)
+	{
+		if (view_angles)
+			c->angles[i] = view_angles[i];
+		else
+			c->angles[i] = 0.0;
+	}
+}
+
+U0 HLPredSnapFromNet()
+{
+	CHLEntState	*e;
+	CHLEntState48	*e48;
+	I64			 i;
+
+	if (hl_cl_viewent <= 0 || hl_cl_viewent >= HLNET_MAX_ENTS)
+		return;
+
+	e = &hl_net_cl[hl_cl_viewent];
+	if (!e->active)
+		return;
+
+	for (i = 0; i < 3; i++)
+	{
+		hl_pred_org[i]   = e->origin[i];
+		hl_pred_vel[i]   = hl_cl.velocity[i];
+		hl_pred_punch[i] = hl_cl.punchangle[i];
+	}
+	hl_pred_onground = hl_cl.on_ground;
+	hl_pred_have     = TRUE;
+	hl_pred_msgtime  = e->msgtime;
+
+	//Basevelocity: protocol 48 entity_state, else the last platform sample.
+	HLVecSet(hl_pred_basevel, 0.0, 0.0, 0.0);
+	if (hl_net_protocol == 48)
+	{
+		e48 = &hl_net_cl48[hl_cl_viewent];
+		if (e48->active)
+		{
+			for (i = 0; i < 3; i++)
+				hl_pred_basevel[i] = e48->v[HLES_BASEVELOCITY + i];
+		}
+	}
+	else
+	{
+		for (i = 0; i < 3; i++)
+			hl_pred_basevel[i] = hl_platform_velocity[i];
+	}
+}
+
+U0 HLPredUpdateAck()
+{
+	I64			 ack_packet;
+	I64			 best;
+	I64			 i;
+	I64			 s;
+	CHLPredCmd	*c;
+
+	if (hl_net_protocol == 48 && hl_net48_cl.active)
+	{
+		ack_packet = hl_net48_cl.incoming_acknowledged;
+		best       = hl_pred_ack;
+		for (i = 0; i < HLPRED_BACKUP; i++)
+		{
+			c = &hl_pred_cmds[i];
+			if (!c->valid)
+				goto qpred_ack48_next;
+			if (c->packet_seq < 0)
+				goto qpred_ack48_next;
+			if (c->packet_seq > ack_packet)
+				goto qpred_ack48_next;
+			if (c->seq > best)
+				best = c->seq;
+qpred_ack48_next:
+		}
+		hl_pred_ack = best;
+		return;
+	}
+
+	s = hl_pred_seq - HLPRED_INFLIGHT;
+	if (s < 0)
+		s = 0;
+	if (s > hl_pred_ack)
+		hl_pred_ack = s;
+}
+
+U0 HLPredReconcile()
+{
+	CHLEntState *e;
+	I64			 i;
+	F64			 pred_org[3];
+
+	if (hl_cl_viewent <= 0 || hl_cl_viewent >= HLNET_MAX_ENTS)
+		return;
+
+	e = &hl_net_cl[hl_cl_viewent];
+	if (!e->active)
+		return;
+
+	if (hl_pred_have && e->msgtime == hl_pred_msgtime)
+		return;
+
+	for (i = 0; i < 3; i++)
+		pred_org[i] = hl_pred_shown[i];
+
+	HLPredSnapFromNet;
+	HLPredUpdateAck;
+
+	if (hl_pred_have && hl_pred_shown_ok)
+	{
+		for (i = 0; i < 3; i++)
+			hl_pred_err[i] = pred_org[i] - hl_pred_org[i];
+		hl_pred_err_time = tS;
+	}
+	else
+	{
+		HLVecSet(hl_pred_err, 0.0, 0.0, 0.0);
+		hl_pred_err_time = tS;
+	}
+}
+
+U0 HLPredApply(CHLMap *map, F64 *origin, F64 *velocity, Bool *_on_ground)
+{
+	F64			 org[3];
+	F64			 vel[3];
+	F64			 ang[3];
+	F64			 forward[3];
+	F64			 right[3];
+	F64			 upv[3];
+	F64			 wish_move[3];
+	F64			 wishspeed;
+	F64			 msec;
+	F64			 fade;
+	F64			 elapsed;
+	I64			 water_level;
+	I64			 water_type;
+	I64			 seq;
+	I64			 i;
+	Bool		 on_ground;
+	CHLPredCmd	*c;
+
+	if (!map || !origin || !velocity)
+		return;
+
+	HLPredReconcile;
+
+	if (!hl_pred_have)
+		return;
+
+	HLVecCopy(hl_pred_org, org);
+	HLVecCopy(hl_pred_vel, vel);
+	on_ground = hl_pred_onground;
+
+	HLVecAdd(vel, hl_pred_basevel, vel);
+
+	seq = hl_pred_ack + 1;
+	while (seq <= hl_pred_seq)
+	{
+		c = &hl_pred_cmds[seq & HLPRED_MASK];
+		if (!c->valid || c->seq != seq)
+			goto qpred_next;
+
+		HLVecCopy(c->angles, ang);
+		HLAngleVectors(ang, forward, right, upv);
+
+		wish_move[0] = forward[0] * c->forward + right[0] * c->side;
+		wish_move[1] = forward[1] * c->forward + right[1] * c->side;
+		wish_move[2] = forward[2] * c->forward + right[2] * c->side + c->up;
+
+		water_level = 0;
+		water_type  = 0;
+		water_level = HLWaterLevelGet(map, org, &water_type);
+		if (water_level < 2)
+			wish_move[2] = 0.0;
+
+		wishspeed = HLVecLength(wish_move);
+		if (wishspeed > 0.0)
+			HLVecNormalize(wish_move);
+
+		msec = c->msec;
+		if (msec <= 0.0)
+			msec = HLPRED_STEP;
+
+		HLPlayerMove(map, org, vel, wish_move, wishspeed, c->jump, msec,
+			&on_ground, water_level, FALSE, ang, 0, c->duck);
+
+		//Punch decay matches the shell's 10 * dt falloff (HL1.ZC).
+		for (i = 0; i < 3; i++)
+			hl_pred_punch[i] -= hl_pred_punch[i] * 10.0 * msec;
+
+qpred_next:
+		seq++;
+	}
+
+	HLVecSub(vel, hl_pred_basevel, vel);
+
+	elapsed = tS - hl_pred_err_time;
+	if (elapsed < 0.0)
+		elapsed = 0.0;
+	fade = Exp(-elapsed / HLPRED_ERR_TAU);
+	for (i = 0; i < 3; i++)
+		org[i] += hl_pred_err[i] * fade;
+
+	HLVecCopy(org, origin);
+	HLVecCopy(vel, velocity);
+	HLVecCopy(org, hl_pred_shown);
+	hl_pred_shown_ok = TRUE;
+	if (_on_ground)
+		*_on_ground = on_ground;
+}
+
+U0 HLNetClientClear()
+{
+	I64 i;
+
+	hl_cl.view_height = HLDEFAULT_VIEWHEIGHT;
+
+	for (i = 0; i < 3; i++)
+	{
+		hl_cl.punchangle[i]  = 0.0;
+		hl_cl.velocity[i]    = 0.0;
+		hl_cl.view_angles[i] = 0.0;
+	}
+
+	hl_cl_gametype       = 0;
+	hl_cl.items          = 0;
+	hl_cl.on_ground      = FALSE;
+	hl_cl.in_water       = FALSE;
+	hl_cl.weaponframe    = 0;
+	hl_cl.armorvalue     = 0;
+	hl_cl.weaponmodel    = 0;
+	hl_cl.health         = 0;
+	hl_cl.currentammo    = 0;
+	hl_cl.ammo_shells    = 0;
+	hl_cl.ammo_nails     = 0;
+	hl_cl.ammo_rockets   = 0;
+	hl_cl.ammo_cells     = 0;
+	hl_cl.weapon         = 0;
+	hl_cl.angles_forced  = FALSE;
+	hl_cl.time           = 0.0;
+	hl_cl.stats_received = 0;
+
+	hl_cl_name[0] = 0;
+	hl_cl_top     = 0;
+	hl_cl_bottom  = 0;
+	hl_cl_cdtrack = 0;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		hl_scores[i].name[0] = 0;
+		hl_scores[i].frags   = 0;
+		hl_scores[i].colors  = 0;
+		hl_scores[i].active  = FALSE;
+	}
+	hl_scoreboard_show = FALSE;
+
+	hl_net_dropped = 0;
+	hl_net_parsed  = 0;
+
+	hl_net_damage_pending = FALSE;
+	hl_net_damage_save    = 0;
+	hl_net_damage_take    = 0;
+	HLVecSet(hl_net_damage_from, 0.0, 0.0, 0.0);
+
+	HLPredClear;
+
+	hl_net_moves_sent = 0;
+	hl_net_moves_read = 0;
+	hl_net_move_ping  = 0.0;
+	HLVecSet(hl_net_move_angles, 0.0, 0.0, 0.0);
+	HLVecSet(hl_net_move_cmd, 0.0, 0.0, 0.0);
+	hl_net_move_attack  = FALSE;
+	hl_net_move_jump    = FALSE;
+	hl_net_move_impulse = 0;
+
+	hl_net_protocol = 15;
+}
+
+U0 HLNetLogHex(U8 *tag, U8 *data, I64 len, I64 from, I64 count)
+{
+	U8	line[160];
+	U8	byte_txt[8];
+	I64	i;
+	I64	end;
+
+	if (!data || len < 1 || from < 0 || from >= len)
+		return;
+
+	end = from + count;
+	if (end > len)
+		end = len;
+
+	StrPrint(line, "%s %d..%d:", tag, from, end - 1);
+
+	for (i = from; i < end; i++)
+	{
+		StrPrint(byte_txt, " %02X", data[i]);
+		StrCopy(line + StrLen(line), byte_txt);
+	}
+
+	StrCopy(line + StrLen(line), "\n");
+	HLLog(line);
+}
+
+U0 HLNetWriteIdentity(CHLMsg *m, I64 slot, U8 *name, I64 top, I64 bottom)
+{
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	HLMsgWriteByte(m, HLSVC15_UPDATENAME);
+	HLMsgWriteByte(m, slot);
+	HLMsgWriteString(m, name);
+
+	HLMsgWriteByte(m, HLSVC15_UPDATECOLORS);
+	HLMsgWriteByte(m, slot);
+	HLMsgWriteByte(m, ((top & 15) << 4) | (bottom & 15));
+
+	HLStrCopy(hl_scores[slot].name, name, 16);
+	hl_scores[slot].colors = ((top & 15) << 4) | (bottom & 15);
+	hl_scores[slot].active = TRUE;
+}
+
+U0 HLNetRefreshScores()
+{
+	I64 i;
+	I64 frags;
+	U8 *name;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+		{
+			hl_scores[i].active = FALSE;
+			goto qrs_next;
+		}
+
+		name = hl_sv_clients[i].name;
+		if (!name[0])
+			name = "player";
+
+		frags = hl_sv_clients[i].frags;
+
+		HLStrCopy(hl_scores[i].name, name, 16);
+		hl_scores[i].frags  = frags;
+		hl_scores[i].colors =
+			((hl_sv_clients[i].top & 15) << 4) | (hl_sv_clients[i].bottom & 15);
+		hl_scores[i].active = TRUE;
+
+qrs_next:
+	}
+}
+
+U0 HLSvUpdateToReliableMessages()
+{
+	I64 i;
+	I64 frags;
+	I64 colors;
+	U8 *name;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+			goto qur_next;
+
+		name = hl_sv_clients[i].name;
+		if (!name[0])
+			name = "player";
+
+		colors = ((hl_sv_clients[i].top & 15) << 4) |
+			(hl_sv_clients[i].bottom & 15);
+
+		frags = hl_sv_clients[i].frags;
+
+		if (!hl_sv_clients[i].sent_ident ||
+			StrCompare(hl_sv_clients[i].old_name, name))
+		{
+			HLMsgWriteByte(&hl_sv_reliable_datagram, HLSVC15_UPDATENAME);
+			HLMsgWriteByte(&hl_sv_reliable_datagram, i);
+			HLMsgWriteString(&hl_sv_reliable_datagram, name);
+			HLStrCopy(hl_sv_clients[i].old_name, name, 32);
+		}
+
+		if (!hl_sv_clients[i].sent_ident ||
+			hl_sv_clients[i].old_colors != colors)
+		{
+			HLMsgWriteByte(&hl_sv_reliable_datagram, HLSVC15_UPDATECOLORS);
+			HLMsgWriteByte(&hl_sv_reliable_datagram, i);
+			HLMsgWriteByte(&hl_sv_reliable_datagram, colors);
+			hl_sv_clients[i].old_colors = colors;
+		}
+
+		if (!hl_sv_clients[i].sent_ident ||
+			hl_sv_clients[i].old_frags != frags)
+		{
+			HLMsgWriteByte(&hl_sv_reliable_datagram, HLSVC15_UPDATEFRAGS);
+			HLMsgWriteByte(&hl_sv_reliable_datagram, i);
+			HLMsgWriteShort(&hl_sv_reliable_datagram, frags);
+			hl_sv_clients[i].old_frags = frags;
+		}
+
+		hl_sv_clients[i].sent_ident = TRUE;
+
+qur_next:
+	}
+}
+
+U0 HLNetWriteFrags(CHLMsg *m)
+{
+	I64 i;
+	I64 frags;
+	I64 colors;
+	U8 *name;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+			goto qwf_next;
+
+		name = hl_sv_clients[i].name;
+		if (!name[0])
+			name = "player";
+
+		colors = ((hl_sv_clients[i].top & 15) << 4) |
+			(hl_sv_clients[i].bottom & 15);
+
+		frags = hl_sv_clients[i].frags;
+
+		HLMsgWriteByte(m, HLSVC15_UPDATENAME);
+		HLMsgWriteByte(m, i);
+		HLMsgWriteString(m, name);
+
+		HLMsgWriteByte(m, HLSVC15_UPDATECOLORS);
+		HLMsgWriteByte(m, i);
+		HLMsgWriteByte(m, colors);
+
+		HLMsgWriteByte(m, HLSVC15_UPDATEFRAGS);
+		HLMsgWriteByte(m, i);
+		HLMsgWriteShort(m, frags);
+
+qwf_next:
+	}
+}
+
+U0 HLNetWriteAllIdentities(CHLMsg *m)
+{
+	I64 i;
+	U8 *name;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+			goto qwi_next;
+
+		name = hl_sv_clients[i].name;
+		if (!name[0])
+			name = "player";
+
+		HLNetWriteIdentity(m, i, name,
+			hl_sv_clients[i].top, hl_sv_clients[i].bottom);
+
+qwi_next:
+	}
+}
+
+U0 HLNetWriteCDTrack(CHLMsg *m)
+{
+	I64 track = 0;
+
+	if (hl_entities && hl_num_entities > 0)
+		track = hl_entities[0].snd_index;
+
+	HLMsgWriteByte(m, HLSVC_CDTRACK);
+	HLMsgWriteByte(m, track);
+	HLMsgWriteByte(m, track);
+}
+
+
+U0 HLNetWriteClientdata(CHLMsg *m, I64 slot)
+{
+	I64	 bits = 0;
+	I64	 j;
+	F64	 health = 100.0;
+	F64	 vel[3];
+
+	HLVecSet(vel, 0.0, 0.0, 0.0);
+
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+	{
+		health = hl_net_pl[slot].health;
+		HLVecCopy(hl_net_pl[slot].velocity, vel);
+	}
+
+
+	bits |= HLSU_ITEMS;
+
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS && hl_net_pl[slot].on_ground)
+		bits |= HLSU_ONGROUND;
+
+	for (j = 0; j < 3; j++)
+	{
+		if (vel[j] != 0.0)
+			bits |= HLSU_VELOCITY1 << j;
+	}
+
+	HLMsgWriteByte(m, HLSVC_CLIENTDATA);
+	HLMsgWriteShort(m, bits);
+
+	for (j = 0; j < 3; j++)
+	{
+		//Velocity in units/sec divided by 16, signed byte.
+		if (bits & (HLSU_VELOCITY1 << j))
+			HLMsgWriteChar(m, ToI64(vel[j] / 16.0));
+	}
+
+	HLMsgWriteLong(m, 0);
+
+	HLMsgWriteShort(m, ToI64(health));
+	HLMsgWriteByte(m, 0);
+	HLMsgWriteByte(m, 0);
+	HLMsgWriteByte(m, 0);
+	HLMsgWriteByte(m, 0);
+	HLMsgWriteByte(m, 0);
+
+	HLMsgWriteByte(m, 0);
+}
+
+U0 HLNetWriteNativePlayers(CHLMsg *m, I64 view_slot)
+{
+	CHLEntState	now;
+	I64			i;
+	I64			num;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_net_pl[i].active && i != view_slot)
+		{
+			if (HLNET_MAX_DATAGRAM - m->len < 16)
+				return;
+
+			num = i + 1;
+			if (num >= HLNET_MAX_ENTS)
+				return;
+
+			HLNetCapturePlayerState(i, &now);
+			HLNetWriteEntityUpdate(m, num, &now, &hl_net_baseline[num]);
+			MemCopy(&hl_net_sent[num], &now, sizeof(CHLEntState));
+
+			if (num >= hl_net_num_ents)
+				hl_net_num_ents = num + 1;
+		}
+	}
+}
+
+Bool HLNetBuildClientDatagram(I64 client_ent, CHLVisState *vis, F64 time,
+	Bool include_shared)
+{
+	I64 view_slot;
+
+	HLMsgClear(&hl_net_datagram);
+
+	HLMsgWriteByte(&hl_net_datagram, HLSVC_TIME);
+	HLMsgWriteFloat(&hl_net_datagram, time);
+
+	view_slot = client_ent - 1;
+	if (client_ent <= 0)
+		view_slot = hl_sv_local_slot;
+
+	HLNetWriteNativePlayers(&hl_net_datagram, view_slot);
+
+	if (include_shared)
+		HLMsgAppendIfRoom(&hl_net_datagram, &hl_sv_datagram, HLNET_MAX_DATAGRAM);
+
+	if (hl_net_datagram.overflowed)
+	{
+		hl_net_dropped++;
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+Bool HLNetServerFrame(I64 client_ent, F64 time)
+{
+	I64		i;
+	I64		ent;
+	I64		local_slot;
+	Bool	ok;
+
+	ok = TRUE;
+
+	local_slot = -1;
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_clients[i].active && hl_sv_clients[i].local)
+		{
+			local_slot = i;
+			break;
+		}
+	}
+
+	HLSvUpdateToReliableMessages;
+
+	if (hl_sv_reliable_datagram.len > 0)
+	{
+		for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		{
+			if (hl_sv_clients[i].active)
+				HLMsgAppendIfRoom(&hl_sv_client_msg[i],
+					&hl_sv_reliable_datagram, HLNET_MAX_MSG);
+		}
+
+		HLMsgClear(&hl_sv_reliable_datagram);
+	}
+
+	if (HLClientMode)
+	{
+		if (!HLNetBuildClientDatagram(client_ent, NULL, time, FALSE))
+			ok = FALSE;
+		else
+		{
+			if (local_slot >= 0 && hl_sv_client_msg[local_slot].len > 0)
+			{
+				HLMsgAppendIfRoom(&hl_net_datagram,
+					&hl_sv_client_msg[local_slot], HLNET_MAX_DATAGRAM);
+				HLMsgClear(&hl_sv_client_msg[local_slot]);
+			}
+
+			if (!HLNetSendToClient(&hl_net_datagram))
+			{
+				hl_net_dropped++;
+				ok = FALSE;
+			}
+		}
+	}
+	else if (local_slot >= 0)
+	{
+		if (hl_demo_recording && hl_net_pl[local_slot].active)
+		{
+			HLDemoSetRecordAngles(hl_net_pl[local_slot].angles);
+			HLSv48CaptureFrame(&hl_pe_sv_stage, time);
+			HLMsgClear(&hl_net_datagram);
+			HLMsgWriteByte(&hl_net_datagram, HLSVC_TIME);
+			HLMsgWriteFloat(&hl_net_datagram, time);
+			if (HLNetWriteClientdata48(&hl_net_datagram, local_slot, time) &&
+				HLNetWritePacketEntities(&hl_net_datagram, NULL,
+					&hl_pe_sv_stage, 0, time) &&
+				!hl_net_datagram.overflowed)
+				HLDemoWriteMessage(&hl_net_datagram);
+		}
+
+		HLMsgClear(&hl_sv_client_msg[local_slot]);
+	}
+
+	if (hl_udp_ready && hl_udp_server)
+	{
+		for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		{
+			if (!hl_sv_clients[i].active || hl_sv_clients[i].local)
+				goto qsf_next;
+
+			ent = hl_sv_clients[i].edict;
+			if (ent <= 0)
+				goto qsf_next;
+
+			if (hl_sv_clients[i].signon != 4)
+				goto qsf_next;
+
+			if (HLNetSlotIs48(i))
+			{
+				if (!HLSv48SendFrame(i, time))
+					ok = FALSE;
+
+				goto qsf_reliable;
+			}
+
+			if (!HLNetBuildClientDatagram(ent, NULL, time, TRUE))
+			{
+				ok = FALSE;
+				goto qsf_next;
+			}
+
+			if (!HLNetSendUnreliable(i, &hl_net_datagram))
+				ok = FALSE;
+
+qsf_reliable:
+
+			if (hl_sv_client_msg[i].overflowed)
+			{
+				HLMsgClear(&hl_sv_client_msg[i]);
+				hl_sv_clients[i].drop_asap = TRUE;
+				goto qsf_next;
+			}
+
+			if (hl_sv_client_msg[i].len > 0)
+			{
+				HLNetSendReliable(i, &hl_sv_client_msg[i]);
+				HLMsgClear(&hl_sv_client_msg[i]);
+			}
+
+qsf_next:
+		}
+	}
+
+	HLMsgClear(&hl_sv_datagram);
+	HLNetRefreshScores;
+
+	return ok;
+}
+
+U0 HLNetPrintStrip(U8 *dst, U8 *src, I64 max)
+{
+	I64	 i;
+	I64	 j;
+	I64	 mask = 0;
+	Bool talk = FALSE;
+
+	if (!dst || max < 2)
+		return;
+
+	dst[0] = 0;
+	if (!src)
+		return;
+
+	i = 0;
+	if (src[0] == 1)
+	{
+		mask = 128;
+		talk = TRUE;
+		i    = 1;
+	}
+	else if (src[0] == 2)
+	{
+		mask = 128;
+		i    = 1;
+	}
+
+	j = 0;
+	while (src[i] && j < max - 1)
+	{
+		if (src[i] < 128)
+			dst[j] = src[i] | mask;
+		else
+			dst[j] = src[i];
+		j++;
+		i++;
+	}
+	dst[j] = 0;
+
+	if (talk)
+		HLSndPlayAt("misc/talk.wav", hl_snd_listener, 1.0, 0.0);
+}
+
+
+U0 HLNetParseClientdata(CHLMsg *m)
+{
+	I64 bits = HLMsgReadShort(m) & 0xFFFF;
+	I64 j;
+
+	if (bits & HLSU_VIEWHEIGHT)
+		hl_cl.view_height = ToF64(HLMsgReadChar(m));
+	else
+		hl_cl.view_height = HLDEFAULT_VIEWHEIGHT;
+
+	if (bits & HLSU_IDEALPITCH)
+		HLMsgReadChar(m);
+
+	for (j = 0; j < 3; j++)
+	{
+		if (bits & (HLSU_PUNCH1 << j))
+			hl_cl.punchangle[j] = ToF64(HLMsgReadChar(m));
+		else
+			hl_cl.punchangle[j] = 0.0;
+
+		if (bits & (HLSU_VELOCITY1 << j))
+			hl_cl.velocity[j] = ToF64(HLMsgReadChar(m)) * 16.0;
+		else
+			hl_cl.velocity[j] = 0.0;
+	}
+
+	hl_cl.items     = HLMsgReadLong(m);
+	hl_cl.on_ground = ToBool((bits & HLSU_ONGROUND) != 0);
+	hl_cl.in_water  = ToBool((bits & HLSU_INWATER) != 0);
+
+	if (bits & HLSU_WEAPONFRAME)
+		hl_cl.weaponframe = HLMsgReadByte(m);
+	else
+		hl_cl.weaponframe = 0;
+
+	if (bits & HLSU_ARMOR)
+		hl_cl.armorvalue = HLMsgReadByte(m);
+	else
+		hl_cl.armorvalue = 0;
+
+	if (bits & HLSU_WEAPON)
+		hl_cl.weaponmodel = HLMsgReadByte(m);
+	else
+		hl_cl.weaponmodel = 0;
+
+	hl_cl.health       = HLMsgReadShort(m);
+	hl_cl.currentammo  = HLMsgReadByte(m);
+	hl_cl.ammo_shells  = HLMsgReadByte(m);
+	hl_cl.ammo_nails   = HLMsgReadByte(m);
+	hl_cl.ammo_rockets = HLMsgReadByte(m);
+	hl_cl.ammo_cells   = HLMsgReadByte(m);
+	hl_cl.weapon       = HLMsgReadByte(m);
+}
+
+U0 HLNetParseStatic(CHLMsg *m)
+{
+	CHLStaticEnt	*se;
+	I64			 idx;
+	I64			 frame;
+	I64			 j;
+	F64			 org[3];
+	F64			 ang[3];
+
+	idx   = HLMsgReadByte(m);
+	frame = HLMsgReadByte(m);
+	HLMsgReadByte(m);
+	HLMsgReadByte(m);
+
+	for (j = 0; j < 3; j++)
+	{
+		org[j] = HLMsgReadCoord(m);
+		ang[j] = HLMsgReadAngle(m);
+	}
+
+	if (m->badread || hl_static_count >= HLBI_MAX_STATIC)
+		return;
+
+	se = &hl_static_ent[hl_static_count];
+	se->mdl = NULL;
+	if (idx > 0 && idx < hl_precache_model_count)
+		se->mdl = hl_precache_mdl[idx];
+
+	if (!se->mdl)
+		return;
+
+	for (j = 0; j < 3; j++)
+	{
+		se->origin[j] = org[j];
+		se->angles[j] = ang[j];
+	}
+	se->frame = frame;
+	hl_static_count++;
+}
+
+U0 HLNetParseParticle(CHLMsg *m)
+{
+	F64 org[3];
+	F64 dir[3];
+	I64 color;
+	I64 count;
+	I64 j;
+	I64 d;
+
+	for (j = 0; j < 3; j++)
+		org[j] = HLMsgReadCoord(m);
+
+	for (j = 0; j < 3; j++)
+	{
+		d = HLMsgReadByte(m);
+		if (d > 127)
+			d -= 256;
+		dir[j] = ToF64(d) / 16.0;
+	}
+
+	count = HLMsgReadByte(m);
+	color = HLMsgReadByte(m);
+
+	if (m->badread)
+		return;
+
+	HLPartEffect(org, dir, color, count, tS);
+}
+
+U0 HLNetParseBaseline(CHLMsg *m)
+{
+	CHLEntState	 scratch;
+	CHLEntState	*b = &scratch;
+	I64			 num = HLMsgReadShort(m);
+
+	if (num >= 1 && num < HLNET_MAX_ENTS)
+		b = &hl_net_baseline[num];
+
+	b->modelindex = HLMsgReadByte(m);
+	b->frame      = HLMsgReadByte(m);
+	b->colormap   = HLMsgReadByte(m);
+	b->skin       = HLMsgReadByte(m);
+	b->origin[0]  = HLMsgReadCoord(m);
+	b->angles[0]  = HLMsgReadAngle(m);
+	b->origin[1]  = HLMsgReadCoord(m);
+	b->angles[1]  = HLMsgReadAngle(m);
+	b->origin[2]  = HLMsgReadCoord(m);
+	b->angles[2]  = HLMsgReadAngle(m);
+	b->effects    = 0;
+	b->step       = FALSE;
+	b->active     = FALSE;
+
+	if (num >= 1 && num < HLNET_MAX_ENTS && num >= hl_net_num_ents)
+		hl_net_num_ents = num + 1;
+}
+
+U0 HLNetParseSound(CHLMsg *m)
+{
+	I64		field_mask;
+	I64		volume;
+	F64		attenuation;
+	I64		sound_num;
+	I64		ent_num;
+	I64		chan_num;
+	I64		i;
+	F64		pos[3];
+	U8		*name;
+
+	field_mask = HLMsgReadByte(m);
+
+	volume = HLSND_DEFAULT_VOL;
+	if (field_mask & HLSND_VOLUME)
+		volume = HLMsgReadByte(m);
+
+	attenuation = HLSND_DEFAULT_ATTEN;
+	if (field_mask & HLSND_ATTENUATION)
+		attenuation = ToF64(HLMsgReadByte(m)) / 64.0;
+
+	i = HLMsgReadShort(m);
+	ent_num   = i >> 3;
+	chan_num  = i & 7;
+	sound_num = HLMsgReadByte(m);
+
+	for (i = 0; i < 3; i++)
+		pos[i] = HLMsgReadCoord(m);
+
+	if (sound_num < 1 || sound_num > hl_precache_sound_count)
+		return;
+
+	name = hl_precache_sound[sound_num - 1];
+	if (!name || !name[0])
+		return;
+
+	HLSndPlayAt(name, pos, ToF64(volume) / 255.0, attenuation,
+		ent_num, chan_num);
+}
+
+U0 HLNetParseTempEntity(CHLMsg *m)
+{
+	I64		type;
+	I64		i;
+	F64		org[3];
+	F64		end[3];
+
+	type = HLMsgReadByte(m);
+
+	if (type == HLTE_LIGHTNING1 || type == HLTE_LIGHTNING2 ||
+		type == HLTE_LIGHTNING3 || type == HLTE_BEAM)
+	{
+		HLMsgReadShort(m);
+		for (i = 0; i < 3; i++)
+			org[i] = HLMsgReadCoord(m);
+		for (i = 0; i < 3; i++)
+			end[i] = HLMsgReadCoord(m);
+		HLBiBeamAdd(type, org, end, tS);
+		return;
+	}
+
+	for (i = 0; i < 3; i++)
+		org[i] = HLMsgReadCoord(m);
+
+	if (type == HLTE_EXPLOSION2)
+	{
+		HLMsgReadByte(m);
+		HLMsgReadByte(m);
+	}
+
+	HLBiTempEntity(type, org);
+}
+
+
+class CHLResource
+{
+	U8	name[HLRES_NAME];
+	I64	type;
+	I64	index;
+	I64	size;			//download size in bytes, 0 = client has it
+	I64	flags;
+	U8	md5[16];
+};
+
+CHLResource	hl_res[HLRES_MAX];
+I64			hl_res_count = 0;
+I64			hl_res_missing = 0;
+
+#define HLDECAL_MAX		256
+#define HLDECAL_NAME	32
+U8	hl_decal_names[HLDECAL_MAX * HLDECAL_NAME];
+I64	hl_decal_count = 0;
+
+U0 HLResourceClear()
+{
+	I64 i;
+
+	for (i = 0; i < HLRES_MAX; i++)
+	{
+		hl_res[i].name[0] = 0;
+		hl_res[i].type    = HLRES_MODEL;
+		hl_res[i].index   = 0;
+		hl_res[i].size    = 0;
+		hl_res[i].flags   = 0;
+	}
+
+	hl_res_count   = 0;
+	hl_res_missing = 0;
+
+	for (i = 0; i < HLDECAL_MAX; i++)
+		hl_decal_names[i * HLDECAL_NAME] = 0;
+
+	hl_decal_count = 0;
+}
+
+HLResourceClear;
+
+U0 HLResourceToPrecache()
+{
+	I64	 i;
+	I64	 idx;
+	U8	*slot;
+
+	hl_cl_model_count = 0;
+	hl_cl_sound_count = 0;
+
+	for (i = 0; i < HLCL_MAX_PRECACHE; i++)
+	{
+		hl_cl_model_names[i * HLCL_PRECACHE_NAME] = 0;
+		hl_cl_sound_names[i * HLCL_PRECACHE_NAME] = 0;
+	}
+
+	for (i = 0; i < hl_res_count; i++)
+	{
+		idx = hl_res[i].index;
+		if (idx < 1 || idx > HLCL_MAX_PRECACHE)
+			goto qrp_next;
+
+		if (hl_res[i].type == HLRES_MODEL || hl_res[i].type == HLRES_WORLD)
+		{
+			slot = hl_cl_model_names + (idx - 1) * HLCL_PRECACHE_NAME;
+			HLStrCopy(slot, hl_res[i].name, HLCL_PRECACHE_NAME);
+			if (idx > hl_cl_model_count)
+				hl_cl_model_count = idx;
+		}
+		else if (hl_res[i].type == HLRES_SOUND)
+		{
+			slot = hl_cl_sound_names + (idx - 1) * HLCL_PRECACHE_NAME;
+			HLStrCopy(slot, hl_res[i].name, HLCL_PRECACHE_NAME);
+			if (idx > hl_cl_sound_count)
+				hl_cl_sound_count = idx;
+		}
+
+qrp_next:
+	}
+}
+
+Bool HLResourceListParse(CHLMsg *m)
+{
+	I64	i;
+	I64	total;
+	I64	j;
+	U8	line[96];
+
+	HLResourceClear();
+	HLBitReadStart(m);
+
+	total = HLBitReadBits(m, 12);
+	if (m->badread)
+		return FALSE;
+
+	if (total < 0 || total > HLRES_MAX)
+	{
+		StrPrint(line, "net: resourcelist claims %d resources, max %d\n",
+			total, HLRES_MAX);
+		HLLog(line);
+		HLLogFlush;
+		return FALSE;
+	}
+
+	for (i = 0; i < total; i++)
+	{
+		hl_res[i].type = HLBitReadBits(m, 4);
+		HLBitReadBitString(m, hl_res[i].name, HLRES_NAME);
+		hl_res[i].index = HLBitReadBits(m, 12);
+		hl_res[i].size  = HLBitReadBits(m, 24);
+		hl_res[i].flags = HLBitReadBits(m, 3);
+
+		if (hl_res[i].flags & HLRES_CUSTOM)
+		{
+			for (j = 0; j < 16; j++)
+				hl_res[i].md5[j] = HLBitReadBits(m, 8) & 0xFF;
+		}
+
+		if (m->badread)
+			return FALSE;
+
+		if (hl_res[i].size > 0)
+			hl_res_missing++;
+
+		hl_res_count = i + 1;
+	}
+
+	if (HLBitReadBits(m, 1))
+	{
+		HLLog("net: resourcelist has a consistency list - not decoded, "
+			"see HLResourceListParse\n");
+		HLLogFlush;
+		HLBitReadEnd(m);
+		return FALSE;
+	}
+
+	HLBitReadEnd(m);
+
+	if (m->badread)
+		return FALSE;
+
+	HLResourceToPrecache();
+
+	StrPrint(line, "net: resourcelist %d entries, %d need download\n",
+		hl_res_count, hl_res_missing);
+	HLLog(line);
+	HLLogFlush;
+
+	return TRUE;
+}
+
+U0 HLUserMsgDispatch(I64 num, U8 *body, I64 len)
+{
+	CHLUserMsg	*u;
+	I64			 n;
+	I64			 sx;
+	I64			 sy;
+	I64			 sz;
+	F64			 src[3];
+	U8			 text[128];
+	I64			 i;
+
+	u = HLUserMsgGet(num);
+	if (!u)
+	{
+		hl_usermsg_unknown++;
+		return;
+	}
+
+	n = len;
+	if (n > HLUSERMSG_MAX_BODY)
+		n = HLUSERMSG_MAX_BODY;
+
+	if (n > 0 && body)
+		MemCopy(u->body, body, n);
+
+	u->body_len = n;
+	u->count++;
+
+	if (!body || n < 1)
+		return;
+
+	if (!StrCompare(u->name, "Health"))
+	{
+		hl_cl.health = body[0] & 0xFF;
+		return;
+	}
+
+	if (!StrCompare(u->name, "Battery") && n >= 2)
+	{
+		hl_cl.armorvalue = (body[0] & 0xFF) | ((body[1] & 0xFF) << 8);
+		return;
+	}
+
+	if (!StrCompare(u->name, "Damage") && n >= 12)
+	{
+		//armor@0 damage@1 bits@2..5 coords@6..11 as MSG_WriteCoord shorts
+		sx = (body[6] & 0xFF) | ((body[7] & 0xFF) << 8);
+		sy = (body[8] & 0xFF) | ((body[9] & 0xFF) << 8);
+		sz = (body[10] & 0xFF) | ((body[11] & 0xFF) << 8);
+		if (sx > 32767) sx -= 65536;
+		if (sy > 32767) sy -= 65536;
+		if (sz > 32767) sz -= 65536;
+		src[0] = ToF64(sx) / 8.0;
+		src[1] = ToF64(sy) / 8.0;
+		src[2] = ToF64(sz) / 8.0;
+		if (sx || sy || sz)
+			HLHudDamageSource(src);
+		return;
+	}
+
+	if (!StrCompare(u->name, "SayText") && n >= 2)
+	{
+		i = 0;
+		while (i < n - 1 && i < 127 && body[1 + i])
+		{
+			text[i] = body[1 + i];
+			i++;
+		}
+		text[i] = 0;
+		if (text[0])
+			HLBiPrintAppend(text);
+	}
+}
+
+Bool HLNetParseUserMsg(CHLMsg *m, I64 num)
+{
+	U8	 body[HLUSERMSG_MAX_BODY];
+	CHLUserMsg	*u;
+	I64	 len;
+	I64	 i;
+	U8	 line[96];
+
+	u = HLUserMsgGet(num);
+	if (!u)
+	{
+		StrPrint(line, "net: user message %d never registered, aborting msg\n",
+			num);
+		HLLog(line);
+		HLLogFlush;
+		hl_usermsg_unknown++;
+		return FALSE;
+	}
+
+	len = u->size;
+	if (len < 0)
+		len = HLMsgReadByte(m);		//size 255 at registration: length byte leads
+
+	if (len < 0 || m->badread)
+		return FALSE;
+
+	for (i = 0; i < len; i++)
+	{
+		if (i < HLUSERMSG_MAX_BODY)
+			body[i] = HLMsgReadByte(m) & 0xFF;
+		else
+			HLMsgReadByte(m);
+	}
+
+	if (m->badread)
+		return FALSE;
+
+	HLUserMsgDispatch(num, body, len);
+
+	return TRUE;
+}
+
+#define HLWEAPON_SLOTS	64
+F64	hl_cl_weapon48[HLWEAPON_SLOTS * HLDELTA_MAX_SLOTS];
+
+U0 HLClientWeapons48Clear()
+{
+	I64 i;
+
+	for (i = 0; i < HLWEAPON_SLOTS * HLDELTA_MAX_SLOTS; i++)
+		hl_cl_weapon48[i] = 0.0;
+}
+
+HLClientWeapons48Clear;
+
+U0 HLNetClientData48ToHud()
+{
+	I64 j;
+
+	hl_cl.health      = ToI64(hl_cl_data48.v[HLCD_HEALTH]);
+	hl_cl.weaponmodel = ToI64(hl_cl_data48.v[HLCD_VIEWMODEL]);
+	hl_cl.weaponframe = ToI64(hl_cl_data48.v[HLCD_WEAPONANIM]);
+	hl_cl.weapon      = ToI64(hl_cl_data48.v[HLCD_M_IID]);
+	hl_cl.ammo_shells = ToI64(hl_cl_data48.v[HLCD_AMMO_SHELLS]);
+	hl_cl.ammo_nails  = ToI64(hl_cl_data48.v[HLCD_AMMO_NAILS]);
+	hl_cl.ammo_rockets = ToI64(hl_cl_data48.v[HLCD_AMMO_ROCKETS]);
+	hl_cl.ammo_cells  = ToI64(hl_cl_data48.v[HLCD_AMMO_CELLS]);
+	hl_cl.view_height = hl_cl_data48.v[HLCD_VIEW_OFS + 2];
+
+	//FL_ONGROUND is bit 512 in HL's flags word, as in Quake.
+	hl_cl.on_ground = ToBool(ToI64(hl_cl_data48.v[HLCD_FLAGS]) & 512);
+	hl_cl.in_water  = ToBool(hl_cl_data48.v[HLCD_WATERLEVEL] >= 2.0);
+
+	for (j = 0; j < 3; j++)
+	{
+		hl_cl.punchangle[j] = hl_cl_data48.v[HLCD_PUNCHANGLE + j];
+		hl_cl.velocity[j]   = hl_cl_data48.v[HLCD_VELOCITY + j];
+	}
+
+}
+
+Bool HLNetParseClientData48(CHLMsg *m, F64 timebase)
+{
+	I64	i;
+	I64	slot;
+	F64	*wp;
+
+	HLBitReadStart(m);
+
+	if (HLBitReadBits(m, 1))
+		HLBitReadBits(m, 8);
+
+	for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+		hl_cl_data48.v[i] = hl_cl_data48_prev.v[i];
+	HLStrCopy(hl_cl_data48.physinfo, hl_cl_data48_prev.physinfo, 256);
+
+	if (!HLDeltaRead(m, &hl_delta_clientdata, hl_cl_data48.v,
+		hl_cl_data48.physinfo, 256, timebase))
+	{
+		HLBitReadEnd(m);
+		return FALSE;
+	}
+
+	while (TRUE)
+	{
+		if (m->badread)
+			break;
+
+		if (!HLBitReadBits(m, 1))
+			break;
+
+		slot = HLBitReadBits(m, 6);
+		if (m->badread || slot < 0 || slot >= HLWEAPON_SLOTS)
+		{
+			HLBitReadEnd(m);
+			return FALSE;
+		}
+
+		wp = hl_cl_weapon48 + slot * HLDELTA_MAX_SLOTS;
+
+		if (!HLDeltaRead(m, &hl_delta_weapon, wp, NULL, 0, timebase))
+		{
+			HLBitReadEnd(m);
+			return FALSE;
+		}
+	}
+
+	HLBitReadEnd(m);
+
+	if (m->badread)
+		return FALSE;
+
+	for (i = 0; i < HLDELTA_MAX_SLOTS; i++)
+		hl_cl_data48_prev.v[i] = hl_cl_data48.v[i];
+	HLStrCopy(hl_cl_data48_prev.physinfo, hl_cl_data48.physinfo, 256);
+
+	HLNetClientData48ToHud();
+
+	return TRUE;
+}
+
+U0 HLNetInfoValue(U8 *info, U8 *key, U8 *out, I64 max)
+{
+	I64	 i;
+	I64	 j;
+	I64	 klen;
+	Bool	 match;
+
+	if (out && max > 0)
+		out[0] = 0;
+	if (!info || !key || !out || max < 2)
+		return;
+
+	klen = StrLen(key);
+	i    = 0;
+
+	while (info[i])
+	{
+		if (info[i] != '\\')
+		{
+			i++;
+			goto qiv_next;
+		}
+
+		i++;
+
+		match = TRUE;
+		for (j = 0; j < klen; j++)
+		{
+			if (info[i + j] != key[j])
+			{
+				match = FALSE;
+				break;
+			}
+		}
+
+		if (match && info[i + klen] != '\\' && info[i + klen] != 0)
+			match = FALSE;
+
+		while (info[i] && info[i] != '\\')
+			i++;
+		if (info[i] == '\\')
+			i++;
+
+		if (!match)
+		{
+			while (info[i] && info[i] != '\\')
+				i++;
+			goto qiv_next;
+		}
+
+		j = 0;
+		while (info[i] && info[i] != '\\' && j < max - 1)
+		{
+			out[j] = info[i];
+			j++;
+			i++;
+		}
+		out[j] = 0;
+		return;
+
+qiv_next:
+	}
+}
+
+U0 HLNetParseUserInfo48(CHLMsg *m)
+{
+	U8	info[256];
+	U8	val[32];
+	I64	slot;
+	I64	top;
+	I64	bottom;
+	I64	i;
+
+	slot = HLMsgReadByte(m);
+	HLMsgReadLong(m);
+	HLMsgReadString(m, info, 256);
+
+	for (i = 0; i < 16; i++)
+		HLMsgReadByte(m);
+
+	if (m->badread || slot < 0 || slot >= HLSV_MAX_CLIENTS)
+		return;
+
+	if (!info[0])
+	{
+		hl_scores[slot].active = FALSE;
+		hl_scores[slot].name[0] = 0;
+		return;
+	}
+
+	HLNetInfoValue(info, "name", val, 32);
+	if (val[0])
+		HLStrCopy(hl_scores[slot].name, val, 16);
+
+	hl_scores[slot].active = TRUE;
+
+	HLNetInfoValue(info, "topcolor", val, 32);
+	top = Str2I64(val);
+
+	HLNetInfoValue(info, "bottomcolor", val, 32);
+	bottom = Str2I64(val);
+
+	hl_scores[slot].colors = ((top & 15) << 4) | (bottom & 15);
+
+	if (slot == 0)
+	{
+		HLStrCopy(hl_cl_name, hl_scores[0].name, 16);
+		hl_cl_top    = (hl_scores[0].colors >> 4) & 15;
+		hl_cl_bottom = hl_scores[0].colors & 15;
+	}
+}
+
+Bool HLNetParseServerInfo48(CHLMsg *m)
+{
+	I64	i;
+	I64	protocol;
+	U8	line[96];
+
+	protocol = HLMsgReadLong(m);
+	HLMsgReadLong(m);
+	HLMsgReadLong(m);
+
+	for (i = 0; i < 16; i++)
+		HLMsgReadByte(m);
+
+	i = HLMsgReadByte(m);
+	if (i > 0 && i <= HLSV_MAX_CLIENTS)
+		hl_cl_maxclients = i;
+
+	HLMsgReadByte(m);
+	hl_cl_gametype = HLMsgReadByte(m);
+
+	HLMsgReadString(m, line, 96);
+	HLMsgReadString(m, hl_host_name, 32);
+	HLMsgReadString(m, hl_net_level_name, 64);
+
+	HLStrCopy(hl_net_join_map, hl_net_level_name, 64);
+
+	HLMsgReadString(m, line, 96);
+	HLMsgReadByte(m);
+
+	if (m->badread)
+		return FALSE;
+
+	hl_cl_signon          = 0;
+	hl_net_need_prespawn  = FALSE;
+	hl_net_need_spawn     = FALSE;
+	hl_net_need_begin     = FALSE;
+	hl_net_msgtime        = 0.0;
+
+	HLNetStates48Clear();
+	HLPEFramesClear();
+	hl_net48_players = hl_cl_maxclients;
+	HLClientWeapons48Clear();
+	HLUserMsgClear();
+
+	if (hl_net_join_map[0])
+		hl_net_join_pending = TRUE;
+
+	StrPrint(line, "net: serverinfo protocol %d map %s\n",
+		protocol, hl_net_join_map);
+	HLLog(line);
+	HLLogFlush;
+
+	return TRUE;
+}
+
+Bool HLNetParse48Unverified(I64 cmd, U8 *what)
+{
+	U8 line[128];
+
+	StrPrint(line,
+		"net: svc %d (%s) payload width unverified, message dropped\n",
+		cmd, what);
+	HLLog(line);
+	HLLogFlush;
+
+	return FALSE;
+}
+
+Bool HLNetClientParse48(CHLMsg *m)
+{//CL_ParseServerMessage, protocol 48.
+	U8	line[256];
+	U8	shown[128];
+	I64	cmd;
+	I64	i;
+	I64	j;
+
+	while (TRUE)
+	{
+		if (m->read >= m->len)
+			return TRUE;
+
+		cmd = HLMsgReadByte(m);
+		if (m->badread)
+			return FALSE;
+
+		if (cmd >= HLUSERMSG_FIRST)
+		{
+			if (!HLNetParseUserMsg(m, cmd))
+				return FALSE;
+
+			goto q48_next;
+		}
+
+		switch (cmd)
+		{
+			case HLSVC_NOP:
+				break;
+
+			case HLSVC_DISCONNECT:
+				HLMsgReadString(m, line, 256);
+				if (line[0])
+				{
+					HLNetPrintStrip(shown, line, 128);
+					HLBiPrintAppend(shown);
+				}
+				return TRUE;
+
+			case HLSVC_VERSION:
+				HLMsgReadLong(m);
+				break;
+
+			case HLSVC_SETVIEW:
+				hl_cl_viewent = HLMsgReadShort(m);
+				break;
+
+			case HLSVC_TIME:
+				hl_net_msgtime_prev = hl_net_msgtime;
+				hl_cl.time          = HLMsgReadFloat(m);
+				hl_net_msgtime      = hl_cl.time;
+				break;
+
+			case HLSVC_PRINT:
+				HLMsgReadString(m, line, 256);
+				HLNetPrintStrip(shown, line, 128);
+				HLBiPrintAppend(shown);
+				break;
+
+			case HLSVC_STUFFTEXT:
+				HLMsgReadString(m, line, 256);
+				HLBiStuffCmd(hl_player_edict, line);
+				break;
+
+			case HLSVC_SETANGLE:
+				for (i = 0; i < 3; i++)
+					hl_cl.view_angles[i] = HLMsgReadHiresAngle(m);
+				hl_cl.angles_forced = TRUE;
+				break;
+
+			case HLSVC_ADDANGLE:
+				hl_cl.view_angles[1] = hl_cl.view_angles[1] +
+					HLMsgReadHiresAngle(m);
+				hl_cl.angles_forced = TRUE;
+				break;
+
+			case HLSVC_SERVERINFO:
+				if (!HLNetParseServerInfo48(m))
+					return FALSE;
+				break;
+
+			case HLSVC_LIGHTSTYLE:
+				i = HLMsgReadByte(m);
+				HLMsgReadString(m, line, 64);
+				if (i >= 0 && i < HLMAX_LIGHTSTYLES)
+					HLLightStyleSet(i, line);
+				break;
+
+			case HLSVC_UPDATEUSERINFO:
+				HLNetParseUserInfo48(m);
+				break;
+
+			case HLSVC_CLIENTDATA:
+				if (!HLNetParseClientData48(m, hl_cl.time))
+					return FALSE;
+				break;
+
+			case HLSVC_STOPSOUND:
+				//(entity << 3) | channel, as in 15
+				i = HLMsgReadShort(m);
+				HLSndStop(i >> 3, i & 7);
+				break;
+
+			case HLSVC_PARTICLE:
+				HLNetParseParticle(m);
+				break;
+
+			case HLSVC_DAMAGE:
+				hl_net_damage_save = HLMsgReadByte(m);
+				hl_net_damage_take = HLMsgReadByte(m);
+				for (i = 0; i < 3; i++)
+					hl_net_damage_from[i] = HLMsgReadCoord(m);
+				hl_net_damage_pending = TRUE;
+				break;
+
+			case HLSVC_SETPAUSE:
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_SIGNONNUM:
+				i = HLMsgReadByte(m);
+				hl_cl_signon = i;
+				StrPrint(line, "net: cl signon %d (protocol 48)\n", i);
+				HLLog(line);
+				HLLogFlush;
+				if (i == 1)
+					hl_net_need_prespawn = TRUE;
+				else if (i == 2)
+					hl_net_need_spawn = TRUE;
+				else if (i == 3)
+					hl_net_need_begin = TRUE;
+				break;
+
+			case HLSVC_CENTERPRINT:
+				HLMsgReadString(m, line, 256);
+				HLStrCopy(hl_center_text, line, HLCENTER_MAX);
+				hl_center_until = tS + HLCENTER_TIME;
+				hl_center_start = tS;
+				break;
+
+			case HLSVC_KILLEDMONSTER:
+			case HLSVC_FOUNDSECRET:
+			case HLSVC_CHOKE:
+				break;
+
+			case HLSVC_INTERMISSION_:
+				hl_intermission   = TRUE;
+				hl_completed_time = hl_cl.time;
+				break;
+
+			case HLSVC_FINALE_:
+			case HLSVC_CUTSCENE_:
+				HLMsgReadString(m, hl_finale_text, HLCENTER_MAX);
+				hl_intermission   = TRUE;
+				hl_finale         = TRUE;
+				hl_completed_time = hl_cl.time;
+				HLStrCopy(hl_center_text, hl_finale_text, HLCENTER_MAX);
+				hl_center_until = tS + HLCENTER_TIME;
+				hl_center_start = tS;
+				break;
+
+			case HLSVC_CDTRACK:
+				hl_cl_cdtrack = HLMsgReadByte(m);
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_WEAPONANIM:
+				hl_cl.weaponframe = HLMsgReadByte(m);
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_DECALNAME:
+				i = HLMsgReadByte(m);
+				HLMsgReadString(m, line, HLDECAL_NAME);
+				if (i >= 0 && i < HLDECAL_MAX)
+				{
+					HLStrCopy(hl_decal_names + i * HLDECAL_NAME, line,
+						HLDECAL_NAME);
+					if (i + 1 > hl_decal_count)
+						hl_decal_count = i + 1;
+				}
+				break;
+
+			case HLSVC_ROOMTYPE:
+				HLMsgReadShort(m);
+				break;
+
+			case HLSVC_NEWUSERMSG:
+				i = HLMsgReadByte(m);
+				cmd = HLMsgReadByte(m);
+				for (j = 0; j < 16; j++)
+					line[j] = HLMsgReadByte(m) & 0xFF;
+				line[16] = 0;
+				if (!m->badread)
+					HLUserMsgRegister(i, cmd, line);
+				break;
+
+			case HLSVC_RESOURCELIST:
+				if (!HLResourceListParse(m))
+					return FALSE;
+				break;
+
+			case HLSVC_FILETXFERFAILED:
+				HLMsgReadString(m, line, 256);
+				break;
+
+			case HLSVC_RESOURCELOCATION:
+				HLMsgReadString(m, line, 256);
+				break;
+
+			case HLSVC_SENDCVARVALUE:
+				HLMsgReadString(m, line, 256);
+				break;
+
+			case HLSVC_SENDCVARVALUE2:
+				HLMsgReadLong(m);
+				HLMsgReadString(m, line, 256);
+				break;
+
+			case HLSVC_TIMESCALE:
+				HLMsgReadFloat(m);
+				break;
+
+			case HLSVC_DIRECTOR:
+				i = HLMsgReadByte(m);
+				while (i > 0)
+				{
+					HLMsgReadByte(m);
+					i--;
+				}
+				break;
+
+			case HLSVC_PACKETENTITIES:
+				if (!HLNetParsePacketEntities48(m, FALSE,
+					hl_net48_cl.incoming_sequence, hl_cl.time))
+					return FALSE;
+				break;
+
+			case HLSVC_DELTAPACKETENTITIES:
+				if (!HLNetParsePacketEntities48(m, TRUE,
+					hl_net48_cl.incoming_sequence, hl_cl.time))
+					return FALSE;
+				break;
+
+			case HLSVC_SPAWNBASELINE:
+				hl_net48_players = hl_cl_maxclients;
+				if (!HLNetReadSpawnBaseline(m, hl_cl.time))
+					return FALSE;
+				break;
+
+			case HLSVC_SOUND:
+				return HLNetParse48Unverified(cmd, "sound");
+
+			case HLSVC_SPAWNSTATIC:
+				return HLNetParse48Unverified(cmd, "spawnstatic");
+
+			case HLSVC_SPAWNSTATICSOUND:
+				return HLNetParse48Unverified(cmd, "spawnstaticsound");
+
+			case HLSVC_TEMPENTITY_:
+				//Per-TE_ payload table, ~40 entries, none shared with Quake.
+				return HLNetParse48Unverified(cmd, "temp_entity");
+
+			case HLSVC_EVENT:
+				return HLNetParse48Unverified(cmd, "event");
+
+			case HLSVC_EVENT_RELIABLE:
+				return HLNetParse48Unverified(cmd, "event_reliable");
+
+			case HLSVC_DELTADESCRIPTION:
+				return HLNetParse48Unverified(cmd, "deltadescription");
+
+			case HLSVC_PINGS:
+				return HLNetParse48Unverified(cmd, "pings");
+
+			case HLSVC_RESTORE:
+				return HLNetParse48Unverified(cmd, "restore");
+
+			case HLSVC_NEWMOVEVARS:
+				if (!HLNetReadMoveVars48(m, &hl_movevars48))
+					return FALSE;
+
+				if (hl_movevars48.skyname[0])
+					HLSkySetName(hl_movevars48.skyname);
+
+				if (hl_movevars48.v[HLMV_SKYCOLOR_R] != 0.0 ||
+					hl_movevars48.v[HLMV_SKYCOLOR_G] != 0.0 ||
+					hl_movevars48.v[HLMV_SKYCOLOR_B] != 0.0)
+					HLSkySetColor(ToI64(hl_movevars48.v[HLMV_SKYCOLOR_R]),
+						ToI64(hl_movevars48.v[HLMV_SKYCOLOR_G]),
+						ToI64(hl_movevars48.v[HLMV_SKYCOLOR_B]));
+				break;
+
+			case HLSVC_RESOURCEREQUEST:
+				return HLNetParse48Unverified(cmd, "resourcerequest");
+
+			case HLSVC_CUSTOMIZATION:
+				return HLNetParse48Unverified(cmd, "customization");
+
+			case HLSVC_CROSSHAIRANGLE:
+				return HLNetParse48Unverified(cmd, "crosshairangle");
+
+			case HLSVC_SOUNDFADE:
+				return HLNetParse48Unverified(cmd, "soundfade");
+
+			case HLSVC_HLTV:
+				return HLNetParse48Unverified(cmd, "hltv");
+
+			case HLSVC_VOICEINIT:
+				return HLNetParse48Unverified(cmd, "voiceinit");
+
+			case HLSVC_VOICEDATA:
+				return HLNetParse48Unverified(cmd, "voicedata");
+
+			case HLSVC_SENDEXTRAINFO:
+				return HLNetParse48Unverified(cmd, "sendextrainfo");
+
+			default:
+				StrPrint(line, "net: unknown svc %d at byte %d (protocol 48)\n",
+					cmd, m->read - 1);
+				HLLog(line);
+				HLLogFlush;
+				return FALSE;
+		}
+
+		if (m->badread)
+			return FALSE;
+
+q48_next:
+	}
+
+	return TRUE;
+}
+
+Bool HLNetClientParse15(CHLMsg *m)
+{
+	U8	line[128];
+	U8	shown[128];
+	I64	cmd;
+	I64	i;
+	I64	j;
+
+	m->read   = 0;
+	m->badread = FALSE;
+
+	while (TRUE)
+	{
+		if (m->read >= m->len)
+			return TRUE;
+
+		cmd = HLMsgReadByte(m);
+		if (m->badread)
+			return FALSE;
+
+		if (cmd & 128)
+		{
+			if (hl_cl_signon == 3)
+			{
+				hl_cl_signon = 4;
+				HLLog("net: signon 4 (first entity update)\n");
+			}
+
+			if (!HLNetReadEntityUpdate(m, cmd & 127))
+				return FALSE;
+
+			goto qnp_next;
+		}
+
+		switch (cmd)
+		{
+			case HLSVC_NOP:
+				break;
+
+			case HLSVC_PRINT:
+				HLMsgReadString(m, line, 128);
+				HLNetPrintStrip(shown, line, 128);
+				HLBiPrintAppend(shown);
+				break;
+
+			case HLSVC_TIME:
+				hl_net_msgtime_prev = hl_net_msgtime;
+				hl_cl.time          = HLMsgReadFloat(m);
+				hl_net_msgtime      = hl_cl.time;
+				break;
+
+			case HLSVC_CLIENTDATA:
+				HLNetParseClientdata(m);
+				break;
+
+			case HLSVC_SPAWNBASELINE:
+				HLNetParseBaseline(m);
+				break;
+
+			case HLSVC_STUFFTEXT:
+				HLMsgReadString(m, line, 128);
+				HLBiStuffCmd(hl_player_edict, line);
+				break;
+
+			case HLSVC_CENTERPRINT:
+				HLMsgReadString(m, line, 128);
+				HLStrCopy(hl_center_text, line, HLCENTER_MAX);
+				hl_center_until = tS + HLCENTER_TIME;
+				hl_center_start = tS;
+				break;
+
+			case HLSVC_PARTICLE:
+				HLNetParseParticle(m);
+				break;
+
+			case HLSVC_STOPSOUND:
+				//(entity << 3) | channel, as in svc_sound
+				i = HLMsgReadShort(m);
+				HLSndStop(i >> 3, i & 7);
+				break;
+
+			case HLSVC_SETPAUSE:
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_KILLEDMONSTER:
+			case HLSVC_FOUNDSECRET:
+			case HLSVC15_SELLSCREEN:
+				break;
+
+			case HLSVC_INTERMISSION_:
+				hl_intermission   = TRUE;
+				hl_completed_time = hl_cl.time;
+				break;
+
+			case HLSVC_FINALE_:
+			case HLSVC_CUTSCENE_:
+				HLMsgReadString(m, hl_finale_text, HLCENTER_MAX);
+				hl_intermission   = TRUE;
+				hl_finale         = TRUE;
+				hl_completed_time = hl_cl.time;
+
+				HLStrCopy(hl_center_text, hl_finale_text, HLCENTER_MAX);
+				hl_center_until = tS + HLCENTER_TIME;
+				hl_center_start = tS;
+				break;
+
+			case HLSVC_VERSION:
+				HLMsgReadLong(m);
+				break;
+
+			case HLSVC_SPAWNSTATIC:
+				HLNetParseStatic(m);
+				break;
+
+			case HLSVC_SPAWNSTATICSOUND:
+				for (i = 0; i < 3; i++)
+					HLMsgReadCoord(m);
+				HLMsgReadByte(m);
+				HLMsgReadByte(m);
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_SERVERINFO:
+				j = m->read;
+				if (HLMsgReadLong(m) == 48)
+				{
+					hl_net_protocol = 48;
+					HLLog("net: stream is protocol 48, switching reader\n");
+					HLLogFlush;
+
+					m->read = j - 1;
+					return HLNetClientParse48(m);
+				}
+
+				i = HLMsgReadByte(m);
+				if (i > 0 && i <= HLSV_MAX_CLIENTS)
+					hl_cl_maxclients = i;
+				hl_cl_gametype = HLMsgReadByte(m);
+
+				if (hl_udp_ready && !hl_udp_server)
+				{
+					if (hl_cl_gametype == 1)
+					{
+						HLCvarSet("deathmatch", 1.0);
+						HLCvarSet("coop", 0.0);
+					}
+					else
+						HLCvarSet("deathmatch", 0.0);
+				}
+				HLMsgReadString(m, hl_net_level_name, 64);
+
+				hl_net_join_map[0] = 0;
+				hl_cl_model_count  = 0;
+				i = 1;
+				while (TRUE)
+				{
+					HLMsgReadString(m, line, 128);
+					if (m->badread || !line[0])
+						break;
+
+					if (i == 1)
+						HLStrCopy(hl_net_join_map, line, 64);
+					if (hl_cl_model_count < HLCL_MAX_PRECACHE)
+					{
+						HLStrCopy(hl_cl_model_names +
+							hl_cl_model_count * HLCL_PRECACHE_NAME,
+							line, HLCL_PRECACHE_NAME);
+						hl_cl_model_count++;
+					}
+					i++;
+				}
+				hl_cl_sound_count = 0;
+				while (TRUE)
+				{
+					HLMsgReadString(m, line, 128);
+					if (m->badread || !line[0])
+						break;
+
+					if (hl_cl_sound_count < HLCL_MAX_PRECACHE)
+					{
+						HLStrCopy(hl_cl_sound_names +
+							hl_cl_sound_count * HLCL_PRECACHE_NAME,
+							line, HLCL_PRECACHE_NAME);
+						hl_cl_sound_count++;
+					}
+				}
+
+				hl_cl_signon = 0;
+				hl_net_need_prespawn = FALSE;
+				hl_net_need_spawn = FALSE;
+				hl_net_need_begin = FALSE;
+
+				if (hl_demo_playing)
+				{
+					hl_demo_timed  = FALSE;
+					hl_demo_clock  = 0.0;
+					hl_demo_last_t = 0.0;
+				}
+				hl_net_msgtime = 0.0;
+
+				if (hl_net_join_map[0])
+					hl_net_join_pending = TRUE;
+
+				HLLog("net: svc_serverinfo parsed\n");
+				HLLogFlush;
+				break;
+
+			case HLSVC_SETVIEW:
+				hl_cl_viewent = HLMsgReadShort(m);
+				break;
+
+			case HLSVC_SIGNONNUM:
+				i = HLMsgReadByte(m);
+				hl_cl_signon = i;
+				StrPrint(line, "net: cl signon %d\n", i);
+				HLLog(line);
+				HLLogFlush;
+
+				if (i == 1)
+					hl_net_need_prespawn = TRUE;
+				else if (i == 2)
+					hl_net_need_spawn = TRUE;
+				else if (i == 3)
+					hl_net_need_begin = TRUE;
+				else if (i == 4)
+				{
+					hl_net_need_prespawn = FALSE;
+					HLLog("net: signon 4 complete\n");
+					HLLogFlush;
+				}
+				break;
+
+			case HLSVC_CDTRACK:
+				hl_cl_cdtrack = HLMsgReadByte(m);
+				HLMsgReadByte(m);
+				break;
+
+			case HLSVC_LIGHTSTYLE:
+				i = HLMsgReadByte(m);
+				HLMsgReadString(m, line, 64);
+				if (i >= 0 && i < HLMAX_LIGHTSTYLES)
+					HLLightStyleSet(i, line);
+				break;
+
+			case HLSVC15_UPDATENAME:
+				i = HLMsgReadByte(m);
+				HLMsgReadString(m, line, 16);
+				if (i >= 0 && i < HLSV_MAX_CLIENTS)
+				{
+					HLStrCopy(hl_scores[i].name, line, 16);
+					hl_scores[i].active = TRUE;
+				}
+				if (i == 0)
+					HLStrCopy(hl_cl_name, line, 16);
+				break;
+
+			case HLSVC15_UPDATECOLORS:
+				i = HLMsgReadByte(m);
+				j = HLMsgReadByte(m);
+				if (i >= 0 && i < HLSV_MAX_CLIENTS)
+				{
+					hl_scores[i].colors = j;
+					hl_scores[i].active = TRUE;
+				}
+				if (i == 0)
+				{
+					hl_cl_top    = (j >> 4) & 15;
+					hl_cl_bottom = j & 15;
+				}
+				break;
+
+			case HLSVC15_UPDATEFRAGS:
+				i = HLMsgReadByte(m);
+				j = HLMsgReadShort(m);
+				if (i >= 0 && i < HLSV_MAX_CLIENTS)
+				{
+					hl_scores[i].frags  = j;
+					hl_scores[i].active = TRUE;
+				}
+				break;
+
+			case HLSVC_SOUND:
+				HLNetParseSound(m);
+				break;
+
+			case HLSVC_TEMPENTITY_:
+				HLNetParseTempEntity(m);
+				break;
+
+			case HLSVC_SETANGLE:
+				for (i = 0; i < 3; i++)
+					hl_cl.view_angles[i] = HLMsgReadAngle(m);
+				hl_cl.angles_forced = TRUE;
+				break;
+
+			case HLSVC_DAMAGE:
+				hl_net_damage_save = HLMsgReadByte(m);
+				hl_net_damage_take = HLMsgReadByte(m);
+				for (i = 0; i < 3; i++)
+					hl_net_damage_from[i] = HLMsgReadCoord(m);
+				hl_net_damage_pending = TRUE;
+				break;
+
+			case HLSVC15_UPDATESTAT:
+				HLMsgReadByte(m);
+				HLMsgReadLong(m);
+				hl_cl.stats_received++;
+				break;
+
+			case HLSVC_DISCONNECT:
+				return TRUE;
+
+			default:
+				StrPrint(line, "net: unknown svc %d at byte %d\n",
+					cmd, m->read - 1);
+				HLLog(line);
+				HLLogFlush;
+				return FALSE;
+		}
+
+		if (m->badread)
+			return FALSE;
+
+qnp_next:
+	}
+
+	return TRUE;
+}
+
+Bool HLNetClientParse(CHLMsg *m)
+{
+	m->read    = 0;
+	m->badread = FALSE;
+
+	if (hl_net_protocol == 48)
+		return HLNetClientParse48(m);
+
+	return HLNetClientParse15(m);
+}
+
+U0 HLSvClientPrintf(I64 slot, U8 *s)
+{//SV_ClientPrintf: svc_print to one client (host.c).
+	U8	shown[128];
+	CHLMsg	*m;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS || !hl_sv_clients[slot].active)
+		return;
+	if (!s || !s[0])
+		return;
+
+	if (hl_sv_clients[slot].local)
+	{
+		HLNetPrintStrip(shown, s, 128);
+		HLBiPrintAppend(shown);
+		return;
+	}
+
+	if (!hl_udp_ready || !hl_sv_clients[slot].ip)
+		return;
+
+	m = &hl_net_send;
+	HLMsgClear(m);
+	HLMsgWriteByte(m, HLSVC_PRINT);
+	HLMsgWriteString(m, s);
+	HLNetSendReliable(slot, m);
+}
+
+U0 HLSvBroadcastPrintf(U8 *s)
+{
+	I64 i;
+
+	if (!s || !s[0])
+		return;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		if (hl_sv_clients[i].active)
+			HLSvClientPrintf(i, s);
+}
+
+I64 HLSvFindLocalSlot()
+{
+	I64 i;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		if (hl_sv_clients[i].active && hl_sv_clients[i].local)
+			return i;
+
+	return -1;
+}
+
+U0 HLHostSay(I64 from_slot, U8 *msg, Bool teamonly)
+{
+	U8	 text[64];
+	U8	 body[64];
+	U8	*p;
+	U8	*nm;
+	I64	 i;
+	I64	 j;
+	I64	 room;
+	I64	 from_team;
+	I64	 to_team;
+	I64	 n;
+
+	if (from_slot < 0 || from_slot >= HLSV_MAX_CLIENTS ||
+		!hl_sv_clients[from_slot].active)
+		return;
+	if (!msg)
+		return;
+
+	p = msg;
+	while (*p == ' ')
+		p++;
+	if (*p == '"')
+	{
+		p++;
+		n = StrLen(p);
+		if (n > 0 && p[n - 1] == '"')
+		{
+			MemCopy(body, p, n - 1);
+			body[n - 1] = 0;
+			p = body;
+		}
+	}
+	if (!p[0])
+		return;
+
+	nm = hl_sv_clients[from_slot].name;
+	if (!nm[0])
+		nm = "player";
+
+	//Leading byte 1 (alternate glyphs), then "name: ".
+	text[0] = 1;
+	StrPrint(text + 1, "%s: ", nm);
+
+	j = StrLen(text);
+	room = 62 - j;
+	if (room < 1)
+		return;
+
+	n = StrLen(p);
+	if (n > room)
+		n = room;
+
+	MemCopy(text + j, p, n);
+	j += n;
+	text[j] = '\n';
+	j++;
+	text[j] = 0;
+
+	from_team = hl_sv_clients[from_slot].team;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active || hl_sv_clients[i].edict <= 0)
+			goto qhs_next;
+
+		if (teamonly && HLCvarGet("teamplay") != 0.0)
+		{
+			to_team = hl_sv_clients[i].team;
+			if (to_team != from_team)
+				goto qhs_next;
+		}
+
+		if (HLNetSlotIs48(i))
+		{
+			HLSv48EnsureUserMsgDecls(i);
+			HLMsgClear(&hl_net_datagram);
+			HLMsgWriteByte(&hl_net_datagram, HLUM_SAYTEXT);
+			HLMsgWriteByte(&hl_net_datagram, 1 + StrLen(text) + 1);
+			HLMsgWriteByte(&hl_net_datagram, from_slot + 1);
+			HLMsgWriteString(&hl_net_datagram, text);
+			if (!hl_net_datagram.overflowed)
+				HLNetSendUnreliable(i, &hl_net_datagram);
+		}
+		else
+			HLSvClientPrintf(i, text);
+
+qhs_next:
+	}
+
+	HLNetPrintStrip(body, text, 64);
+	HLLog(body);
+}
+
+U0 HLHostTell(I64 from_slot, U8 *line)
+{
+	U8	 text[64];
+	U8	 target[32];
+	U8	*p;
+	U8	*nm;
+	I64	 i;
+	I64	 j;
+	I64	 n;
+	I64	 room;
+	I64	 dest;
+
+	if (from_slot < 0 || from_slot >= HLSV_MAX_CLIENTS ||
+		!hl_sv_clients[from_slot].active)
+		return;
+	if (!line)
+		return;
+
+	while (*line == ' ')
+		line++;
+
+	j = 0;
+	while (line[0] && line[0] != ' ' && j < 31)
+	{
+		target[j] = line[0];
+		j++;
+		line++;
+	}
+	target[j] = 0;
+
+	while (*line == ' ')
+		line++;
+	if (!target[0] || !line[0])
+		return;
+
+	dest = -1;
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+			goto qht_next;
+		if (!StrICompare(hl_sv_clients[i].name, target))
+		{
+			dest = i;
+			break;
+		}
+qht_next:
+	}
+
+	if (dest < 0)
+		return;
+
+	nm = hl_sv_clients[from_slot].name;
+	if (!nm[0])
+		nm = "player";
+
+	StrPrint(text, "%s: ", nm);
+	j = StrLen(text);
+	room = 62 - j;
+	p = line;
+	if (*p == '"')
+	{
+		p++;
+		n = StrLen(p);
+		if (n > 0 && p[n - 1] == '"')
+			n--;
+	}
+	else
+		n = StrLen(p);
+
+	if (n > room)
+		n = room;
+	MemCopy(text + j, p, n);
+	j += n;
+	text[j] = '\n';
+	j++;
+	text[j] = 0;
+
+	HLSvClientPrintf(dest, text);
+	HLSvClientPrintf(from_slot, text);
+}
+
+U0 HLNetClientSendStringCmd(U8 *s)
+{
+	I64 clc;
+
+	if (!hl_net_active || !s || !s[0])
+		return;
+
+	clc = HLCLC15_STRINGCMD;
+	if (hl_net_protocol == 48 || hl_net_want48 ||
+		HLNetSlotIs48(HLNET_CLIENT_SLOT))
+		clc = HLCLC_STRINGCMD;
+
+	HLMsgClear(&hl_net_cmd);
+	HLMsgWriteByte(&hl_net_cmd, clc);
+	HLMsgWriteString(&hl_net_cmd, s);
+
+	if (hl_udp_ready && !hl_udp_server)
+	{
+		HLNetSendUnreliable(HLNET_CLIENT_SLOT, &hl_net_cmd);
+		return;
+	}
+
+	HLNetSendToServer(&hl_net_cmd);
+}
+
+
+
+I64 HLSvFlagI(Bool b)
+{
+	if (b)
+		return 1;
+
+	return 0;
+}
+
+Bool hl_sv_keep_clients = FALSE;
+
+U0 HLSvClientsClear()
+{
+	I64 i;
+	I64 j;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_keep_clients && hl_sv_clients[i].active &&
+			!hl_sv_clients[i].local)
+		{
+			hl_sv_clients[i].edict      = 0;
+			hl_sv_clients[i].spawned    = FALSE;
+			hl_sv_clients[i].signon     = 0;
+			hl_sv_clients[i].sent_ident = FALSE;
+			hl_sv_clients[i].seen_move  = FALSE;
+			goto qscc_next;
+		}
+
+		hl_sv_clients[i].edict     = 0;
+		hl_sv_clients[i].spawned    = FALSE;
+		hl_sv_clients[i].drop_asap  = FALSE;
+		hl_sv_clients[i].sent_ident = FALSE;
+		hl_sv_clients[i].old_frags  = 0;
+		hl_sv_clients[i].old_colors = 0;
+		hl_sv_clients[i].old_name[0] = 0;
+		hl_sv_clients[i].ip        = 0;
+		hl_sv_clients[i].active    = FALSE;
+		hl_sv_clients[i].local     = FALSE;
+		hl_sv_clients[i].seen_move = FALSE;
+		hl_sv_clients[i].signon    = 0;
+		hl_sv_clients[i].attack    = FALSE;
+		hl_sv_clients[i].jump      = FALSE;
+		hl_sv_clients[i].impulse   = 0;
+		hl_sv_clients[i].last_msg  = 0.0;
+		hl_sv_clients[i].on_ground = FALSE;
+		hl_sv_clients[i].frags     = 0;
+		hl_sv_clients[i].team      = 0;
+
+		for (j = 0; j < 3; j++)
+		{
+			hl_sv_clients[i].angles[j]   = 0.0;
+			hl_sv_clients[i].cmd[j]      = 0.0;
+			hl_sv_clients[i].origin[j]   = 0.0;
+			hl_sv_clients[i].velocity[j] = 0.0;
+		}
+
+qscc_next:
+	}
+
+	hl_sv_client_count = 0;
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_clients[i].active)
+			hl_sv_client_count++;
+	}
+
+	HLNetPlayersInit;
+
+	HLSvClearWriteDests;
+}
+
+I64 HLSvFindClient(U32 ip)
+{
+	I64 i;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		if (hl_sv_clients[i].active && hl_sv_clients[i].ip == ip)
+			return i;
+
+	return -1;
+}
+
+I64 HLSvAddClient(U32 ip, Bool local, I64 edict, F64 now)
+{
+	F64	org[3];
+	I64	i;
+
+	no_warn edict;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_clients[i].active)
+			goto qsv_next;
+
+		HLVecSet(org, 0.0, 0.0, 0.0);
+
+		edict = i + 1;
+
+		hl_sv_clients[i].edict     = edict;
+		hl_sv_clients[i].ip        = ip;
+		hl_sv_clients[i].active    = TRUE;
+		hl_sv_clients[i].local     = local;
+		hl_sv_clients[i].seen_move = FALSE;
+		hl_sv_clients[i].spawned    = ToBool(local);
+		hl_sv_clients[i].drop_asap  = FALSE;
+		hl_sv_clients[i].sent_ident = FALSE;
+		hl_sv_clients[i].old_frags  = 0;
+		hl_sv_clients[i].old_colors = 0;
+		hl_sv_clients[i].old_name[0] = 0;
+		hl_sv_clients[i].frags      = 0;
+		hl_sv_clients[i].team       = 0;
+		if (local)
+			hl_sv_clients[i].signon = 4;
+		else
+			hl_sv_clients[i].signon = 0;
+		hl_sv_clients[i].last_msg  = now;
+		hl_sv_clients[i].top       = 0;
+		hl_sv_clients[i].bottom    = 0;
+		hl_sv_clients[i].name[0]   = 0;
+
+		HLVecCopy(org, hl_sv_clients[i].origin);
+		HLVecSet(hl_sv_clients[i].velocity, 0.0, 0.0, 0.0);
+
+		if (local)
+			hl_sv_local_slot = i;
+
+		hl_sv_client_count++;
+
+		return i;
+
+qsv_next:
+	}
+
+	return -1;
+}
+
+I64 HLSvSlotForEdict(I64 ent)
+{//Client slot owning this edict, or -1.
+	I64 i;
+
+	if (ent <= 0)
+		return -1;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_clients[i].active && hl_sv_clients[i].edict == ent)
+			return i;
+	}
+
+	return -1;
+}
+
+
+U0 HLSvApplyClientColors(I64 ent, I64 top, I64 bottom)
+{
+	I64 slot;
+
+	if (ent <= 0)
+		return;
+
+	slot = HLSvSlotForEdict(ent);
+	if (slot < 0)
+		return;
+
+	hl_scores[slot].colors = ((top & 15) << 4) | (bottom & 15);
+
+	hl_sv_clients[slot].top    = top & 15;
+	hl_sv_clients[slot].bottom = bottom & 15;
+
+	hl_net_pl[slot].colormap = ((top & 15) << 4) | (bottom & 15);
+
+	hl_sv_clients[slot].team = (bottom & 15) + 1;
+}
+
+Bool HLSvSpawnRemote(I64 slot, U8 *name, I64 top=0, I64 bottom=0)
+{
+	F64 org[3];
+	F64 ang[3];
+	I64 edict;
+	U8  join_name[32];
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS || !hl_sv_clients[slot].active)
+		return FALSE;
+	if (hl_sv_clients[slot].local || hl_sv_clients[slot].spawned)
+		return TRUE;
+
+	if (!name || !name[0])
+		HLStrCopy(join_name, "player", 32);
+	else
+	{
+		MemCopy(join_name, name, 31);
+		join_name[31] = 0;
+	}
+
+	HLVecSet(org, 0.0, 0.0, 0.0);
+	HLVecSet(ang, 0.0, 0.0, 0.0);
+
+	edict = slot + 1;
+
+	HLEntFindPlayerStart(org, ang);
+
+	hl_sv_clients[slot].top    = top & 15;
+	hl_sv_clients[slot].bottom = bottom & 15;
+	HLStrCopy(hl_sv_clients[slot].name, join_name, 32);
+	hl_sv_clients[slot].edict   = edict;
+	hl_sv_clients[slot].spawned = TRUE;
+	HLVecCopy(org, hl_sv_clients[slot].origin);
+	HLVecSet(hl_sv_clients[slot].velocity, 0.0, 0.0, 0.0);
+	HLVecCopy(ang, hl_sv_clients[slot].angles);
+
+	HLNetPlayerActivate(slot, org, ang, top, bottom);
+
+	StrPrint(hl_net_cmd_line,
+		"net: native remote spawn slot %d at %.0f %.0f %.0f\n",
+		slot, org[0], org[1], org[2]);
+	HLLog(hl_net_cmd_line);
+	HLLogFlush;
+
+	return TRUE;
+}
+
+U0 HLSvDropClient(I64 slot)
+{
+	CHLNetSock *sock;
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS || !hl_sv_clients[slot].active)
+		return;
+
+	sock = HLNetDgrmSock(slot);
+	if (sock)
+		HLNetSockClear(sock);
+
+	hl_sv_clients[slot].active  = FALSE;
+	hl_sv_clients[slot].spawned    = FALSE;
+	hl_sv_clients[slot].drop_asap  = FALSE;
+	hl_sv_clients[slot].sent_ident = FALSE;
+	hl_sv_clients[slot].edict     = 0;
+	hl_sv_client_count--;
+
+	HLNetPlayerDeactivate(slot);
+	if (hl_sv_local_slot == slot)
+		hl_sv_local_slot = -1;
+}
+
+U0 HLSvCheckTimeouts(F64 now)
+{
+	I64 i;
+	F64 limit;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active || hl_sv_clients[i].local)
+			goto qsv_to_next;
+
+		if (hl_sv_clients[i].drop_asap)
+		{
+			HLLog("net: client reliable message overflowed\n");
+			HLSvDropClient(i);
+			goto qsv_to_next;
+		}
+
+		if (hl_sv_clients[i].seen_move)
+			limit = HLSV_TIMEOUT;
+		else
+			limit = HLSV_CONNECT_GRACE;
+
+		if (now - hl_sv_clients[i].last_msg > limit)
+		{
+			HLLog("net: client timed out\n");
+			HLSvDropClient(i);
+		}
+
+qsv_to_next:
+	}
+}
+
+
+#define HLNET_PROTOCOL	15
+								//NET_PROTOCOL_VERSION is HLNET_CTL_VERSION = 3)
+
+U0 HLNetCtlSendReject(U32 ip, U8 *reason, I64 dest_port=0)
+{
+	CHLMsg *m = &hl_net_send;
+
+	if (!ip)
+		return;
+
+	HLMsgClear(m);
+	HLMsgWriteByte(m, HLCCREP_REJECT);
+	if (reason)
+		HLMsgWriteString(m, reason);
+	else
+		HLMsgWriteString(m, "Rejected");
+	HLNetDgrmSendCtl(ip, m, dest_port);
+}
+
+Bool HLNetCtlSendAccept(U32 ip, I64 dest_port=0)
+{
+	CHLMsg *m = &hl_net_send;
+	I64	  dport;
+
+	dport = dest_port;
+	if (dport < 1)
+		dport = hl_udp_from_port;
+	if (dport < 1)
+		dport = HLNET_PORT_DEFAULT;
+
+	HLMsgClear(m);
+	HLMsgWriteByte(m, HLCCREP_ACCEPT);
+	HLMsgWriteLong(m, HLNET_PORT_DEFAULT);	//little-endian game long
+	return HLNetDgrmSendCtl(ip, m, dport);
+}
+
+U0 HLNetCtlSendServerInfoCtl(U32 ip, I64 dest_port=0)
+{
+	CHLMsg *m = &hl_net_send;
+	U8	 addr[48];
+	U32	 me;
+	I64	 players;
+	I64	 dport;
+
+	dport = dest_port;
+	if (dport < 1)
+		dport = hl_udp_from_port;
+	if (dport < 1)
+		dport = HLNET_PORT_DEFAULT;
+
+	me = HLNetLocalIP();
+	StrPrint(addr, "%d.%d.%d.%d:%d",
+		me & 255, (me >> 8) & 255, (me >> 16) & 255, (me >> 24) & 255,
+		HLNET_PORT_DEFAULT);
+
+	players = hl_sv_client_count;
+	if (players < 0)
+		players = 0;
+	if (players > HLSV_MAX_CLIENTS)
+		players = HLSV_MAX_CLIENTS;
+
+	HLMsgClear(m);
+	HLMsgWriteByte(m, HLCCREP_SERVER_INFO);
+	HLMsgWriteString(m, addr);
+	HLMsgWriteString(m, hl_host_name);
+	if (hl_map_name[0])
+		HLMsgWriteString(m, hl_map_name);
+	else
+		HLMsgWriteString(m, "start");
+	HLMsgWriteByte(m, players);
+	HLMsgWriteByte(m, hl_sv_maxclients);
+	HLMsgWriteByte(m, HLNET_CTL_VERSION);
+	HLNetDgrmSendCtl(ip, m, dport);
+}
+
+U0 HLNetWriteServerInfo(CHLMsg *m, I64 slot)
+{
+	I64 i;
+	U8 *mapname;
+
+	if (!m)
+		return;
+
+	HLMsgWriteByte(m, HLSVC_SERVERINFO);
+	HLMsgWriteLong(m, HLNET_PROTOCOL);
+	HLMsgWriteByte(m, hl_sv_maxclients);
+
+	HLGameApplyModeCvars;
+	if (!hl_coop_active && HLCvarGet("deathmatch") != 0.0)
+		HLMsgWriteByte(m, 1);
+	else
+		HLMsgWriteByte(m, 0);
+
+	mapname = NULL;
+	if (hl_entities && hl_num_entities > 0)
+		mapname = hl_entities[0].message;
+
+	if (!mapname || !mapname[0])
+		mapname = hl_map_name;
+	if (!mapname || !mapname[0])
+		mapname = "";
+
+	HLMsgWriteString(m, mapname);
+
+	//Models 1..n then an empty terminator (WinQuake SV_SendServerinfo).
+	for (i = 1; i < hl_precache_model_count; i++)
+	{
+		if (hl_precache_model[i] && hl_precache_model[i][0])
+			HLMsgWriteString(m, hl_precache_model[i]);
+		else
+			HLMsgWriteString(m, "");
+	}
+	HLMsgWriteString(m, "");
+
+	//Sounds: local table is 0-based, wire index is i+1. Empty terminator.
+	for (i = 0; i < hl_precache_sound_count; i++)
+	{
+		if (hl_precache_sound[i] && hl_precache_sound[i][0])
+			HLMsgWriteString(m, hl_precache_sound[i]);
+		else
+			HLMsgWriteString(m, "");
+	}
+	HLMsgWriteString(m, "");
+}
+
+U0 HLNetSendServerInfo(I64 slot)
+{
+	I64 edict;
+	U8  line[96];
+
+	edict = 0;
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+		edict = hl_sv_clients[slot].edict;
+
+	HLMsgClear(&hl_net_send);
+	HLNetWriteServerInfo(&hl_net_send, slot);
+	HLNetWriteCDTrack(&hl_net_send);
+
+	if (edict > 0)
+	{
+		HLMsgWriteByte(&hl_net_send, HLSVC_SETVIEW);
+		HLMsgWriteShort(&hl_net_send, edict);
+	}
+
+	HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+	HLMsgWriteByte(&hl_net_send, 1);
+
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+		hl_sv_clients[slot].signon = 1;
+
+	StrPrint(line,
+		"net: svc_serverinfo slot %d models %d sounds %d (%d bytes)\n",
+		slot, hl_precache_model_count, hl_precache_sound_count, hl_net_send.len);
+	HLLog(line);
+	HLLogFlush;
+
+	if (!HLNetSendReliable(slot, &hl_net_send))
+	{
+		HLLog("net: svc_serverinfo send FAILED - client will stay in menu\n");
+		HLLogFlush;
+	}
+}
+
+I64 HLNetServerHandleCtl(U8 *data, I64 len, U32 from_ip)
+{
+	CHLMsg	*m = &hl_net_recv_c2s;
+	I64		 cmd;
+	I64		 ver;
+	I64		 slot;
+	I64		 reply_port;
+	CHLNetSock *sock;
+	U8		 game[16];
+	U8		 line[96];
+
+	if (!data || len < 5 || !HLNetDgrmIsCtl(data, len) || !from_ip)
+		return 0;
+
+	reply_port = hl_udp_from_port;
+	if (reply_port < 1)
+		reply_port = HLNET_PORT_DEFAULT;
+
+	HLMsgClear(m);
+	MemCopy(m->data, data + 4, len - 4);
+	m->len  = len - 4;
+	m->read = 0;
+
+	cmd = HLMsgReadByte(m);
+	if (m->badread)
+		return 0;
+
+	if (cmd == HLCCREQ_SERVER_INFO)
+	{
+		HLMsgReadString(m, game, 16);
+		if (StrICompare(game, "QUAKE"))
+			return 0;
+		HLNetCtlSendServerInfoCtl(from_ip, reply_port);
+		return 0;
+	}
+
+	if (cmd != HLCCREQ_CONNECT)
+		return 0;
+
+	HLMsgReadString(m, game, 16);
+	if (StrICompare(game, "QUAKE"))
+		return 0;
+
+	ver = HLMsgReadByte(m);
+	if (m->badread || ver != HLNET_CTL_VERSION)
+	{
+		HLNetCtlSendReject(from_ip, "Incompatible version.\n", reply_port);
+		return 0;
+	}
+
+	slot = HLSvFindClient(from_ip);
+	if (slot < 0)
+	{
+		slot = HLSvAddClient(from_ip, FALSE, 0, tS);
+		if (slot < 0)
+		{
+			HLNetCtlSendReject(from_ip, "Server is full.\n", reply_port);
+			return 0;
+		}
+
+		StrPrint(line,
+			"net: CTL connect %d.%d.%d.%d:%d slot %d\n",
+			from_ip & 255, (from_ip >> 8) & 255,
+			(from_ip >> 16) & 255, (from_ip >> 24) & 255,
+			reply_port, slot);
+		HLLog(line);
+		HLLogFlush;
+
+		sock = HLNetDgrmSock(slot);
+		if (sock)
+		{
+			HLNetSockClear(sock);
+			sock->ip       = from_ip;
+			sock->port     = reply_port;
+			sock->active   = TRUE;
+			sock->can_send = TRUE;
+		}
+
+		hl_sv_clients[slot].signon    = 0;
+		hl_sv_clients[slot].seen_move = FALSE;
+	}
+	else
+	{
+		sock = HLNetDgrmSock(slot);
+		if (sock)
+			sock->port = reply_port;
+	}
+
+	if (!HLNetCtlSendAccept(from_ip, reply_port))
+	{
+		StrPrint(line,
+			"net: CTL ACCEPT FAILED to %d.%d.%d.%d:%d (arp/udp)\n",
+			from_ip & 255, (from_ip >> 8) & 255,
+			(from_ip >> 16) & 255, (from_ip >> 24) & 255, reply_port);
+		HLLog(line);
+		HLLogFlush;
+		return 0;
+	}
+
+	StrPrint(line, "net: CTL ACCEPT -> %d.%d.%d.%d:%d (game port %d)\n",
+		from_ip & 255, (from_ip >> 8) & 255,
+		(from_ip >> 16) & 255, (from_ip >> 24) & 255,
+		reply_port, HLNET_PORT_DEFAULT);
+	HLLog(line);
+	HLLogFlush;
+
+	if (hl_sv_clients[slot].signon < 4)
+		HLNetSendServerInfo(slot);
+
+	return 0;
+}
+
+U0 HLNetClientSendIdent(U8 *name, I64 top=0, I64 bottom=0)
+{
+	U8 line[64];
+
+	if (!hl_udp_ready || hl_udp_server || !hl_udp_peer_ip)
+		return;
+
+	if (!name || !name[0])
+		name = "player";
+
+	StrPrint(line, "name %s", name);
+	HLMsgClear(&hl_net_cmd);
+	HLMsgWriteByte(&hl_net_cmd, HLCLC15_STRINGCMD);
+	HLMsgWriteString(&hl_net_cmd, line);
+	HLNetSendUnreliable(HLNET_CLIENT_SLOT, &hl_net_cmd);
+
+	StrPrint(line, "color %d %d", top & 15, bottom & 15);
+	HLMsgClear(&hl_net_cmd);
+	HLMsgWriteByte(&hl_net_cmd, HLCLC15_STRINGCMD);
+	HLMsgWriteString(&hl_net_cmd, line);
+	HLNetSendUnreliable(HLNET_CLIENT_SLOT, &hl_net_cmd);
+}
+
+U0 HLNetClientSendConnect(U8 *name, I64 top=0, I64 bottom=0)
+{
+	if (!hl_udp_ready || hl_udp_server || !hl_udp_peer_ip)
+		return;
+
+	if (!name || !name[0])
+		name = "player";
+
+	HLStrCopy(hl_ctl_name, name, 32);
+	hl_ctl_top    = top & 15;
+	hl_ctl_bottom = bottom & 15;
+
+	if (hl_net_want48)
+	{
+		if (hl_net48_reset_req)
+		{
+			hl_net48_reset_req = FALSE;
+			HLNet48Init;
+		}
+
+		if (hl_net48_cl_state == 0)
+			HLNet48ClientBegin(hl_udp_peer_ip, HLNET_PORT_DEFAULT,
+				hl_ctl_name, hl_ctl_top, hl_ctl_bottom);
+		return;
+	}
+
+	if (!hl_ctl_accepted)
+	{
+		HLNetClientCtlConnect(hl_udp_peer_ip);
+		return;
+	}
+
+	if (!hl_net_join_pending && hl_cl_signon < 1)
+		HLNetClientSendIdent(hl_ctl_name, hl_ctl_top, hl_ctl_bottom);
+}
+
+U0 HLNetWriteLightstyles(CHLMsg *m)
+{
+	I64 i;
+	U8 *str;
+
+	for (i = 0; i < HLMAX_LIGHTSTYLES; i++)
+	{
+		str = &hl_lightstyle[i * HLLIGHTSTYLE_LEN];
+		HLMsgWriteByte(m, HLSVC_LIGHTSTYLE);
+		HLMsgWriteByte(m, i);
+		if (str && str[0])
+			HLMsgWriteString(m, str);
+		else
+			HLMsgWriteString(m, "");
+	}
+}
+
+U0 HLNetSendServerInfo48(I64 slot)
+{
+	I64 edict;
+	I64 i;
+	U8  *name;
+	U8  line[96];
+
+	edict = 0;
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+		edict = hl_sv_clients[slot].edict;
+
+	HLMsgClear(&hl_net_send);
+	HLNetWriteServerInfo48(&hl_net_send, slot);
+	HLNetWriteCDTrack(&hl_net_send);
+
+	if (edict > 0)
+	{
+		HLMsgWriteByte(&hl_net_send, HLSVC_SETVIEW);
+		HLMsgWriteShort(&hl_net_send, edict);
+	}
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (!hl_sv_clients[i].active)
+			goto qsi48_next;
+
+		name = hl_sv_clients[i].name;
+		if (!name[0])
+			name = "player";
+		HLNetWriteUserInfo48(&hl_net_send, i, name,
+			hl_sv_clients[i].top, hl_sv_clients[i].bottom);
+
+qsi48_next:
+	}
+
+	HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+	HLMsgWriteByte(&hl_net_send, 1);
+
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+		hl_sv_clients[slot].signon = 1;
+
+	StrPrint(line, "net48: svc_serverinfo slot %d (%d bytes)\n",
+		slot, hl_net_send.len);
+	HLLog(line);
+	HLLogFlush;
+
+	if (!HLNetSendReliable(slot, &hl_net_send))
+	{
+		HLLog("net48: svc_serverinfo send FAILED\n");
+		HLLogFlush;
+		return;
+	}
+
+	HLSv48EnsureUserMsgDecls(slot);
+}
+
+U0 HLSvSendClientSignon48(I64 slot, I64 stage)
+{
+	I64  edict;
+	I64  i;
+	U8  *name;
+	U8   line[80];
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS || !hl_sv_clients[slot].active)
+		return;
+	if (hl_sv_clients[slot].local)
+		return;
+
+	edict = hl_sv_clients[slot].edict;
+	HLMsgClear(&hl_net_send);
+
+	if (stage == 2)
+	{
+		HLNetWriteLightstyles(&hl_net_send);
+		HLNetWriteResourceList(&hl_net_send);
+			HLNetWriteSpawnBaseline(&hl_net_send, hl_net_bl48, HLNET_MAX_ENTS,
+				0.0);
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 2);
+		hl_sv_clients[slot].signon = 2;
+	}
+	else if (stage == 3)
+	{
+		for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+		{
+			if (!hl_sv_clients[i].active)
+				goto qsso48_ui;
+
+			name = hl_sv_clients[i].name;
+			if (!name[0])
+				name = "player";
+			HLNetWriteUserInfo48(&hl_net_send, i, name,
+				hl_sv_clients[i].top, hl_sv_clients[i].bottom);
+
+qsso48_ui:
+		}
+
+		if (edict > 0)
+		{
+			HLMsgWriteByte(&hl_net_send, HLSVC_SETVIEW);
+			HLMsgWriteShort(&hl_net_send, edict);
+			HLNetWriteClientdata48(&hl_net_send, slot, 0.0);
+		}
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 3);
+		hl_sv_clients[slot].signon = 3;
+	}
+	else if (stage == 4)
+	{
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 4);
+		hl_sv_clients[slot].signon = 4;
+	}
+	else
+		return;
+
+	StrPrint(line, "net48: signon stage %d -> slot %d (%d bytes)\n",
+		stage, slot, hl_net_send.len);
+	HLLog(line);
+	HLLogFlush;
+
+	if (!HLNetSendReliable(slot, &hl_net_send))
+	{
+		HLLog("net48: signon send FAILED\n");
+		HLLogFlush;
+	}
+}
+
+U0 HLSvSendClientSignon(I64 slot, I64 stage)
+{
+	I64  edict;
+	U8   line[80];
+
+	if (slot < 0 || slot >= HLSV_MAX_CLIENTS || !hl_sv_clients[slot].active)
+		return;
+	if (hl_sv_clients[slot].local)
+		return;
+
+	if (HLNetSlotIs48(slot))
+	{
+		HLSvSendClientSignon48(slot, stage);
+		return;
+	}
+
+	edict = hl_sv_clients[slot].edict;
+	HLMsgClear(&hl_net_send);
+
+	if (stage == 2)
+	{
+		HLNetWriteLightstyles(&hl_net_send);
+
+		HLMsgAppendIfRoom(&hl_net_send, &hl_sv_signon, HLNET_MAX_MSG);
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 2);
+		hl_sv_clients[slot].signon = 2;
+	}
+	else if (stage == 3)
+	{
+		//Host_Spawn_f: names/colors/frags, clientdata, signonnum 3
+		HLNetWriteFrags(&hl_net_send);
+		if (edict > 0)
+		{
+			HLMsgWriteByte(&hl_net_send, HLSVC_SETVIEW);
+			HLMsgWriteShort(&hl_net_send, edict);
+			HLNetWriteClientdata(&hl_net_send, slot);
+		}
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 3);
+		hl_sv_clients[slot].signon = 3;
+	}
+	else if (stage == 4)
+	{
+		//Explicit signonnum 4; stock bumps it on the first update.
+		HLMsgWriteByte(&hl_net_send, HLSVC_SIGNONNUM);
+		HLMsgWriteByte(&hl_net_send, 4);
+		hl_sv_clients[slot].signon = 4;
+	}
+	else
+		return;
+
+	StrPrint(line, "net: signon stage %d -> slot %d (%d bytes)\n",
+		stage, slot, hl_net_send.len);
+	HLLog(line);
+	HLNetLogHex("  head", hl_net_send.data, hl_net_send.len, 0, 48);
+	if (hl_net_send.len > 48)
+		HLNetLogHex("  tail", hl_net_send.data, hl_net_send.len,
+			hl_net_send.len - 32, 32);
+	HLLogFlush;
+
+	if (!HLNetSendReliable(slot, &hl_net_send))
+	{
+		HLLog("net: signon send FAILED\n");
+		HLLogFlush;
+	}
+}
+
+Bool HLNetServerExecStringCmd(I64 slot, U8 *line)
+{//SV_ReadClientMessage clc_stringcmd allowlist (sv_user.c) plus name/color.
+	I64 ni;
+	I64 nj;
+	I64 nk;
+	I64 ctop;
+	I64 cbot;
+	U8  cname[32];
+
+	if (!line)
+		return FALSE;
+
+	if (!StrNICompare(line, "connect", 7) &&
+		(line[7] == 0 || line[7] == ' '))
+		return TRUE;
+
+	if (!StrNICompare(line, "prespawn", 8) &&
+		(line[8] == 0 || line[8] == ' '))
+	{
+		HLLog("net: stringcmd prespawn\n");
+		HLLogFlush;
+		HLSvSendClientSignon(slot, 2);
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "spawn", 5) &&
+		(line[5] == 0 || line[5] == ' '))
+	{
+		HLLog("net: stringcmd spawn\n");
+		HLLogFlush;
+
+		if (slot >= 0 && slot < HLSV_MAX_CLIENTS &&
+			!hl_sv_clients[slot].local && !hl_sv_clients[slot].spawned)
+		{
+			HLSvSpawnRemote(slot, hl_sv_clients[slot].name,
+				hl_sv_clients[slot].top, hl_sv_clients[slot].bottom);
+		}
+
+		HLSvSendClientSignon(slot, 3);
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "begin", 5) &&
+		(line[5] == 0 || line[5] == ' '))
+	{
+		HLLog("net: stringcmd begin\n");
+		HLLogFlush;
+		HLSvSendClientSignon(slot, 4);
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "name", 4) &&
+		(line[4] == 0 || line[4] == ' '))
+	{
+		ni = 4;
+		while (line[ni] == ' ')
+			ni++;
+
+		if (line[ni] == '"')
+			ni++;
+
+		nj = 0;
+		while (line[ni] && line[ni] != '"' && line[ni] != '\n' &&
+			   line[ni] != '\r' && nj < 31)
+		{
+			cname[nj] = line[ni];
+			nj++;
+			ni++;
+		}
+
+		while (nj > 0 && cname[nj - 1] == ' ')
+			nj--;
+
+		cname[nj] = 0;
+
+		if (slot >= 0 && hl_sv_clients[slot].active)
+		{
+			if (!cname[0])
+				HLStrCopy(cname, "player", 32);
+
+			if (hl_sv_clients[slot].edict <= 0)
+			{
+				HLSvSpawnRemote(slot, cname,
+					hl_sv_clients[slot].top, hl_sv_clients[slot].bottom);
+				if (hl_sv_clients[slot].signon < 1)
+				{
+					if (HLNetSlotIs48(slot))
+						HLNetSendServerInfo48(slot);
+					else
+						HLNetSendServerInfo(slot);
+				}
+			}
+			else
+			{
+				HLStrCopy(hl_sv_clients[slot].name, cname, 32);
+				HLMsgClear(&hl_net_send);
+				HLNetWriteIdentity(&hl_net_send, slot, cname,
+					hl_sv_clients[slot].top, hl_sv_clients[slot].bottom);
+				for (ni = 0; ni < HLSV_MAX_CLIENTS; ni++)
+					if (hl_sv_clients[ni].active && !hl_sv_clients[ni].local)
+						HLNetSendReliable(ni, &hl_net_send);
+			}
+		}
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "color", 5) &&
+		(line[5] == 0 || line[5] == ' '))
+	{
+		ni = 5;
+		ctop = 0;
+		cbot = 0;
+
+		while (line[ni] == ' ')
+			ni++;
+		if (line[ni] >= '0' && line[ni] <= '9')
+		{
+			ctop = 0;
+			while (line[ni] >= '0' && line[ni] <= '9')
+			{
+				ctop = ctop * 10 + (line[ni] - '0');
+				ni++;
+			}
+			ctop = ctop & 15;
+		}
+
+		while (line[ni] == ' ')
+			ni++;
+		if (line[ni] >= '0' && line[ni] <= '9')
+		{
+			cbot = 0;
+			while (line[ni] >= '0' && line[ni] <= '9')
+			{
+				cbot = cbot * 10 + (line[ni] - '0');
+				ni++;
+			}
+			cbot = cbot & 15;
+		}
+
+		if (slot >= 0 && hl_sv_clients[slot].active)
+		{
+			hl_sv_clients[slot].top    = ctop;
+			hl_sv_clients[slot].bottom = cbot;
+			nk = hl_sv_clients[slot].edict;
+			if (nk > 0)
+			{
+				HLSvApplyClientColors(nk, ctop, cbot);
+				HLMsgClear(&hl_net_send);
+				HLNetWriteIdentity(&hl_net_send, slot,
+					hl_sv_clients[slot].name, ctop, cbot);
+				for (ni = 0; ni < HLSV_MAX_CLIENTS; ni++)
+					if (hl_sv_clients[ni].active && !hl_sv_clients[ni].local)
+						HLNetSendReliable(ni, &hl_net_send);
+			}
+		}
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "say_team", 8) &&
+		(line[8] == 0 || line[8] == ' '))
+	{
+		ni = 8;
+		while (line[ni] == ' ')
+			ni++;
+		HLHostSay(slot, line + ni, TRUE);
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "say", 3) &&
+		(line[3] == 0 || line[3] == ' '))
+	{
+		ni = 3;
+		while (line[ni] == ' ')
+			ni++;
+		HLHostSay(slot, line + ni, FALSE);
+		return TRUE;
+	}
+
+	if (!StrNICompare(line, "tell", 4) &&
+		(line[4] == 0 || line[4] == ' '))
+	{
+		ni = 4;
+		while (line[ni] == ' ')
+			ni++;
+		HLHostTell(slot, line + ni);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+U0 HLNetClientSendMove(F64 *view_angles, F64 forward, F64 side, F64 up,
+	Bool attack, Bool jump, I64 impulse, F64 time,
+	Bool duck = FALSE, F64 msec = 0.0)
+{
+	I64 bits = 0;
+	I64 packet_seq = -1;
+	I64 clc;
+
+	if (!hl_net_active)
+		return;
+
+	clc = HLCLC15_MOVE;
+	if (hl_net_protocol == 48 || hl_net_want48 ||
+		HLNetSlotIs48(HLNET_CLIENT_SLOT))
+		clc = HLCLC_MOVE;
+
+	HLMsgClear(&hl_net_cmd);
+
+	HLMsgWriteByte(&hl_net_cmd, clc);
+
+	HLMsgWriteFloat(&hl_net_cmd, time);
+
+	HLMsgWriteAngle(&hl_net_cmd, view_angles[0]);
+	HLMsgWriteAngle(&hl_net_cmd, view_angles[1]);
+	HLMsgWriteAngle(&hl_net_cmd, view_angles[2]);
+
+	HLMsgWriteShort(&hl_net_cmd, ToI64(forward));
+	HLMsgWriteShort(&hl_net_cmd, ToI64(side));
+	HLMsgWriteShort(&hl_net_cmd, ToI64(up));
+
+	if (attack)	bits |= 1;
+	if (jump)	bits |= 2;
+	HLMsgWriteByte(&hl_net_cmd, bits);
+
+	HLMsgWriteByte(&hl_net_cmd, impulse);
+
+	if (hl_udp_ready && !hl_udp_server)
+	{
+		if (HLNetSendUnreliable(HLNET_CLIENT_SLOT, &hl_net_cmd))
+		{
+			hl_net_moves_sent++;
+
+			if (HLNetSlotIs48(HLNET_CLIENT_SLOT))
+				packet_seq = hl_net48_cl.outgoing_sequence - 1;
+			else
+				packet_seq = hl_net_client_sock.unrel_send_seq - 1;
+
+			HLPredCmdPush(view_angles, forward, side, up, jump, duck, msec,
+				packet_seq);
+		}
+
+		HLNetSendToServer(&hl_net_cmd);
+		return;
+	}
+
+	if (HLNetSendToServer(&hl_net_cmd))
+		hl_net_moves_sent++;
+}
+
+Bool HLNetServerReadMove(CHLMsg *m, I64 ent, F64 server_time, I64 slot = -1)
+{
+	I64 bits;
+	I64 imp;
+	I64 j;
+
+	no_warn ent;
+
+	hl_net_move_ping = server_time - HLMsgReadFloat(m);
+
+	for (j = 0; j < 3; j++)
+		hl_net_move_angles[j] = HLMsgReadAngle(m);
+
+	hl_net_move_cmd[0] = ToF64(HLMsgReadShort(m));
+	hl_net_move_cmd[1] = ToF64(HLMsgReadShort(m));
+	hl_net_move_cmd[2] = ToF64(HLMsgReadShort(m));
+
+	bits = HLMsgReadByte(m);
+	imp  = HLMsgReadByte(m);
+
+	if (m->badread)
+		return FALSE;
+
+	hl_net_move_attack = ToBool(bits & 1);
+	hl_net_move_jump   = ToBool((bits & 2) != 0);
+
+	if (imp)
+		hl_net_move_impulse = imp;
+
+	if (slot >= 0)
+	{
+		HLVecCopy(hl_net_move_angles, hl_sv_clients[slot].angles);
+		HLVecCopy(hl_net_move_cmd, hl_sv_clients[slot].cmd);
+		hl_sv_clients[slot].attack   = hl_net_move_attack;
+		hl_sv_clients[slot].jump     = hl_net_move_jump;
+		hl_sv_clients[slot].last_msg = server_time;
+		hl_sv_clients[slot].seen_move = TRUE;
+
+		if (imp)
+			hl_sv_clients[slot].impulse = imp;
+	}
+
+	hl_net_moves_read++;
+
+	return TRUE;
+}
+
+Bool HLNetParseFromClient(CHLMsg *in, I64 slot, F64 server_time)
+{
+	I64 cmd;
+	I64 ent = 0;
+	Bool is48;
+
+	if (slot >= 0 && slot < HLSV_MAX_CLIENTS)
+		hl_sv_clients[slot].last_msg = server_time;
+
+	if (slot >= 0)
+		ent = hl_sv_clients[slot].edict;
+
+	is48 = FALSE;
+	if (slot >= 0)
+		is48 = HLNetSlotIs48(slot);
+
+	in->read    = 0;
+	in->badread = FALSE;
+
+	while (in->read < in->len)
+	{
+		cmd = HLMsgReadByte(in);
+		if (in->badread)
+			return FALSE;
+
+		if (is48)
+		{
+			if (cmd == HLCLC_NOP)
+				goto qpf_next;
+			if (cmd == HLCLC_MOVE)
+			{
+				if (!HLNetServerReadMove(in, ent, server_time, slot))
+					return FALSE;
+				goto qpf_next;
+			}
+			if (cmd == HLCLC_STRINGCMD)
+			{
+				HLMsgReadString(in, hl_net_cmd_line, 128);
+				HLNetServerExecStringCmd(slot, hl_net_cmd_line);
+				goto qpf_next;
+			}
+			//No clc_disconnect in 48; drop / silence ends the slot.
+			return FALSE;
+		}
+
+		switch (cmd)
+		{
+			case HLCLC15_NOP:
+				break;
+
+			case HLCLC15_MOVE:
+				if (!HLNetServerReadMove(in, ent, server_time, slot))
+					return FALSE;
+				break;
+
+			case HLCLC15_DISCONNECT:
+				if (slot >= 0)
+					HLSvDropClient(slot);
+				return TRUE;
+
+			case HLCLC15_STRINGCMD:
+				HLMsgReadString(in, hl_net_cmd_line, 128);
+				//sv_user.c allowlist: connect / say / say_team / tell / ...
+				HLNetServerExecStringCmd(slot, hl_net_cmd_line);
+				break;
+
+			default:
+				return FALSE;
+		}
+
+qpf_next:
+	}
+
+	return TRUE;
+}
+
+U0 HLNetServerAccept48(U32 from_ip)
+{
+	U8	 val[64];
+	U8	 line[112];
+	I64	 slot;
+	I64	 top;
+	I64	 bottom;
+
+	slot = HLSvFindClient(from_ip);
+	if (slot < 0)
+		slot = HLSvAddClient(from_ip, FALSE, 0, tS);
+
+	if (!HLNet48ServerAcceptConnect(slot))
+	{
+		HLLog("net48: connect refused\n");
+		HLLogFlush;
+		return;
+	}
+
+	hl_sv_clients[slot].signon    = 0;
+	hl_sv_clients[slot].seen_move = FALSE;
+
+	if (HLSvFindLocalSlot < 0)
+		hl_net_protocol = 48;
+
+	HLNetInfoValue(hl_net48_conn_userinfo, "name", val, 64);
+	if (!val[0])
+		HLStrCopy(val, "player", 64);
+
+	HLStrCopy(hl_sv_clients[slot].name, val, 32);
+	HLStrCopy(hl_scores[slot].name, val, 16);
+
+	HLNetInfoValue(hl_net48_conn_userinfo, "topcolor", val, 64);
+	top = Str2I64(val) & 15;
+
+	HLNetInfoValue(hl_net48_conn_userinfo, "bottomcolor", val, 64);
+	bottom = Str2I64(val) & 15;
+
+	hl_sv_clients[slot].top    = top;
+	hl_sv_clients[slot].bottom = bottom;
+	hl_scores[slot].colors     = (top << 4) | bottom;
+	hl_scores[slot].frags      = 0;
+	hl_scores[slot].active     = TRUE;
+
+	StrPrint(line, "net48: connect %d.%d.%d.%d slot %d name '%s' colors %d/%d\n",
+		from_ip & 255, (from_ip >> 8) & 255,
+		(from_ip >> 16) & 255, (from_ip >> 24) & 255,
+		slot, hl_scores[slot].name, top, bottom);
+	HLLog(line);
+	HLLogFlush;
+
+	if (hl_sv_clients[slot].signon < 1)
+		HLNetSendServerInfo48(slot);
+}
+
+Bool HLNetServerReadClient(I64 ent, F64 server_time)
+{
+	CHLMsg	*in = &hl_net_recv_c2s;
+	I64		 cmd;
+	I64		 slot;
+	I64		 local_slot;
+	I64		 n;
+	I64		 ret;
+	U32		 from_ip;
+
+	local_slot = HLSvFindLocalSlot;
+
+	if (hl_udp_ready && hl_udp_server)
+	{
+		if (hl_net48_reset_req)
+		{
+			hl_net48_reset_req = FALSE;
+			HLNet48Init;
+		}
+
+		HLNetDgrmTick(tS);
+		HLNet48Tick(tS);
+
+		n = 0;
+		while (n < 32)
+		{
+			from_ip = 0;
+			ret = HLNetDgrmRecv(&hl_net_udp_in, &from_ip);
+			if (!ret && !from_ip)
+				break;
+			n++;
+
+			hl_udp_from_ip = from_ip;
+			if (!hl_udp_peer_ip && from_ip)
+				hl_udp_peer_ip = from_ip;
+
+			if (ret == 3)
+			{
+				HLNetServerHandleCtl(hl_net_udp_in.data, hl_net_udp_in.len,
+					from_ip);
+				goto qsv_udp_next;
+			}
+
+			//Protocol 48 connect, validated and parked in hl_net48_conn_*.
+			if (ret == 5)
+			{
+				HLNetServerAccept48(from_ip);
+				goto qsv_udp_next;
+			}
+
+			//ret 1 reliable, 2 unreliable game payload, header stripped.
+			if (ret != 1 && ret != 2)
+				goto qsv_udp_next;
+
+			slot = HLSvFindClient(from_ip);
+
+			if (slot >= 0)
+			{
+				if (!HLNetUdpPeerResolved)
+					HLNetUdpArpProbe;
+
+				HLNetParseFromClient(&hl_net_udp_in, slot, server_time);
+			}
+
+qsv_udp_next:
+		}
+	}
+
+	while (HLNetServerGetMessage(in))
+	{
+		in->read    = 0;
+		in->badread = FALSE;
+
+		while (in->read < in->len)
+		{
+			cmd = HLMsgReadByte(in);
+			if (in->badread)
+				return FALSE;
+
+			switch (cmd)
+			{
+				case HLCLC15_NOP:
+					break;
+
+				case HLCLC15_MOVE:
+					if (!HLNetServerReadMove(in, ent, server_time))
+						return FALSE;
+					break;
+
+				case HLCLC15_DISCONNECT:
+					return TRUE;
+
+				case HLCLC15_STRINGCMD:
+					HLMsgReadString(in, hl_net_cmd_line, 128);
+					HLNetServerExecStringCmd(local_slot, hl_net_cmd_line);
+					break;
+
+				default:
+					return FALSE;
+			}
+		}
+	}
+
+	return TRUE;
+}
+
+U0 HLSvRunClients(F64 dt, F64 now)
+{
+	F64	ang[3];
+	F64	forward[3];
+	F64	right[3];
+	F64	upv[3];
+	F64	org[3];
+	F64	vel[3];
+	F64	wish_move[3];
+	F64	wishspeed;
+	I64	i;
+	I64	j;
+	I64	water_level;
+	I64	water_type;
+	Bool	on_ground;
+
+	if (dt < 0.0)
+		dt = 0.0;
+
+	for (i = 0; i < HLSV_MAX_CLIENTS; i++)
+	{
+		if (hl_sv_clients[i].active && !hl_sv_clients[i].local &&
+			hl_net_pl[i].active)
+		{
+			HLVecCopy(hl_sv_clients[i].angles, ang);
+			HLVecCopy(hl_net_pl[i].origin, org);
+			HLVecCopy(hl_net_pl[i].velocity, vel);
+			on_ground = hl_net_pl[i].on_ground;
+
+			water_level = 0;
+			water_type  = 0;
+			if (hl_map)
+				water_level = HLWaterLevelGet(hl_map, org, &water_type);
+
+			HLAngleVectors(ang, forward, right, upv);
+			wish_move[0] = forward[0] * hl_sv_clients[i].cmd[0] +
+				right[0] * hl_sv_clients[i].cmd[1];
+			wish_move[1] = forward[1] * hl_sv_clients[i].cmd[0] +
+				right[1] * hl_sv_clients[i].cmd[1];
+			wish_move[2] = forward[2] * hl_sv_clients[i].cmd[0] +
+				right[2] * hl_sv_clients[i].cmd[1] + hl_sv_clients[i].cmd[2];
+			if (water_level < 2)
+				wish_move[2] = 0.0;
+
+			wishspeed = HLVecLength(wish_move);
+			if (wishspeed > 0.0)
+				HLVecNormalize(wish_move);
+
+			//mover 0: no edict to write the reached position onto.
+			if (hl_map)
+				HLPlayerMove(hl_map, org, vel, wish_move, wishspeed,
+					hl_sv_clients[i].jump, dt, &on_ground, water_level,
+					FALSE, ang, 0);
+
+			HLVecCopy(org, hl_net_pl[i].origin);
+			HLVecCopy(vel, hl_net_pl[i].velocity);
+			HLVecCopy(ang, hl_net_pl[i].angles);
+			hl_net_pl[i].on_ground = on_ground;
+			HLNetPlayerSnapMove(i, water_level);
+
+			for (j = 0; j < 3; j++)
+			{
+				hl_sv_clients[i].origin[j]   = org[j];
+				hl_sv_clients[i].velocity[j] = vel[j];
+			}
+			hl_sv_clients[i].on_ground = on_ground;
+		}
+	}
+
+	HLSvCheckTimeouts(now);
+}
+
+
+F64		hl_sv_host_time	= 0.0;
+F64		hl_sv_host_accum	= 0.0;
+Bool	hl_sv_host_ready	= FALSE;
+
+#define HLSV_HOST_CATCHUP	4
+
+U0 HLSvHostTickInit()
+{
+	hl_sv_host_time  = 1.0;
+	hl_sv_host_accum = 0.0;
+	hl_sv_host_ready = TRUE;
+}
+
+HLSvHostTickInit;
+
+I64 HLSvHostClaimLocal(F64 *origin, F64 *angles, U8 *name, I64 top, I64 bottom)
+{
+	F64	org[3];
+	F64	ang[3];
+	I64	slot;
+
+	if (!hl_udp_ready || !hl_udp_server)
+		return -1;
+
+	if (hl_sv_local_slot >= 0)
+		return hl_sv_local_slot;
+
+	HLSvMaxClientsSet(HLSV_MAX_CLIENTS);
+
+	slot = HLSvAddClient(0, TRUE, 0, tS);
+	if (slot < 0)
+	{
+		HLLog("net: no free slot for the host\n");
+		return -1;
+	}
+
+	if (name && name[0])
+		HLStrCopy(hl_sv_clients[slot].name, name, 32);
+	else
+		HLStrCopy(hl_sv_clients[slot].name, "player", 32);
+
+	hl_sv_clients[slot].top    = top & 15;
+	hl_sv_clients[slot].bottom = bottom & 15;
+	hl_sv_clients[slot].team   = (bottom & 15) + 1;
+
+	HLVecSet(org, 0.0, 0.0, 0.0);
+	HLVecSet(ang, 0.0, 0.0, 0.0);
+	if (origin)
+		HLVecCopy(origin, org);
+	if (angles)
+		HLVecCopy(angles, ang);
+
+	HLNetPlayerActivate(slot, org, ang, top, bottom);
+
+	StrPrint(hl_net_cmd_line, "net: host slot %d, maxclients %d\n",
+		slot, hl_sv_maxclients);
+	HLLog(hl_net_cmd_line);
+
+	return slot;
+}
+
+U0 HLSvHostTick(F64 now, F64 dt, F64 step, F64 *origin, F64 *angles,
+	F64 *velocity, Bool on_ground, F64 health)
+{
+	I64 steps = 0;
+
+	if (!hl_udp_ready || !hl_udp_server)
+		return;
+	if (!hl_sv_host_ready)
+		HLSvHostTickInit;
+
+	if (dt < 0.0)
+		dt = 0.0;
+	if (step <= 0.0)
+		return;
+
+	hl_sv_host_accum += dt;
+
+	while (hl_sv_host_accum >= step && steps < HLSV_HOST_CATCHUP)
+	{
+		if (hl_sv_local_slot >= 0)
+			HLNetPublishPlayer(hl_sv_local_slot, origin, angles, velocity,
+				on_ground, health);
+
+		HLNetServerReadClient(0, hl_sv_host_time);
+		HLSvRunClients(step, now);
+
+		hl_sv_host_time  += step;
+		hl_sv_host_accum -= step;
+		steps++;
+
+		HLNetServerFrame(0, hl_sv_host_time);
+	}
+
+	if (hl_sv_host_accum > step)
+		hl_sv_host_accum = 0.0;
+}
+
+
+F64 HLNetLerpFrac()
+{
+	F64 f;
+	F64 frac;
+	F64 now;
+
+	if (!HLClientMode || HLCvarGet("cl_nolerp") != 0.0)
+		return 1.0;
+
+	f = hl_net_msgtime - hl_net_msgtime_prev;
+	if (f <= 0.0)
+		return 1.0;
+
+	if (f > 0.1)
+	{
+		hl_net_msgtime_prev = hl_net_msgtime - 0.1;
+		f = 0.1;
+	}
+
+	if (hl_demo_playing)
+		now = hl_demo_clock;
+	else
+		now = hl_cl_clock;
+
+	frac = (now - hl_net_msgtime_prev) / f;
+
+	if (frac < 0.0)
+		frac = 0.0;
+	else if (frac > 1.0)
+		frac = 1.0;
+
+	return frac;
+}
+
+U0 HLNetDrawEntities(CHLCanvas *c, CHLMap *map, F64 *view_origin, F64 max_dist,
+	I64 client_ent)
+{
+	CHLEntState	*e;
+	F64			 eorg[3];
+	F64			 d[3];
+	CHLMdl		*mdl;
+	CHLStudio	*st_mdl;
+	I64			 i;
+	I64			 frame;
+	I64			 bm;
+	I64			 top;
+	I64			 bottom;
+	F64			 eyaw;
+	F64			 eang[3];
+	F64			 edraw[3];
+	F64			 delta[3];
+	F64			 frac;
+	F64			 f;
+	F64			 cyc;
+	F64			 dang;
+	I64			 k;
+	U8			*name;
+
+	frac = HLNetLerpFrac;
+
+	for (i = 1; i < hl_net_num_ents && i < HLNET_MAX_ENTS; i++)
+	{
+		e = &hl_net_cl[i];
+
+		if (!e->active)
+			goto qnd_next;
+
+		if (e->msgtime < hl_cl.time - 0.1)
+			goto qnd_next;
+
+		if (i == client_ent)
+			goto qnd_next;
+
+		if (e->modelindex <= 0 || e->modelindex >= hl_precache_model_count)
+			goto qnd_next;
+
+		HLVecCopy(e->origin, eorg);
+		HLVecCopy(e->angles, eang);
+
+		if (!e->forcelink && frac < 1.0)
+		{
+			f = frac;
+			for (k = 0; k < 3; k++)
+			{
+				delta[k] = e->origin[k] - e->prev_origin[k];
+				if (delta[k] > 100.0 || delta[k] < -100.0)
+					f = 1.0;
+			}
+
+			for (k = 0; k < 3; k++)
+			{
+				eorg[k] = e->prev_origin[k] + f * delta[k];
+
+				dang = e->angles[k] - e->prev_angles[k];
+				if (dang > 180.0)
+					dang -= 360.0;
+				else if (dang < -180.0)
+					dang += 360.0;
+				eang[k] = e->prev_angles[k] + f * dang;
+			}
+		}
+
+		name = hl_precache_model[e->modelindex];
+
+		if (i <= HLSV_MAX_CLIENTS)
+		{
+			st_mdl = HLNetPlayerStudio();
+			if (st_mdl)
+			{
+				HLVecSub(eorg, view_origin, d);
+				if (HLVecLength(d) <= max_dist)
+				{
+					cyc = hl_cl.time - ToF64(ToI64(hl_cl.time));
+					HLStudioDraw(c, st_mdl, eorg, eang, hl_net_pl_seq,
+						cyc, 0.0, 0, 0, HLLightPoint(map, eorg));
+				}
+			}
+
+			goto qnd_next;
+		}
+
+		if (name[0] == '*')
+		{
+			bm = HLClipBrushModel(e->modelindex);
+			if (bm > 0)
+				HLDrawBrushModel(c, map, bm, eorg);
+			goto qnd_next;
+		}
+
+		HLVecSub(eorg, view_origin, d);
+		if (HLVecLength(d) > max_dist)
+			goto qnd_next;
+
+		if (!StrICompare(name, "progs/player.mdl"))
+		{
+			top    = (e->colormap >> 4) & 15;
+			bottom = e->colormap & 15;
+			mdl    = HLMdlPreviewGet(top, bottom);
+		}
+		else
+			mdl = hl_precache_mdl[e->modelindex];
+
+		if (!mdl)
+			goto qnd_next;
+
+		if (mdl->flags)
+		{
+			if (e->trail_valid)
+			{
+				if (mdl->flags & HLMDLF_ROCKET)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_ROCKET, tS);
+				else if (mdl->flags & HLMDLF_GRENADE)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_SMOKE, tS);
+				else if (mdl->flags & HLMDLF_GIB)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_BLOOD, tS);
+				else if (mdl->flags & HLMDLF_ZOMGIB)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_SLIGHT, tS);
+				else if (mdl->flags & HLMDLF_TRACER)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_TRACER, tS);
+				else if (mdl->flags & HLMDLF_TRACER2)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_TRACER2, tS);
+				else if (mdl->flags & HLMDLF_TRACER3)
+					HLPartTrail(e->trail_org, eorg, HLTRAIL_VOOR, tS);
+			}
+
+			HLVecCopy(eorg, e->trail_org);
+			e->trail_valid = TRUE;
+		}
+
+		frame = e->frame;
+		if (frame < 0 || frame >= mdl->num_frames)
+			frame = 0;
+
+		eyaw = eang[1];
+		if (mdl->flags & HLMDLF_ROTATE)
+			eyaw = HLAngleNorm(100.0 * hl_cl.time);
+
+		edraw[0] = eang[0];
+		edraw[1] = eyaw;
+		edraw[2] = eang[2];
+
+		HLMdlDrawAngles(c, mdl, frame, eorg, edraw, HLLightPoint(map, eorg));
+
+qnd_next:
+	}
+}
+
+Bool HLNetClientFrame()
+{
+	CHLMsg	*in = &hl_net_recv;
+	Bool	 ok  = TRUE;
+	I64		 n;
+	I64		 ret;
+	I64		 guard = 0;
+	U8		 dline[128];
+	U32		 from_ip;
+
+	if (hl_demo_playing)
+	{
+		if (hl_demo_last_t > 0.0)
+			hl_demo_clock += tS - hl_demo_last_t;
+
+		hl_demo_last_t = tS;
+
+		while (TRUE)
+		{
+			if (hl_cl_signon >= 4 && !hl_demo_timed)
+			{
+				hl_demo_clock = hl_net_msgtime;
+				hl_demo_timed = TRUE;
+			}
+
+			if (hl_cl_signon >= 4 && hl_demo_clock <= hl_net_msgtime)
+				break;
+
+			if (!HLDemoReadMessage(in))
+			{
+				StrPrint(dline,
+					"demo: %s ended at %d/%d, signon %d, %d messages\n",
+					hl_demo_name, hl_demo_pos, hl_demo_size, hl_cl_signon, guard);
+				HLLog(dline);
+				HLLogFlush;
+
+				if (hl_demo_loop)
+				{
+					if (!HLDemoNextInLoop)
+						HLDemoStop;
+				}
+				else
+					HLDemoStop;
+
+				break;
+			}
+
+			hl_net_parsed++;
+
+			if (!HLNetClientParse(in))
+			{
+				HLLog("demo: parse failed, stopping playback\n");
+				HLLogFlush;
+				hl_demo_loop = FALSE;
+				HLDemoStop;
+				return FALSE;
+			}
+
+			if (hl_net_join_pending)
+				break;
+
+			guard++;
+			if (guard > 1024)
+			{
+				StrPrint(dline,
+					"demo: %d messages without reaching signon 4 (at %d), "
+					"stopping\n", guard, hl_cl_signon);
+				HLLog(dline);
+				HLLogFlush;
+				hl_demo_loop = FALSE;
+				HLDemoStop;
+				return FALSE;
+			}
+		}
+
+		hl_net_need_prespawn = FALSE;
+		hl_net_need_spawn    = FALSE;
+		hl_net_need_begin    = FALSE;
+
+		return ok;
+	}
+
+	if (hl_udp_ready && !hl_udp_server)
+	{
+		if (hl_cl_clock_last > 0.0)
+			hl_cl_clock += tS - hl_cl_clock_last;
+		hl_cl_clock_last = tS;
+
+		if (hl_cl_clock > hl_net_msgtime || hl_cl_clock < hl_net_msgtime_prev)
+			hl_cl_clock = hl_net_msgtime;
+	}
+
+	while (HLNetGetMessage(in))
+	{
+		hl_net_parsed++;
+		HLDemoSetRecordAngles(hl_cl.view_angles);
+		HLDemoWriteMessage(in);
+		if (!HLNetClientParse(in))
+			ok = FALSE;
+	}
+
+	if (hl_udp_ready && !hl_udp_server)
+	{
+		HLNetDgrmTick(tS);
+		HLNet48ClientTick(tS);
+		HLNet48Tick(tS);
+
+		if (hl_net48_cl_state == 3)
+			hl_net_protocol = 48;
+
+		n = 0;
+		while (n < 16)
+		{
+			from_ip = 0;
+			ret = HLNetDgrmRecv(in, &from_ip);
+			if (!ret && !from_ip)
+				break;
+			n++;
+
+			if (ret == 4)
+			{
+				if (hl_ctl_accepted && !hl_net_join_pending)
+					HLNetClientSendIdent(hl_ctl_name, hl_ctl_top, hl_ctl_bottom);
+				goto qcf_next;
+			}
+
+			if (ret != 1 && ret != 2)
+				goto qcf_next;
+
+			in->read       = 0;
+			in->badread    = FALSE;
+			in->overflowed = FALSE;
+			hl_net_parsed++;
+			HLDemoSetRecordAngles(hl_cl.view_angles);
+			HLDemoWriteMessage(in);
+			if (!HLNetClientParse(in))
+				ok = FALSE;
+
+qcf_next:
+		}
+	}
+
+	if (hl_net_need_prespawn && !hl_net_join_pending && !hl_change_pending &&
+		hl_udp_ready && !hl_udp_server && hl_map)
+	{
+		hl_net_need_prespawn = FALSE;
+		HLLog("net: cl -> prespawn\n");
+		HLLogFlush;
+		HLNetClientSendStringCmd("prespawn");
+	}
+	if (hl_net_need_spawn)
+	{
+		hl_net_need_spawn = FALSE;
+		HLLog("net: cl -> spawn\n");
+		HLLogFlush;
+		HLNetClientSendStringCmd("spawn");
+	}
+	if (hl_net_need_begin)
+	{
+		hl_net_need_begin = FALSE;
+		HLLog("net: cl -> begin\n");
+		HLLogFlush;
+		HLNetClientSendStringCmd("begin");
+	}
+
+	return ok;
+}

@@ -1,46 +1,37 @@
 # Roadmap
 
-Ideas and feedback are welcome: open an [issue](https://github.com/SunSinD/Relic-OS/issues)
-or reply in the TempleOS Discord thread.
+Ideas and bug reports: open an [issue](https://github.com/SunSinD/Relic-OS/issues).
 
-## Done (v0.4.0)
+## Done (v0.5.0)
 
-- Dark desktop with wallpaper, dock and a status bar (version, date, time, FPS)
-- Dock apps: Files, Editor, Shell, Games, Tasks, Memory, SysInfo, Help
-- Help page with a tribute to Terry A. Davis and a key list
-- Games menu: DOOM (TOOM port) and the TempleOS games
-- DOOM in colour at 30 fps in a VM, with mouse look
-- Fast display driver for VMs (VMware SVGA II, Bochs VBE), plain VGA elsewhere
-- Live CD with an install prompt
-- Broken start-up code opens a terminal instead of the debugger
-- Fixed a Titanium crash that is also in stock TempleOS
+- Matte-black desktop with the Reaper wallpaper, taskbar and Start menu with search
+- Browser, Files, Paint, Calculator, Calendar, Notes and Settings
+- Settings that stay after a reboot
+- 28 games, including DOOM, Tetris, Scorch, Sudoku and Chess
+- Networking with plain HTTP pages
+- Loading screen and automatic boot to the desktop
+- Mouse works in VMware without capturing it
+- Shell command history and a `help` command
 
-## Next (v0.5)
+## Next
 
-- [ ] Files: browse folders and open files in the Editor
-- [ ] Editor: pick which file to open
-- [ ] Shell: command history with Up/Down
-- [ ] Dark colours for popups and the Editor
-- [ ] Demo games full screen
-- [ ] Dock: show which app was clicked
+- [ ] HTTPS in the Browser
+- [ ] Graphical Tasks, Memory and System apps
+- [ ] Image viewer and Paint with more tools
+- [ ] Game thumbnails in the Games library
 
 ## Later
 
-- [ ] Settings app (colours, wallpaper)
-- [ ] Settings that stay after a reboot
-- [ ] Boot splash screen
-- [ ] DOOM music (needs a sound card driver)
-- [ ] TempleCraft in the Games menu
-- [ ] Automatic boot test (boot the ISO, take a screenshot, compare)
+- [ ] 1080p desktop (the experimental build in `src/platform/`)
+- [ ] Sound (DOOM music)
+- [ ] TempleCraft in Games
+- [ ] Automatic boot test for every release
 
 ## Known issues
 
-- Long Memory and Tasks reports scroll over the status bar
-- Blank lines between Games menu sections don't show
-- Shell: after a line of exactly 80 characters, the text stays shifted one column
-- DOOM tan walls look greyish (16-colour limit)
-- First boot after installing can be slow for about a minute in QEMU without acceleration
+- The screen is 640x480, so VMs that stretch the window make it look soft
+- A few TempleOS games open their own plain windows (ToTheFront, Tree Checkers)
+- Tasks, Memory and System show plain text reports
+- QEMU without hardware acceleration is slow on the first boot after installing
 
-For developers: the dev loop and HolyC gotchas are in
-[docs/vmware-workflow.md](../docs/vmware-workflow.md), every change is in
-[CHANGELOG.md](../CHANGELOG.md).
+Every change is in [CHANGELOG.md](../CHANGELOG.md).

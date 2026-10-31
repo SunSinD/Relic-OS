@@ -1,4 +1,4 @@
-# Relic OS — Project Identity
+# Relic OS: Project Identity
 
 ## What Relic OS Is
 

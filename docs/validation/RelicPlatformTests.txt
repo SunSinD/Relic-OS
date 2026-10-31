@@ -1,0 +1,10 @@
+PASS TempleOS A glyph
+PASS settings key boundary
+PASS missing setting default
+PASS zero-size settings output preserved
+PASS settings string bound
+PASS preferences written and read back
+PASS original music skin PNG decoder
+PASS disk write and read back
+MEASURE 596 frames over 9.930 seconds: 60.012 FPS
+RESULT 8 passed, 0 failed

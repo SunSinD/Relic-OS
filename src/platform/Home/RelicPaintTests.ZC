@@ -1,0 +1,52 @@
+I64 RelicPaintPassed, RelicPaintFailed;
+U0 RelicPaintCheck(Bool ok, U8 *name)
+{
+    if (ok) { RelicPaintPassed++; "PASS %s\n", name; }
+    else { RelicPaintFailed++; "FAIL %s\n", name; }
+}
+
+#include "::/Apps/yPainter/YPDef"
+#include "::/Apps/yPainter/YPImage"
+#include "::/Apps/yPainter/YPBrush"
+#include "::/Apps/yPainter/YPTool"
+#include "::/Apps/yPainter/YPFile"
+
+U0 RelicPaintTests()
+{
+    I64 n, read_n;
+    U8 *buf, *read_back;
+    U32 *pixels;
+    Bool ok;
+    CYPFileLayer *fl;
+    DocClear;
+    RelicPaintPassed = RelicPaintFailed = 0;
+    MemSet(&yp, 0, sizeof(CYPGlobals));
+    YPDocNew(8, 8);
+    yp.layer[0].px[9] = 0xFF123456;
+    buf = YPDocSerialize(&n);
+    ok = YPDocDeserialize(buf, n);
+    RelicPaintCheck(ok && yp.layer[0].px[9] == 0xFF123456, "layered document round trip");
+    pixels = yp.layer[0].px;
+    ok = YPDocDeserialize(buf, n - 1);
+    RelicPaintCheck(!ok && yp.layer[0].px == pixels && pixels[9] == 0xFF123456, "truncated drawing preserves open document");
+    fl = buf + sizeof(CYPFileHdr);
+    fl->data_size = -1;
+    ok = YPDocDeserialize(buf, n);
+    RelicPaintCheck(!ok && yp.layer[0].px == pixels, "negative layer length rejected");
+    Free(buf);
+    ok = YPSaveYPT("::/Tmp/RelicPaintTest.YPT");
+    yp.layer[0].px[9] = 0;
+    ok = ok && YPLoadYPT("::/Tmp/RelicPaintTest.YPT");
+    RelicPaintCheck(ok && yp.layer[0].px[9] == 0xFF123456, "drawing saved and reopened from disk");
+    ok = YPExportTGA("::/Tmp/RelicPaintTest.TGA");
+    read_back = FileRead("::/Tmp/RelicPaintTest.TGA", &read_n);
+    RelicPaintCheck(ok && read_back && read_n == 274, "TGA export written");
+    Free(read_back);
+    YPLayerFreeAll;
+    Free(yp.comp); Free(yp.grp); Free(yp.snap); Free(yp.acc); Free(yp.sel); Free(yp.flt);
+    "RESULT %d passed, %d failed\n", RelicPaintPassed, RelicPaintFailed;
+    buf = DocSave(DocPut, &n);
+    FileWrite("::/Tmp/RelicPaintTests.DD", buf, n);
+    Free(buf);
+}
+RelicPaintTests;

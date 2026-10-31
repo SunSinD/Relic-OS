@@ -1,0 +1,52 @@
+// build and launch entry point.
+//
+// single-pass compiler: a file can only reference symbols from an earlier one,
+// so this order is load-bearing
+//
+
+Cd(__DIR__);;
+
+#include "QFmt"
+#include "QPak"
+#include "QPal"
+#include "QMath"
+#include "QNet"
+
+// net stack is not loaded here - the NIC probe throws with no supported card
+// and drags in TCP/TLS/HTTP. RunNet.ZC loads it first, then this file.
+
+#include "QNetUdp"
+#include "QNetDgrm"
+#include "QDemo"
+#include "QBSP"
+#include "QVis"
+#include "QPhys"
+#include "QDraw"
+#include "QMDL"
+#include "QSpr"
+#include "QPart"
+#include "QSound"
+#include "QWad"
+#include "QProgs"
+#include "QClip"
+#include "QBuiltin"
+#include "QEnt"
+#include "QGame"
+#include "QNetSv"
+#include "QSave"
+#include "QPlayer"
+#include "QSbar"
+#include "QCsqc"
+#include "QMenu"
+#include "QTest"
+#include "Quake"
+
+//own task, not the terminal task: Quake shares the arena holding the compiler
+//CCompCtrl and the lexer document, and a spawned task gets its own heap.
+//
+//boot core only - the window manager composites draw_it for tasks there.
+Spawn(&Quake, NULL, "QuakePlus");
+
+//QTest is not run here - Quake DocClears on startup. symbols stay live in this
+//task, so run QTest; from the prompt after quitting.
+"\nType $$LTBLUE$$QTest;$$FG$$ to run the data-layer self-check.\n";

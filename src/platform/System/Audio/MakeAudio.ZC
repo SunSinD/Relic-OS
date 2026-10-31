@@ -1,0 +1,20 @@
+Cd(__DIR__);;
+//AudioDev selects a driver, so every driver must already be compiled in
+#include "AudioDef"
+#include "Mixer"
+#include "Driver/AC97"
+#include "Driver/HDA"
+#include "AudioDev"
+
+//ZealC has a single global symbol table; a per-app copy of a codec collides when two apps are loaded
+#include "Lib/MP3Tables"
+#include "Lib/MP3"
+#include "Lib/Ogg"
+#include "Lib/VorbisBook"
+#include "Lib/VorbisSetup"
+#include "Lib/VorbisTables"
+#include "Lib/VorbisFloor"
+#include "Lib/VorbisResidue"
+#include "Lib/VorbisMDCT"
+#include "Lib/VorbisAudio"
+Cd("..");;

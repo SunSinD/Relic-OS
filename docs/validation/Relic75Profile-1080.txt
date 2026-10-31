@@ -1,0 +1,14 @@
+
+756 frames,  8.423 ms/frame composed, 118.7 fps ceiling
+
+Frame starts: avg 13.220 ms, max 14.719 ms, 0 over 16.667 ms
+
+stage                  ms      pct
+TextBG              0.537      6.4
+TextFG              0.859     10.2
+Tasks               0.513      6.1
+BlotColor8          3.041     36.1
+WinLayer            0.001      0.0
+Overlay             0.001      0.0
+FinalUpdate         0.013      0.2
+Blit32              3.458     41.1

@@ -4,6 +4,7 @@
 // on the very next boot.
 
 #include "::/Home/RelicOS/RelicTheme.HC"
+#include "::/Home/RelicOS/RelicShellHelp.HC"
 
 // Fast display on virtual machines (VMware SVGA II or Bochs/QEMU VBE);
 // plain VGA otherwise.  Compiled here in the Adam task so the WinMgr hook
@@ -31,7 +32,30 @@ U0 RelicDisplayStart()
   }
 }
 RelicDisplayStart;
+#include "::/Home/RelicOS/RelicVMMouse.HC"
+#include "::/Home/RelicOS/RelicRefresh.HC"
 
+#include "::/Home/RelicOS/RelicSplash.HC"
+#include "::/Home/RelicOS/RelicURL.HC"
+
+Bool relic_network_ready=FALSE;
+U0 RelicNetworkStart()
+{
+  I64 b,d;
+  Bool found=FALSE;
+  for (b=0;b<256 && !found;b++) for (d=0;d<32 && !found;d++)
+    if (PCIReadU32(b,d,0,0)==0x20001022) found=TRUE;
+  if (found && FileFind("::/Home/RelicOS/Net/Load.HC")) {
+    try {
+      ExeFile("::/Home/RelicOS/Net/Load.HC");
+      relic_network_ready=HashFind("RelicHTTPGet",Fs->hash_table,HTT_FUN)!=NULL;
+      RelicBootLog("Network: PCNet service loaded");
+    } catch {
+      Fs->catch_except=TRUE;
+      RelicBootLog("Network: load failed, offline desktop");
+    }
+  }
+}
 Bool relic_desktop_started = FALSE;
 
 U0 UserStartUp()
@@ -46,7 +70,6 @@ U0 UserStartUp()
   winmgr.show_menu = FALSE;
   AutoComplete(OFF);
   WinFocus;
-  "$FD,DKGRAY$$BD,BLACK$$FG,DKGRAY$$BG,BLACK$";
   DocClear;
   if (!relic_desktop_started) {
     WinBorder(OFF);
@@ -55,7 +78,9 @@ U0 UserStartUp()
     try {
       relic_desktop_started = TRUE;
       RelicBootLog("UserStartUp: RelicBoot.HC");
+      RelicSplashStart;
       ExeFile("::/Home/RelicOS/RelicBoot.HC");
+      throw('RelicDsk');
     } catch {
       Fs->catch_except = TRUE;
       RelicBootLog("UserStartUp: desktop failed, terminal fallback");
@@ -69,8 +94,7 @@ U0 UserStartUp()
       Fs->border_attr = BLACK << 4 | DKGRAY;
       Fs->text_attr = BLACK << 4 | LTGRAY;
       WinBorder(ON);
-      "$FD,LTGRAY$$BD,DKGRAY$$FG,LTGRAY$$BG,BLACK$";
-      DocClear;
+          DocClear;
       "RelicOS desktop failed to start. Terminal fallback ready.\n";
     }
   } else {
@@ -102,8 +126,8 @@ U0 StartUpTasks()
   Fs->text_attr = BLACK << 4 | BLACK;
   Fs->border_attr = BLACK << 4 | BLACK;
   Fs->border_src = 0;
-  "$FD,BLACK$$BD,BLACK$$FG,BLACK$$BG,BLACK$";
   DocClear;
+  RelicNetworkStart;
   RelicBootLog("StartUpTasks: User");
   User;
   RelicBootLog("StartUpTasks: done");

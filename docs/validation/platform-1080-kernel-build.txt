@@ -1,0 +1,200 @@
+Errs:0 Warns:0 Code:2C5CF Size:30110
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Memory/PageTables.ZC,0214",A="FL:C:/Kernel/Memory/PageTables.ZC,214"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Memory/PageTables.ZC,0215",A="FL:C:/Kernel/Memory/PageTables.ZC,215"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'MemWriteCombineSet'.
+$LK,"FL:C:/Kernel/Memory/PageTables.ZC,218"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Memory/PageTables.ZC,0233",A="FL:C:/Kernel/Memory/PageTables.ZC,233"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Memory/PageTables.ZC,0234",A="FL:C:/Kernel/Memory/PageTables.ZC,234"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'LapicTimerInit'.
+$LK,"FL:C:/Kernel/KInterrupts.ZC,176"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/BlkDev/DiskNVMe.ZC,0428",A="FL:C:/Kernel/BlkDev/DiskNVMe.ZC,428"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/BlkDev/DiskNVMe.ZC,0429",A="FL:C:/Kernel/BlkDev/DiskNVMe.ZC,429"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/BlkDev/DiskAddDev.ZC,0271",A="FL:C:/Kernel/BlkDev/DiskAddDev.ZC,271"$
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_hcs'
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_hc_count'
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_xhci'
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_devs'
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_task'
+ParseGlobalVarList © ParseStatement © &LexStatement2Bin © CompJoin $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'usb_boot_iso_drv_let'
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0130",A="FL:C:/Kernel/Usb/KXhci.ZC,130"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0263",A="FL:C:/Kernel/Usb/KXhci.ZC,263"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0266",A="FL:C:/Kernel/Usb/KXhci.ZC,266"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0270",A="FL:C:/Kernel/Usb/KXhci.ZC,270"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0271",A="FL:C:/Kernel/Usb/KXhci.ZC,271"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0278",A="FL:C:/Kernel/Usb/KXhci.ZC,278"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0279",A="FL:C:/Kernel/Usb/KXhci.ZC,279"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0280",A="FL:C:/Kernel/Usb/KXhci.ZC,280"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0313",A="FL:C:/Kernel/Usb/KXhci.ZC,313"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0409",A="FL:C:/Kernel/Usb/KXhci.ZC,409"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0409",A="FL:C:/Kernel/Usb/KXhci.ZC,409"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0409",A="FL:C:/Kernel/Usb/KXhci.ZC,409"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseWhile $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0486",A="FL:C:/Kernel/Usb/KXhci.ZC,486"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0533",A="FL:C:/Kernel/Usb/KXhci.ZC,533"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0533",A="FL:C:/Kernel/Usb/KXhci.ZC,533"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0573",A="FL:C:/Kernel/Usb/KXhci.ZC,573"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0573",A="FL:C:/Kernel/Usb/KXhci.ZC,573"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0574",A="FL:C:/Kernel/Usb/KXhci.ZC,574"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0579",A="FL:C:/Kernel/Usb/KXhci.ZC,579"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0580",A="FL:C:/Kernel/Usb/KXhci.ZC,580"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0581",A="FL:C:/Kernel/Usb/KXhci.ZC,581"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0581",A="FL:C:/Kernel/Usb/KXhci.ZC,581"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0582",A="FL:C:/Kernel/Usb/KXhci.ZC,582"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0583",A="FL:C:/Kernel/Usb/KXhci.ZC,583"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0591",A="FL:C:/Kernel/Usb/KXhci.ZC,591"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0591",A="FL:C:/Kernel/Usb/KXhci.ZC,591"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0606",A="FL:C:/Kernel/Usb/KXhci.ZC,606"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0607",A="FL:C:/Kernel/Usb/KXhci.ZC,607"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0611",A="FL:C:/Kernel/Usb/KXhci.ZC,611"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0611",A="FL:C:/Kernel/Usb/KXhci.ZC,611"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0639",A="FL:C:/Kernel/Usb/KXhci.ZC,639"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0640",A="FL:C:/Kernel/Usb/KXhci.ZC,640"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0641",A="FL:C:/Kernel/Usb/KXhci.ZC,641"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0642",A="FL:C:/Kernel/Usb/KXhci.ZC,642"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0642",A="FL:C:/Kernel/Usb/KXhci.ZC,642"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0643",A="FL:C:/Kernel/Usb/KXhci.ZC,643"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0644",A="FL:C:/Kernel/Usb/KXhci.ZC,644"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0647",A="FL:C:/Kernel/Usb/KXhci.ZC,647"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0648",A="FL:C:/Kernel/Usb/KXhci.ZC,648"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0650",A="FL:C:/Kernel/Usb/KXhci.ZC,650"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0656",A="FL:C:/Kernel/Usb/KXhci.ZC,656"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0657",A="FL:C:/Kernel/Usb/KXhci.ZC,657"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0659",A="FL:C:/Kernel/Usb/KXhci.ZC,659"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0661",A="FL:C:/Kernel/Usb/KXhci.ZC,661"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0662",A="FL:C:/Kernel/Usb/KXhci.ZC,662"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0663",A="FL:C:/Kernel/Usb/KXhci.ZC,663"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0663",A="FL:C:/Kernel/Usb/KXhci.ZC,663"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0664",A="FL:C:/Kernel/Usb/KXhci.ZC,664"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0668",A="FL:C:/Kernel/Usb/KXhci.ZC,668"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0668",A="FL:C:/Kernel/Usb/KXhci.ZC,668"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0682",A="FL:C:/Kernel/Usb/KXhci.ZC,682"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0689",A="FL:C:/Kernel/Usb/KXhci.ZC,689"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0690",A="FL:C:/Kernel/Usb/KXhci.ZC,690"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0691",A="FL:C:/Kernel/Usb/KXhci.ZC,691"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0692",A="FL:C:/Kernel/Usb/KXhci.ZC,692"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0692",A="FL:C:/Kernel/Usb/KXhci.ZC,692"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0693",A="FL:C:/Kernel/Usb/KXhci.ZC,693"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0694",A="FL:C:/Kernel/Usb/KXhci.ZC,694"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0697",A="FL:C:/Kernel/Usb/KXhci.ZC,697"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0701",A="FL:C:/Kernel/Usb/KXhci.ZC,701"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0702",A="FL:C:/Kernel/Usb/KXhci.ZC,702"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0705",A="FL:C:/Kernel/Usb/KXhci.ZC,705"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0705",A="FL:C:/Kernel/Usb/KXhci.ZC,705"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0714",A="FL:C:/Kernel/Usb/KXhci.ZC,714"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0714",A="FL:C:/Kernel/Usb/KXhci.ZC,714"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0714",A="FL:C:/Kernel/Usb/KXhci.ZC,714"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0717",A="FL:C:/Kernel/Usb/KXhci.ZC,717"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0718",A="FL:C:/Kernel/Usb/KXhci.ZC,718"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0718",A="FL:C:/Kernel/Usb/KXhci.ZC,718"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0718",A="FL:C:/Kernel/Usb/KXhci.ZC,718"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0731",A="FL:C:/Kernel/Usb/KXhci.ZC,731"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0739",A="FL:C:/Kernel/Usb/KXhci.ZC,739"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0740",A="FL:C:/Kernel/Usb/KXhci.ZC,740"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseWhile $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0740",A="FL:C:/Kernel/Usb/KXhci.ZC,740"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0744",A="FL:C:/Kernel/Usb/KXhci.ZC,744"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0795",A="FL:C:/Kernel/Usb/KXhci.ZC,795"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0808",A="FL:C:/Kernel/Usb/KXhci.ZC,808"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0809",A="FL:C:/Kernel/Usb/KXhci.ZC,809"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0810",A="FL:C:/Kernel/Usb/KXhci.ZC,810"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0815",A="FL:C:/Kernel/Usb/KXhci.ZC,815"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseWhile $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0829",A="FL:C:/Kernel/Usb/KXhci.ZC,829"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseWhile $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0832",A="FL:C:/Kernel/Usb/KXhci.ZC,832"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0839",A="FL:C:/Kernel/Usb/KXhci.ZC,839"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0839",A="FL:C:/Kernel/Usb/KXhci.ZC,839"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0839",A="FL:C:/Kernel/Usb/KXhci.ZC,839"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0840",A="FL:C:/Kernel/Usb/KXhci.ZC,840"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseWhile $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KXhci.ZC,0871",A="FL:C:/Kernel/Usb/KXhci.ZC,871"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'XhciInitAll'
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbCore.ZC,0026",A="FL:C:/Kernel/Usb/KUsbCore.ZC,26"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbCore.ZC,0394",A="FL:C:/Kernel/Usb/KUsbCore.ZC,394"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0090",A="FL:C:/Kernel/Usb/KUsbHid.ZC,90"$
+ParseFunJoin © ParseFun © ParseGlobalVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Fun header args mismatch 'UsbKbdCB'
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0134",A="FL:C:/Kernel/Usb/KUsbHid.ZC,134"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0134",A="FL:C:/Kernel/Usb/KUsbHid.ZC,134"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0134",A="FL:C:/Kernel/Usb/KUsbHid.ZC,134"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0136",A="FL:C:/Kernel/Usb/KUsbHid.ZC,136"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0136",A="FL:C:/Kernel/Usb/KUsbHid.ZC,136"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0137",A="FL:C:/Kernel/Usb/KUsbHid.ZC,137"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0174",A="FL:C:/Kernel/Usb/KUsbHid.ZC,174"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'UsbHidParseReport'.
+$LK,"FL:C:/Kernel/Usb/KUsbHid.ZC,179"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'UsbHidParseReport'.
+$LK,"FL:C:/Kernel/Usb/KUsbHid.ZC,179"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0216",A="FL:C:/Kernel/Usb/KUsbHid.ZC,216"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0234",A="FL:C:/Kernel/Usb/KUsbHid.ZC,234"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0235",A="FL:C:/Kernel/Usb/KUsbHid.ZC,235"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0242",A="FL:C:/Kernel/Usb/KUsbHid.ZC,242"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0243",A="FL:C:/Kernel/Usb/KUsbHid.ZC,243"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0250",A="FL:C:/Kernel/Usb/KUsbHid.ZC,250"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0251",A="FL:C:/Kernel/Usb/KUsbHid.ZC,251"$
+ParseFunJoin © ParseFun © ParseGlobalVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Fun header args mismatch 'UsbTabletCB'
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0308",A="FL:C:/Kernel/Usb/KUsbHid.ZC,308"$
+ParseFunJoin © ParseFun © ParseGlobalVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Fun header args mismatch 'UsbMouseCB'
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0465",A="FL:C:/Kernel/Usb/KUsbHid.ZC,465"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0465",A="FL:C:/Kernel/Usb/KUsbHid.ZC,465"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHid.ZC,0501",A="FL:C:/Kernel/Usb/KUsbHid.ZC,501"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0167",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,167"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0167",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,167"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0167",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,167"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0168",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,168"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0168",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,168"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0168",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,168"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0186",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,186"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0187",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,187"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0188",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,188"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0190",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,190"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0279",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,279"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0386",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,386"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbMsd.ZC,0405",A="FL:C:/Kernel/Usb/KUsbMsd.ZC,405"$
+ParseFunJoin © ParseFun © ParseGlobalVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Fun header args mismatch 'UsbEcmRxCB'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbEcmSend'
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbEcm.ZC,0152",A="FL:C:/Kernel/Usb/KUsbEcm.ZC,152"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbEcmRecv'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbEcmPresent'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbEcmRep'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbEcmMacAddr'
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbEcm.ZC,0349",A="FL:C:/Kernel/Usb/KUsbEcm.ZC,349"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbEcm.ZC,0361",A="FL:C:/Kernel/Usb/KUsbEcm.ZC,361"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0012",A="FL:C:/Kernel/Usb/KUsbHub.ZC,12"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0012",A="FL:C:/Kernel/Usb/KUsbHub.ZC,12"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0013",A="FL:C:/Kernel/Usb/KUsbHub.ZC,13"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0044",A="FL:C:/Kernel/Usb/KUsbHub.ZC,44"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbHubPortScan'
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0107",A="FL:C:/Kernel/Usb/KUsbHub.ZC,107"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbHubAttach'
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0147",A="FL:C:/Kernel/Usb/KUsbHub.ZC,147"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbHub.ZC,0149",A="FL:C:/Kernel/Usb/KUsbHub.ZC,149"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbAudioPresent'
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0089",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,89"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0090",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,90"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0091",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,91"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0096",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,96"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0111",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,111"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0118",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,118"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0118",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,118"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0119",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,119"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0151",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,151"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0157",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,157"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'UsbAudioParse'.
+$LK,"FL:C:/Kernel/Usb/KUsbAudio.ZC,161"$
+&LexWarn © MemberAdd © ParseVarList © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Duplicate type at in fun 'UsbAudioParse'.
+$LK,"FL:C:/Kernel/Usb/KUsbAudio.ZC,161"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0206",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,206"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseIf $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0241",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,241"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseUnaryTerm $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0248",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,248"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0279",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,279"$
+ParenWarning © ParseExpression2 © ParseExpression © ParseStatement $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbAudio.ZC,0280",A="FL:C:/Kernel/Usb/KUsbAudio.ZC,280"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbAudioAttach'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbAudioDetach'
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbBoot.ZC,0064",A="FL:C:/Kernel/Usb/KUsbBoot.ZC,64"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbRep'
+ParenWarning © ParseExpression2 © ParseExpression © ParseFunCall $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unnecessary parentheses at $LK,"C:/Kernel/Usb/KUsbBoot.ZC,0195",A="FL:C:/Kernel/Usb/KUsbBoot.ZC,195"$
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbTaskMain'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbBootInit'
+UnusedExternWarning © ParseFunJoin © ParseFun © ParseGlobalVarList $FG,12$$BK,1$WARNING:$FG$$BK,0$ Unused extern 'UsbBootDriveFallback'
+Errs:0 Warns:31 Code:429E0 Size:49090
+Copying /Kernel/Kernel.ZXE to /Boot/Kernel.ZXE
+ [ 21.91% ]
+ [ 43.81% ]
+ [ 65.72% ]
+Del Kernel.ZXE
+Modifying partition boot record.

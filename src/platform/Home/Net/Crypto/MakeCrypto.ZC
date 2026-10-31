@@ -1,0 +1,38 @@
+// Crypto module bundle. Include this before TLS.
+
+// Paths are relative to the Net root; Load.ZC has already Cd'ed there.
+#include "Crypto/SHA256"
+#include "Crypto/HMAC"
+#include "Crypto/ChaCha20"
+#include "Crypto/Poly1305"
+#include "Crypto/AEAD"
+#include "Crypto/X25519"
+
+U0 CryptoRandBytes(U8 *out, I64 len)
+{ // RandU32 is not a hardened CSPRNG.
+	I64 i;
+	for (i = 0; i < len; i++)
+		out[i] = RandU32 & 0xFF;
+}
+
+Bool CryptoSelfTest()
+{
+	Bool ok = TRUE;
+
+	"$$LTBLUE$$--- Crypto self-test (RFC known-answer vectors) ---$$FG$$\n";
+
+	if (!SHA256Test)	ok = FALSE;
+	if (!HMACTest)		ok = FALSE;
+	if (!HKDFTest)		ok = FALSE;
+	if (!ChaCha20Test)	ok = FALSE;
+	if (!Poly1305Test)	ok = FALSE;
+	if (!AEADTest)		ok = FALSE;
+	if (!X25519Test)	ok = FALSE;
+
+	if (ok)
+		"$$GREEN$$--- ALL CRYPTO TESTS PASSED ---$$FG$$\n";
+	else
+		"$$RED$$--- CRYPTO TESTS FAILED (do not trust TLS) ---$$FG$$\n";
+
+	return ok;
+}

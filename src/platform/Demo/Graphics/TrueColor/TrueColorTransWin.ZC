@@ -1,0 +1,17 @@
+// Real per-window translucency. WinTranslucent() makes an actual OS window
+
+U0 TransWin()
+{
+	"\nMaking THIS window translucent (alpha 185).\n";
+	"The desktop and any windows behind it show through the background;\n";
+	"the text stays solid so it's still readable.\n\n";
+	"Press any key to make it opaque again.\n";
+
+	WinTranslucent(Fs, 185);
+	PressAKey;
+	WinOpaque;
+
+	"\nOpaque again.\n";
+}
+
+TransWin;

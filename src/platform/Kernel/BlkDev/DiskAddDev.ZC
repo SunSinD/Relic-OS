@@ -1,0 +1,313 @@
+U0 BlkDevLockFwdingSet(CBlkDev *bd)
+{  //If two blkdevs on same controller, use just one lock
+	CBlkDev	*bd1;
+	I64		 i;
+
+	switch (bd->type)
+	{
+		case BDT_RAM:
+			break;
+
+		case BDT_ISO_FILE_READ:
+		case BDT_ISO_FILE_WRITE:
+			bd->lock_fwding = Letter2BlkDev(*bd->file_disk_name);
+			break;
+
+		case BDT_ATA:
+		case BDT_ATAPI:
+			for (i = 0; i < BLKDEVS_NUM; i++)
+			{
+				bd1 = &blkdev.blkdevs[i];
+				if (bd1->bd_signature == BD_SIGNATURE_VAL && bd != bd1 &&
+					(bd1->type == BDT_ATAPI || bd1->type == BDT_ATA) &&
+					bd1->port_num == bd->port_num)
+				{
+					bd->lock_fwding = bd1;
+					break;
+				}
+			}
+			break;
+	}
+}
+
+public Bool BlkDevRawBlksRead(CBlkDev *bd, U8 *buf, I64 blk, I64 count)
+{ // whole-device read, bypassing partition bounds; dispatches on BlkDev type
+	if (bd->type == BDT_USB)
+	{
+		if (fp_usb_msd_blks_read)
+			return (*fp_usb_msd_blks_read)(bd, buf, blk, count);
+		return FALSE;
+	}
+	if (bd->type == BDT_NVME)
+		return NVMeBlksRead(bd, buf, blk, count);
+	return AHCIAtaBlksRead(bd, buf, blk, count);
+}
+
+public Bool BlkDevRawBlksWrite(CBlkDev *bd, U8 *buf, I64 blk, I64 count)
+{ // whole-device write, bypassing partition bounds; dispatches on BlkDev type
+	if (bd->type == BDT_USB)
+	{
+		if (fp_usb_msd_blks_write)
+			return (*fp_usb_msd_blks_write)(bd, buf, blk, count);
+		return FALSE;
+	}
+	if (bd->type == BDT_NVME)
+		return NVMeBlksWrite(bd, buf, blk, count);
+	return AHCIAtaBlksWrite(bd, buf, blk, count);
+}
+
+I64 BlkDevAdd(CBlkDev *bd, I64 prt_num=I64_MIN, Bool whole_drive, Bool make_free)
+{//It will mount just one partition of prt_num>=0.
+//When repartitioing whole drive, whole_drive=TRUE.
+	I64			 i, j, ext_base, offset, res = 0, num = 0;
+	CDrive		*drive;
+	CRedSeaBoot	 br;
+	CMasterBoot	 mbr;
+
+	bd->bd_signature = BD_SIGNATURE_VAL;
+	if (make_free)
+		drive = DriveMakeFreeSlot(bd->first_drive_let);
+	else
+		drive = DriveMakeFreeSlot(DriveNextFreeLet(bd->first_drive_let));
+	drive->bd = bd;
+	drive->drv_offset = bd->drv_offset;
+	drive->size = bd->max_blk + 1 - bd->drv_offset;
+	switch (bd->type)
+	{
+		case BDT_RAM:
+		case BDT_ISO_FILE_READ:
+		case BDT_ISO_FILE_WRITE:
+			drive->drive_signature = DRIVE_SIGNATURE_VAL;
+			drive->prt_num = num;
+			drive->fs_type = FSt_REDSEA;
+//This is to force creation of a RAM
+			//drive during boot, so it is probably
+			//MAlloced to the same address and can
+			//be assumed to be already formatted.
+			//If this line is removed, RAM Drives
+			//will be alloced on a just-in-time
+			//basis.
+			if (BlkDevInit(bd))
+				res++;
+			else
+				drive->drive_signature = 0;
+			break;
+
+		case BDT_ATA:
+		case BDT_USB:
+		case BDT_NVME:
+			drive->drive_signature = DRIVE_SIGNATURE_VAL; //Temporarily validate
+			if (!BlkDevInit(bd))
+				drive->drive_signature = 0; //Revoke validation
+			else
+			{
+				drive->drive_signature = 0; //Revoke validation
+				if (whole_drive)
+				{
+					drive->drive_signature = DRIVE_SIGNATURE_VAL;
+					drive->prt_num = num;
+					res++;
+					drive->fs_type = FSt_REDSEA;
+					drive->size = bd->max_blk + 1 - bd->drv_offset;
+//The following read is a test read.
+					//if it hangs, the drive is not supported.
+					BlkDevRawBlksRead(bd, &mbr, 0, 1);
+					break;
+				}
+				offset = 0;
+				ext_base = INVALID_CLUS;
+				while (prt_num < 0 || num <= prt_num)
+				{
+					BlkDevRawBlksRead(bd, &mbr, offset, 1);
+					if (mbr.signature != 0xAA55)
+						break;
+					j = -1;
+					for (i = 0; i < 4 && (prt_num < 0 || num <= prt_num); i++)
+					{
+						if (mbr.p[i].type)
+						{
+							if (make_free)
+								drive = DriveMakeFreeSlot(bd->first_drive_let + res);
+							else
+								drive = DriveMakeFreeSlot(DriveNextFreeLet(bd->first_drive_let + res));
+							drive->bd			= bd;
+							drive->drv_offset	= mbr.p[i].offset + offset;
+							drive->size 		= mbr.p[i].size;
+							switch (mbr.p[i].type)
+							{
+								case MBR_PT_REDSEA:
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									drive->fs_type = FSt_REDSEA;
+									RedSeaInit(drive);
+									break;
+
+								case MBR_PT_FAT32a:
+								case MBR_PT_FAT32b:
+								case MBR_PT_FAT32c:
+								case MBR_PT_FAT32d:
+								case MBR_PT_FAT32e:
+								case MBR_PT_FAT32f:
+									BlkDevRawBlksRead(bd, &br, drive->drv_offset, 1);
+
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									if (br.signature == MBR_PT_REDSEA)
+									{
+										drive->fs_type = FSt_REDSEA;
+										RedSeaInit(drive);
+									}
+									else
+									{
+										drive->fs_type = FSt_FAT32;
+										FAT32Init(drive);
+									}
+									break;
+
+								case MBR_PT_NTFS:
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									drive->fs_type = FSt_NTFS;
+									break;
+
+								case MBR_PT_LINUX:
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									drive->fs_type = FSt_LINUX;
+									break;
+
+								case MBR_PT_SWAP:
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									drive->fs_type = FSt_SWAP;
+									break;
+
+								case 5:
+								case 15:
+									j = i;
+									break;
+
+								default:
+									drive->drive_signature = DRIVE_SIGNATURE_VAL;
+									drive->prt_num = num;
+									res++;
+									drive->fs_type = FSt_UNKNOWN;
+							}
+							num++;
+						}
+					}
+					if (Letter2BlkDevType(bd->first_drive_let + res) != bd->type)
+						break;
+					if (j < 0)
+						break;
+					if (!mbr.p[j].offset)
+						break;
+					if (ext_base == INVALID_CLUS)
+					{
+						offset = mbr.p[j].offset;
+						ext_base = offset;
+					}
+					else
+						offset = mbr.p[j].offset + ext_base;
+				}
+			}
+			break;
+
+		case BDT_ATAPI:
+			drive->drive_signature = DRIVE_SIGNATURE_VAL;
+			drive->prt_num = num;
+			res++;
+			drive->fs_type = FSt_ISO9660; //Start with this
+			drive->size = 0;
+			break;
+	}
+	if (res)
+		BlkDevLockFwdingSet(bd);
+	else
+		BlkDevDel(bd);
+
+	return res;
+}
+
+Bool DriveEnable(U8 drv_let, Bool val)
+{//Can unmount or remount, but not mount the first time.
+	CDrive *drive;
+
+	if (drive = Letter2Drive(drv_let, FALSE))
+		return !LBEqual(&drive->fs_type, FStf_DISABLE, !val);
+	else
+		return FALSE;
+}
+
+I64 SysI64Get()
+{
+	U8 st[STR_LEN];
+
+	StrNGet(st, STR_LEN, FALSE);
+
+	return Str2I64(st, 16);
+}
+
+U0 BlkDevsInitAll()
+{
+	CBlkDev	*bd;
+	I64		 i;
+
+	blkdev.blkdevs	= CAlloc(sizeof(CBlkDev) * BLKDEVS_NUM);
+	blkdev.drvs		= CAlloc(sizeof(CDrive)  * DRIVES_NUM);
+	for (i = 0; i < DRIVES_NUM; i++)
+		blkdev.let_to_drive[i] = &blkdev.drvs[i];
+
+// self-contained (RAM-distro) boot: ZealBooter loaded the OS image as a limine module and passed its physical address. Mounted as RAM drive B:, already a RedSea filesystem
+	if (sys_ram_distro_base)
+	{
+		bd = BlkDevNextFreeSlot('B', BDT_RAM);
+		bd->RAM_disk = sys_ram_distro_base;
+		bd->max_blk  = (sys_ram_distro_size >> BLK_SIZE_BITS) - 1;
+		if (BlkDevAdd(bd, , TRUE, TRUE))
+		{
+			blkdev.boot_drive_let = 'B';
+			"\nRAM-distro: booting from embedded image, drive B:.\n";
+		}
+	}
+
+	"\nAHCIInit;\n";
+	AHCIInit;
+
+	"\nNVMeInit;\n";
+	NVMeInit;
+
+	"\nUsbBootInit;\n";
+	i = UsbBootInit;
+
+// a RAM-distro already has its boot drive (B: above), and the kernel_config mount code targets install hardware, so skip it; otherwise run it wrapped so a failed mount falls through to UsbBootDriveFallback(). The #exe compiler directives stay OUTSIDE the runtime try
+	if (!sys_ram_distro_base)
+	{
+		#exe {
+			StreamPrint("#exe {Option(OPTf_WARN_PAREN, OFF);}");
+			StreamPrint("try {");
+			if (kernel_config->opts[CONFIG_MOUNT_AHCI_AUTO])
+				StreamPrint("MountAHCIAuto;");
+			StreamDoc(kernel_config->add_dev);
+			StreamPrint("} catch { \"\\nBoot mount code failed (missing hardware?).\\n\"; Fs->catch_except = TRUE; }");
+			StreamPrint("#exe {Option(OPTf_WARN_PAREN, ON);}");
+		};
+	}
+
+	UsbBootDriveFallback;
+
+	if (!DriveCheck(Letter2Drive(blkdev.boot_drive_let, FALSE), FALSE))
+	{
+		"\nBoot drive %C: did not mount (no AHCI/USB/RAM boot device).\n\n"
+		"If in IDE compatibility mode, switch to SATA mode.\n"
+		"If running in a VM, ensure disks are organized under a SATA controller.\n\n"
+		"Rebooting in 10 seconds...\n", blkdev.boot_drive_let;
+		Sleep(10*1000);
+		Reboot;
+	}
+}

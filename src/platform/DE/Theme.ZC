@@ -1,0 +1,100 @@
+//YKD DE theme - one palette shared by the taskbar, widget toolkit and
+//window chrome. All entries are ColorRGB() pens (ROPF_TRUE_COLOR set).
+//RelicOS: matte black/grey/white by default. de_theme.mono drops the hue
+//accents to greys; Settings can turn it off to get YDE's colour accents back.
+#define DE_HUE_DEFAULT	216	//Accent out of the box. Here and not DEDef.ZC:
+#define DE_HUE2_DEFAULT	30	//MakeDE.ZC compiles this file first.
+#define DE_MONO_DEFAULT	TRUE
+
+
+class CDETheme
+{
+	CColorROPU32	bar_bg, bar_bg2, bar_edge,
+					chip, chip_hot,
+					bttn, bttn_hot, bttn_focus,
+					panel, panel_edge,
+					win_bg, chrome_bg,
+					text, text_dim,
+					accent, accent_dim,
+					accent2, accent2_dim;
+	I64				hue;  //0..359, driven by the Settings slider.
+	I64				hue2; //Secondary accent, its own slider.
+	Bool			mono; //Matte greys instead of the hue accents.
+} de_theme;
+
+CColorROPU32 DEHue2RGB(I64 hue, I64 s, I64 v)
+{//HSV to a ColorRGB() pen. hue 0..359, s/v 0..255. Integer math only.
+	I64 r, g, b, i, f, p, q, t;
+
+	hue = ClampI64(hue, 0, 359);
+	i = hue / 60;
+	f = hue % 60;
+	p = v * (255 - s) / 255;
+	q = v * (255 * 60 - s * f) / (255 * 60);
+	t = v * (255 * 60 - s * (60 - f)) / (255 * 60);
+	switch (i)
+	{
+		case 0:	r = v; g = t; b = p; break;
+		case 1:	r = q; g = v; b = p; break;
+		case 2:	r = p; g = v; b = t; break;
+		case 3:	r = p; g = q; b = v; break;
+		case 4:	r = t; g = p; b = v; break;
+		default: r = v; g = p; b = q; break;
+	}
+
+	return ColorRGB(r, g, b);
+}
+
+CColorROPU32 DEThemeHsv(I64 hue, I64 s, I64 v)
+{//Theme accents only. App content colours keep calling DEHue2RGB.
+	if (de_theme.mono)
+		s = 0;
+
+	return DEHue2RGB(hue, s, v);
+}
+
+U0 DEThemeAccentSet(I64 hue)
+{
+	de_theme.hue		= hue;
+	de_theme.accent		= DEThemeHsv(hue, 190, 245);
+	de_theme.accent_dim	= DEThemeHsv(hue, 190, 120);
+	de_theme.chip		= DEThemeHsv(hue, 200, 190);
+	de_theme.chip_hot	= DEThemeHsv(hue, 140, 255);
+	de_theme.bttn_focus	= DEThemeHsv(hue, 170, 105);
+	if (gr.tc_chrome)
+		GuiChromeTrueColor(de_theme.accent, de_theme.chrome_bg, de_theme.accent_dim);
+}
+
+U0 DEThemeAccent2Set(I64 hue)
+{
+	de_theme.hue2			= hue;
+	de_theme.accent2		= DEThemeHsv(hue, 190, 245);
+	de_theme.accent2_dim	= DEThemeHsv(hue, 190, 120);
+}
+
+U0 DEThemeMonoSet(Bool mono)
+{
+	de_theme.mono = mono;
+	DEThemeAccentSet(de_theme.hue);
+	DEThemeAccent2Set(de_theme.hue2);
+}
+
+U0 DEThemeInit()
+{//RelicOS matte neutrals. YDE's originals were blue-tinted (0x14,0x18,0x22 bar).
+	de_theme.bar_bg		= ColorRGB(0x12, 0x12, 0x12);
+	de_theme.bar_bg2	= ColorRGB(0x0A, 0x0A, 0x0A);
+	de_theme.bar_edge	= ColorRGB(0x3A, 0x3A, 0x3A);
+	de_theme.bttn		= ColorRGB(0x1E, 0x1E, 0x1E);
+	de_theme.bttn_hot	= ColorRGB(0x2C, 0x2C, 0x2C);
+	de_theme.panel		= ColorRGB(0x16, 0x16, 0x16);
+	de_theme.panel_edge	= ColorRGB(0x38, 0x38, 0x38);
+	de_theme.win_bg		= ColorRGB(0x0E, 0x0E, 0x0E);
+	de_theme.chrome_bg	= ColorRGB(0x0C, 0x0C, 0x0C);
+	de_theme.text		= ColorRGB(0xEC, 0xEC, 0xEC);
+	de_theme.text_dim	= ColorRGB(0x8C, 0x8C, 0x8C);
+	de_theme.mono		= DE_MONO_DEFAULT;
+	DEThemeAccentSet(DE_HUE_DEFAULT);
+	DEThemeAccent2Set(DE_HUE2_DEFAULT);
+}
+
+DEThemeInit;

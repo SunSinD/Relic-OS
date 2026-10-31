@@ -6,14 +6,22 @@ winmgr.show_menu = FALSE;
 AutoComplete(OFF);
 WinBorder(OFF);
 
+RelicSplashStage("Loading preferences");
 RelicBootLog("RelicBoot: theme");
 // Step 1: Apply dark color palette
 #include "::/Home/RelicOS/RelicTheme.HC"
 RelicThemeApply;
+#include "::/Home/RelicOS/RelicSettings.HC"
+RelicSettingsLoad;
+RelicMatteApply;
 
 // Step 2: Install Relic status strip and chrome suppression helpers
 #include "::/Home/RelicOS/RelicChrome.HC"
 RelicChromeInstall;
+RelicIconsLoad;
+// The stock startup mouse reset must finish before replacing its IRQ.
+while (ms_hard.install_in_progress) Sleep(10);
+VMWMsInit;
 
 // UserStartUp hands us a task with no DolDoc yet; give it a dark terminal
 // so nothing below ever prints in raw mode, then strip the kernel menu and
@@ -22,6 +30,7 @@ if (!DocPut)
   DocTermNew;
 RelicMenuOff;
 
+RelicSplashStage("Preparing desktop");
 RelicBootLog("RelicBoot: wallpaper");
 // Step 3: Load wallpaper bitmap
 #include "::/Home/RelicOS/RelicWallpaper.HC"
@@ -49,6 +58,7 @@ if (relic_dev_action == 2) {
   }
 }
 
+RelicSplashStage("Loading applications");
 RelicBootLog("RelicBoot: desktop");
 // Step 5: Launch desktop
 #include "::/Home/RelicOS/RelicDesktop.HC"

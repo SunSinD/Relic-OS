@@ -1,0 +1,4 @@
+# RelicOS: keep the imported YDE tree byte-exact (CRLF, DolDoc sprites,
+# binary data). The repo root normalizes text to LF; that would change the
+# Git blob hashes recorded in research/upstream/platform-import.json.
+* -text

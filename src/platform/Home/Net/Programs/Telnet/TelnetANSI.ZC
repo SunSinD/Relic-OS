@@ -1,0 +1,396 @@
+// Terminal grid operations + ANSI CSI dispatch.
+// All output mutates the term.screen_ch/screen_attr cell grid; nothing here
+// touches DolDoc. TelnetDrawIt in Telnet.ZC blits the grid every frame.
+
+U8 ANSIColorToVGA(I64 c)
+{ // ANSI SGR base color (0-7) to VGA palette index. Bright variant is | 8.
+  switch (c)
+  {
+    case 0: return BLACK;
+    case 1: return RED;
+    case 2: return GREEN;
+    case 3: return BROWN;
+    case 4: return BLUE;
+    case 5: return PURPLE;
+    case 6: return CYAN;
+    case 7: return LTGRAY;
+  }
+  return LTGRAY;
+}
+
+U0 TermClear()
+{
+  MemSet(term.screen_ch, ' ', TERM_MAX_ROWS * TERM_MAX_COLS);
+  MemSet(term.screen_attr, term.cur_attr, TERM_MAX_ROWS * TERM_MAX_COLS);
+  term.csr_row = 0;
+  term.csr_col = 0;
+}
+
+U0 TermScrollbackPush()
+{ // top screen row is about to be evicted; save it into the history ring
+  MemCopy(term.back_ch   + term.back_head * TERM_MAX_COLS, term.screen_ch,   TERM_MAX_COLS);
+  MemCopy(term.back_attr + term.back_head * TERM_MAX_COLS, term.screen_attr, TERM_MAX_COLS);
+
+  term.back_head = (term.back_head + 1) % TERM_SCROLLBACK_ROWS;
+  if (term.back_count < TERM_SCROLLBACK_ROWS)
+    term.back_count++;
+}
+
+U0 TermScrollbackClear()
+{
+  term.back_head   = 0;
+  term.back_count  = 0;
+  term.view_offset = 0;
+}
+
+U0 TermViewScroll(I64 delta)
+{ // positive = further back into history; clamped to [0, back_count]
+  term.view_offset += delta;
+  if (term.view_offset < 0)
+    term.view_offset = 0;
+  if (term.view_offset > term.back_count)
+    term.view_offset = term.back_count;
+}
+
+U0 TermScrollUp()
+{
+  I64 body = (term.window_height - 1) * TERM_MAX_COLS;
+
+  TermScrollbackPush;
+
+  MemCopy(term.screen_ch,   term.screen_ch   + TERM_MAX_COLS, body);
+  MemCopy(term.screen_attr, term.screen_attr + TERM_MAX_COLS, body);
+  MemSet(term.screen_ch + body, ' ', TERM_MAX_COLS);
+  MemSet(term.screen_attr + body, term.cur_attr, TERM_MAX_COLS);
+}
+
+U0 TermScrollDown()
+{ // rows move down; copy bottom-up because rows overlap in memory
+  I64 r;
+
+  for (r = term.window_height - 1; r > 0; r--)
+  {
+    MemCopy(term.screen_ch   + r * TERM_MAX_COLS, term.screen_ch   + (r - 1) * TERM_MAX_COLS, TERM_MAX_COLS);
+    MemCopy(term.screen_attr + r * TERM_MAX_COLS, term.screen_attr + (r - 1) * TERM_MAX_COLS, TERM_MAX_COLS);
+  }
+  MemSet(term.screen_ch, ' ', TERM_MAX_COLS);
+  MemSet(term.screen_attr, term.cur_attr, TERM_MAX_COLS);
+}
+
+U0 TermLineFeed()
+{
+  term.csr_row++;
+  if (term.csr_row >= term.window_height)
+  {
+    term.csr_row = term.window_height - 1;
+    TermScrollUp;
+  }
+}
+
+U0 TermPutChar(U8 ch)
+{
+  I64 i;
+
+  if (term.csr_col >= term.window_width)
+  { // deferred wrap: the cursor parks one past the edge until the next glyph
+    term.csr_col = 0;
+    TermLineFeed;
+  }
+
+  i = term.csr_row * TERM_MAX_COLS + term.csr_col;
+  term.screen_ch[i]   = ch;
+  term.screen_attr[i] = term.cur_attr;
+  term.csr_col++;
+}
+
+U0 TermCursorSet(I64 row, I64 col)
+{
+  if (row < 0)
+    row = 0;
+  if (row >= term.window_height)
+    row = term.window_height - 1;
+  if (col < 0)
+    col = 0;
+  if (col >= term.window_width)
+    col = term.window_width - 1;
+
+  term.csr_row = row;
+  term.csr_col = col;
+}
+
+U0 TermEraseCells(I64 row, I64 col_start, I64 col_end)
+{ // clear [col_start, col_end) of one row to spaces in the current attribute
+  I64 i = row * TERM_MAX_COLS;
+
+  if (col_start < 0)
+    col_start = 0;
+  if (col_end > term.window_width)
+    col_end = term.window_width;
+  if (col_start >= col_end)
+    return;
+
+  MemSet(term.screen_ch   + i + col_start, ' ', col_end - col_start);
+  MemSet(term.screen_attr + i + col_start, term.cur_attr, col_end - col_start);
+}
+
+U0 TermResize(I64 cols, I64 rows)
+{ // resize terminal + its window. Runs from TerminalTask, so the window task
+  // handle must come from term.win_task, never Fs.
+  CTask *t = term.win_task;
+
+  if (cols < 2 || rows < 2 || cols > TERM_MAX_COLS || rows > TERM_MAX_ROWS || !t)
+    return;
+
+  term.window_width  = cols;
+  term.window_height = rows;
+
+  t->win_width = cols;
+  WinHorz((TEXT_COLS / 2) - (cols / 2),
+          (TEXT_COLS / 2) - (cols / 2) + cols - 1,
+          t);
+  t->win_height = rows;
+  WinVert((TEXT_ROWS / 2) - (rows / 2),
+          (TEXT_ROWS / 2) - (rows / 2) + rows - 1,
+          t);
+
+  TermClear;
+}
+
+U0 TermSGR(I64 *codes, I64 last_index)
+{ // Select Graphic Rendition: colors + intensity. last_index inclusive.
+  I64 m, code;
+
+  for (m = 0; m <= last_index; m++)
+  {
+    code = codes[m];
+
+    if (code == 0)
+    { // reset
+      term.cur_attr = TERM_DEFAULT_ATTR;
+      term.bold = FALSE;
+    }
+    else if (code == 1)
+    { // bold: brighten current foreground and later ones
+      term.bold = TRUE;
+      term.cur_attr |= 8;
+    }
+    else if (code == 2 || code == 22)
+    {
+      term.bold = FALSE;
+      term.cur_attr &= ~8;
+    }
+    else if (code == 7)
+    { // reverse video: swap fg/bg nibbles
+      term.cur_attr = term.cur_attr << 4 | term.cur_attr >> 4;
+    }
+    else if (code >= 30 && code <= 37)
+    {
+      term.cur_attr = term.cur_attr & 0xF0 | ANSIColorToVGA(code - 30);
+      if (term.bold)
+        term.cur_attr |= 8;
+    }
+    else if (code == 39)
+    { // default foreground
+      term.cur_attr = term.cur_attr & 0xF0 | TERM_DEFAULT_ATTR & 0x0F;
+      if (term.bold)
+        term.cur_attr |= 8;
+    }
+    else if (code >= 90 && code <= 97)
+      term.cur_attr = term.cur_attr & 0xF0 | ANSIColorToVGA(code - 90) | 8;
+    else if (code >= 40 && code <= 47)
+      term.cur_attr = term.cur_attr & 0x0F | ANSIColorToVGA(code - 40) << 4;
+    else if (code == 49)
+      term.cur_attr = term.cur_attr & 0x0F | TERM_DEFAULT_ATTR & 0xF0;
+    else if (code >= 100 && code <= 107)
+      term.cur_attr = term.cur_attr & 0x0F | (ANSIColorToVGA(code - 100) | 8) << 4;
+    // 3,4,5,8,9,...: italic/underline/blink/conceal unsupported; ignore
+  }
+}
+
+U0 HandleANSISequence(U8 *sequence)
+{
+  I64 ansi_code[MAX_ANSI_PARAMS];
+  I64 ansi_param_count = 0;
+  I64 n, m, row, col, code;
+  U8  actionCode;
+  U8  response_buf[16];
+  U8 *ptr = sequence;
+
+  MemSet(ansi_code, 0, sizeof(ansi_code));
+
+  while (*ptr != '\0') {
+    if (IsDigit(*ptr)) {
+      ansi_code[ansi_param_count] = ansi_code[ansi_param_count] * 10 + (*ptr - '0');
+      ptr++;
+    } else if (*ptr == ';') {
+      ansi_param_count++;
+      if (ansi_param_count >= MAX_ANSI_PARAMS) {
+        break;
+      }
+      ptr++;
+    } else {
+      break;
+    }
+  }
+
+  if (ansi_param_count >= MAX_ANSI_PARAMS)
+    ansi_param_count = MAX_ANSI_PARAMS - 1; // loops below use m <= ansi_param_count
+
+  actionCode = *ptr;
+
+  switch (actionCode)
+  {
+    case 'A': // cursor up
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row - n, term.csr_col);
+      break;
+
+    case 'B': // cursor down
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row + n, term.csr_col);
+      break;
+
+    case 'C': // cursor right
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row, term.csr_col + n);
+      break;
+
+    case 'D': // cursor left
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row, term.csr_col - n);
+      break;
+
+    case 'E': // cursor next line
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row + n, 0);
+      break;
+
+    case 'F': // cursor previous line
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row - n, 0);
+      break;
+
+    case 'G': // cursor horizontal absolute (1-based)
+      n = ansi_code[0];
+      if (!n) n = 1;
+      TermCursorSet(term.csr_row, n - 1);
+      break;
+
+    case 'H': // cursor position (1-based row;col)
+    case 'f':
+      row = ansi_code[0];
+      col = ansi_code[1];
+      if (!row) row = 1;
+      if (!col) col = 1;
+      TermCursorSet(row - 1, col - 1);
+      break;
+
+    case 'J': // erase in display
+      switch (ansi_code[0])
+      {
+        case 0: // cursor to end of screen
+          TermEraseCells(term.csr_row, term.csr_col, term.window_width);
+          for (m = term.csr_row + 1; m < term.window_height; m++)
+            TermEraseCells(m, 0, term.window_width);
+          break;
+        case 1: // start of screen to cursor
+          for (m = 0; m < term.csr_row; m++)
+            TermEraseCells(m, 0, term.window_width);
+          TermEraseCells(term.csr_row, 0, term.csr_col + 1);
+          break;
+        case 2: // whole screen; ANSI.SYS behavior homes the cursor too
+          TermClear;
+          break;
+      }
+      break;
+
+    case 'K': // erase in line
+      switch (ansi_code[0])
+      {
+        case 0:
+          TermEraseCells(term.csr_row, term.csr_col, term.window_width);
+          break;
+        case 1:
+          TermEraseCells(term.csr_row, 0, term.csr_col + 1);
+          break;
+        case 2:
+          TermEraseCells(term.csr_row, 0, term.window_width);
+          break;
+      }
+      break;
+
+    case 'S': // scroll up n lines
+      n = ansi_code[0];
+      if (!n) n = 1;
+      while (n--)
+        TermScrollUp;
+      break;
+
+    case 'T': // scroll down n lines
+      n = ansi_code[0];
+      if (!n) n = 1;
+      while (n--)
+        TermScrollDown;
+      break;
+
+    case 'm': // colors / intensity
+      TermSGR(ansi_code, ansi_param_count);
+      break;
+
+    case 's': // save cursor
+      term.saved_row = term.csr_row;
+      term.saved_col = term.csr_col;
+      break;
+
+    case 'u': // restore cursor
+      TermCursorSet(term.saved_row, term.saved_col);
+      break;
+
+    case 'n':
+      if (ansi_code[0] == 5)
+      { // device status: report OK
+        StrPrint(response_buf, "\x1B[0n");
+        if (term.sock_ready)
+          TCPSocketSend(term.sock, response_buf, StrLen(response_buf));
+      }
+      else if (ansi_code[0] == 6)
+      { // cursor position report
+        StrPrint(response_buf, "\x1B[%d;%dR", term.csr_row + 1, term.csr_col + 1);
+        if (term.sock_ready)
+          TCPSocketSend(term.sock, response_buf, StrLen(response_buf));
+      }
+      break;
+
+    case 'c': // device attributes: report as VT101
+      StrPrint(response_buf, "\x1B[?1;0c");
+      if (term.sock_ready)
+        TCPSocketSend(term.sock, response_buf, StrLen(response_buf));
+      break;
+
+    case '?': // private modes: ESC [ ? <n> h|l
+      code = 0;
+      ptr++; // move past the marker
+      while (IsDigit(*ptr)) {
+        code = code * 10 + (*ptr - '0');
+        ptr++;
+      }
+      if (code == 25)
+        term.csr_visible = (*ptr == 'h');
+      // 47/1049 alternate screen, 7 wrap, etc: ignored
+      break;
+
+    case 't': // ESC [ 8 ; rows ; cols t : resize request
+      if (ansi_code[0] == 8 && ansi_param_count >= 2)
+        TermResize(ansi_code[2], ansi_code[1]);
+      break;
+
+    default: // L/M insert/delete line, h/l modes, =, r margins: ignored
+      break;
+  }
+}

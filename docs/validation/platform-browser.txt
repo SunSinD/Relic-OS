@@ -1,0 +1,53 @@
+NET READY 1
+--- Crypto self-test (RFC known-answer vectors) ---
+SHA256Test: PASS
+HMACTest: PASS
+HKDFTest: PASS
+ChaCha20Test: PASS
+Poly1305Test: PASS
+AEADTest: PASS
+X25519Test: PASS
+--- ALL CRYPTO TESTS PASSED ---
+Zinc JS tests in ::/Home/Net/Programs/Zinc/Tests
+  ok   C:/Home/Net/Programs/Zinc/Tests/ACCESSOR.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ARR.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ASI.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ASYNC.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/CLASSES.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/CLOSURE.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/COERCE.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/COMMENT.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/CTORFORM.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/CTRL.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/DESTRUCT.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/DOMAPI.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/DOMPROP.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ELATTR.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ERR.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/EVENTS.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/FNPROTO.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/FORIN.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/HOIST.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/HOSTAPI.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ITER.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/LEXNUM.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/MAPSET.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/MINIFY.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/NEWCHAIN.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/NUM.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/NUMFMT.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/OBJ.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/PRIVATE.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/PROMISE.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/PROMISEALL.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/PROTO.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/PROXY.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/REGDIV.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/REGEX.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/STDLIB.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/STR.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/THISBIND.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/URLEVAL.JS
+  ok   C:/Home/Net/Programs/Zinc/Tests/ZINCHOST.JS
+
+40 passed, 0 failed.

@@ -44,7 +44,7 @@ U0 RelicThemeApply()
   GrPaletteSet(pal);
 }
 
-// Safe during boot — no kernel drive-color symbols here.
+// Safe during boot: no kernel drive-color symbols here.
 // Call again after DocTermNew / WinBorder(ON).
 U0 RelicTermDark()
 {

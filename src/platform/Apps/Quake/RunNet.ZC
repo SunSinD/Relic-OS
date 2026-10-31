@@ -1,0 +1,10 @@
+// Quake with networking. Single-pass compiler: UDPSocket must resolve when
+
+Cd(__DIR__);;
+
+#ifndef UDP_MAX_PORT
+#include "::/Home/Net/Load"
+Cd(__DIR__);;
+#endif
+
+#include "Run"

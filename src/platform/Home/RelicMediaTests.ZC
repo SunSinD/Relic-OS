@@ -1,0 +1,33 @@
+U0 RelicMediaTests()
+{
+ CMediaCtx *m;
+ CDC *frame=NULL;
+ I64 ti, count=0, good=0;
+ F64 pts=0.0, last=-1.0;
+ U8 *body;
+ I64 n;
+ DocClear;
+ m=MediaOpen("::/Tmp/MediaTest.mp4");
+ if (m) {
+  ti=MediaTrackFind(m,MEDIA_TRACK_VIDEO);
+  if (ti>=0) {
+   while (MediaVideoDecode(m,m->track[ti].num,&pts)) {
+    if (MediaVideoPresentInto(m,&frame) && frame && pts>=last) good++;
+    last=pts; count++;
+    if (count>100) break;
+   }
+   "Frames decoded: %d, valid pixels/timestamps: %d, final PTS: %.3f\n",count,good,last;
+   if (count==48 && good==48 && last>3.8) "PASS H264 baseline MP4 frame sequence\n";
+   else "FAIL H264 baseline MP4 frame sequence\n";
+   if (MediaSeekKey(m,m->track[ti].num,0.0) &&
+       MediaVideoDecode(m,m->track[ti].num,&pts) && pts<0.1)
+    "PASS seek back to first frame\n";
+   else "FAIL seek back to first frame\n";
+  }
+  MediaClose(m);
+ } else "FAIL open MP4 fixture\n";
+ if (frame) DCDel(frame);
+ body=DocSave(DocPut,&n);
+ FileWrite("::/Tmp/RelicMediaTests.DD",body,n); Free(body);
+}
+RelicMediaTests;
